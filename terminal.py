@@ -224,11 +224,7 @@ class Screen:
         return self._raw
 
 def print_perfect(s, end='\n'):
-    print(f"x={s.x}, y={s.y}, mode={s.mode}", end='')
-    if s.mode == 'esc':
-        print('esc=', s.esc.encode(), end='')
-    print('', end=end)
-    print('+--------+--------+--------+--------+', end=end)
+    print('+---------+---------+---------+---------+', end=end)
     for i in range(len(s.lines)):
         line = s.lines[i]
         if s.y == i:
@@ -236,7 +232,11 @@ def print_perfect(s, end='\n'):
                 line += ' '
             line = line[:s.x] + '\033[7m' + line[s.x:s.x+1] + '\033[0m' + line[s.x+1:]
         print(line, end=end)
-    print('+--------+--------+--------+--------+', end=end)
+    print('+---------+---------+---------+---------+', end=end)
+    print(f"cursor: {{x={s.x+1},y={s.y+1}}}, lines: {len(s.lines)}, mode: {s.mode}", end='')
+    if s.mode == 'esc':
+        print(', esc=', s.esc.encode(), end='')
+    print('', end=end)
 
 def write_and_print(s, i, msg=''):
     print('\033[H\033[2J', end='')

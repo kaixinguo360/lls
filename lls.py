@@ -20,12 +20,14 @@ from terminal import Screen, print_perfect
 old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
 master_fd, slave_fd = pty.openpty()
+winsize = os.get_terminal_size()
 
 def set_winsize(fd, row, col, xpix=0, ypix=0):
     winsize = struct.pack("HHHH", row, col, xpix, ypix)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
 
 def sync_winsize(*args, **kwargs):
+    global winsize
     winsize = os.get_terminal_size()
     set_winsize(slave_fd, winsize.lines, winsize.columns)
 
@@ -47,6 +49,7 @@ proc = subprocess.Popen(
 context = ''
 exit = False
 screen = Screen()
+slave_tty = termios.tcgetattr(slave_fd)
 
 def read_stdout():
     global context
@@ -139,28 +142,29 @@ def prompt_mode():
         cmd_display = cmd.replace('\n', '\n\r')
         flags_display = flags.replace(default, default.upper())
         confirm = read_line(f'(gen-cmd): {cmd_display}{confirm_info} {flags_display} ', cancel='n', begin='\033[2K\r', include_last=False)
+        confirm = confirm.lower()
         if confirm == '':
             confirm = default 
-        if confirm.lower() == 'y' or confirm.lower() == 'yes':
+        if confirm in ['y','yes']:
             save = True
             break
-        elif confirm.lower() == 'u' or confirm.lower() == 'use':
+        elif confirm in ['u','use']:
             break
-        elif confirm.lower() == 'k' or confirm.lower() == 'think':
+        elif confirm in ['n','no','q','quit','exit']:
+            cmd = ''
+            break
+        elif confirm in ['k','think']:
             think_display = think.replace('\n', '\n\r')
             os.write(sys.stdout.fileno(), b'\r')
             os.write(sys.stdout.fileno(), think_display.encode())
-        elif confirm.lower() == 'n' or confirm.lower() == 'no':
-            cmd = ''
-            break
-        elif confirm.lower() == 'r' or confirm.lower() == 're':
+        elif confirm in ['r','re','retry']:
             cmd, think = generate_cmd(prompt, context)
-        elif confirm.lower() == 'e' or confirm.lower() == 'edit':
+        elif confirm in ['e','edit']:
             prompt = read_line('(gen-prompt): ', begin='\033[2K\r', include_last=False, value=prompt)
             if prompt == '':
                 break
             cmd, think = generate_cmd(prompt, context)
-        elif confirm.lower() == 't' or confirm.lower() == 'teach':
+        elif confirm in ['t','teach']:
             default = 'y'
             cmd = read_line(f'(gen-cmd): ', begin='\033[2K\r', include_last=False)
             if cmd == '':
@@ -176,17 +180,29 @@ def line_mode():
     global mode
     mode = 'char'
     cmd = ''
-    while mode == 'char':
+    while True:
         cmd = read_line(begin='\033[2K\r', cancel='q', include_last=False)
-        if cmd == 's' or cmd == 'show':
-            print('\033[2J\033[H\r', end='')
-            print_perfect(screen, end='\r\n')
-        elif cmd == 'r' or cmd == 'raw':
-            print('\033[2J\033[H\r', end='')
-            print(screen.raw(), end='\r\n')
-        elif cmd == 'q' or cmd == 'exit':
+        if cmd == '':
+            pass
+        elif cmd in ['q','quit','exit']:
             print_context()
             return ''
+        elif cmd in ['s','show']:
+            print('\033[2J\033[H\r', end='')
+            print_perfect(screen, end='\r\n')
+        elif cmd in ['r','raw']:
+            print('\033[2J\033[H\r', end='')
+            print(screen.raw(), end='\r\n')
+        elif cmd in ['reset']:
+            print_context()
+            termios.tcsetattr(slave_fd, termios.TCSADRAIN, slave_tty)
+            screen.mode = 'normal'
+            screen.esc = ''
+            return ''
+        elif cmd in ['c','clear']:
+            print('\033[2J\033[H\r', end='')
+        else:
+            read_line(f"{cmd}: command not found", begin='\033[2K\r', max_chars=1)
 
 def char_mode():
     global mode
