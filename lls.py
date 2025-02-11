@@ -5,6 +5,7 @@ import subprocess
 import threading
 import termios
 import string
+import time
 import tty
 import pty
 import sys
@@ -52,12 +53,13 @@ screen = Screen()
 slave_tty = termios.tcgetattr(slave_fd)
 
 def read_stdout():
-    global context
+    global context, mode
     while not exit:
         try:
             chars = os.read(master_fd, 10240)
             if chars:
-                os.write(sys.stdout.fileno(), chars)
+                if mode != 'line':
+                    os.write(sys.stdout.fileno(), chars)
                 if len(chars) == 1 and chars[0] == 127:
                     context = context[:-1]
                 else:
@@ -127,82 +129,108 @@ def save_history(prompt, context, cmd):
 
 def prompt_mode():
     global context, mode
-    mode = 'char'
-    prompt = read_line('(gen-prompt): ', cancel='', begin='\033[2K\r', include_last=False)
-    if prompt == '':
+    try:
+        prompt = read_line('(gen-prompt): ', cancel='', begin='\033[2K\r', include_last=False)
+        if prompt == '':
+            print_context()
+            return ''
+        cmd, think = generate_cmd(prompt, screen.text())
+        confirm_info = ', confirm?'
+        flags = '[y/u/n/e/r/k/t]'
+        default = 'u'
+        save = False
+        show_think = False
+        while True:
+            cmd_display = cmd.replace('\n', '\n\r')
+            flags_display = flags.replace(default, default.upper())
+            confirm = read_line(f'(gen-cmd): {cmd_display}{confirm_info} {flags_display} ', cancel='n', begin='\033[2K\r', include_last=False)
+            confirm = confirm.lower()
+            if confirm == '':
+                confirm = default
+            if confirm in ['y','yes']:
+                save = True
+                break
+            elif confirm in ['u','use']:
+                break
+            elif confirm in ['n','no','q','quit','exit']:
+                cmd = ''
+                break
+            elif confirm in ['k','think']:
+                think_display = think.replace('\n', '\n\r')
+                os.write(sys.stdout.fileno(), b'\r')
+                os.write(sys.stdout.fileno(), think_display.encode())
+            elif confirm in ['r','re','retry']:
+                cmd, think = generate_cmd(prompt, context)
+            elif confirm in ['e','edit']:
+                prompt = read_line('(gen-prompt): ', begin='\033[2K\r', include_last=False, value=prompt)
+                if prompt == '':
+                    break
+                cmd, think = generate_cmd(prompt, context)
+            elif confirm in ['t','teach']:
+                default = 'y'
+                cmd = read_line(f'(gen-cmd): ', begin='\033[2K\r', include_last=False)
+                if cmd == '':
+                    break
+            else:
+                confirm_info = ", please input 'y' or 'n':"
         print_context()
-        return ''
-    cmd, think = generate_cmd(prompt, screen.text())
-    confirm_info = ', confirm?'
-    flags = '[y/u/n/e/r/k/t]'
-    default = 'u'
-    save = False
-    show_think = False
-    while True:
-        cmd_display = cmd.replace('\n', '\n\r')
-        flags_display = flags.replace(default, default.upper())
-        confirm = read_line(f'(gen-cmd): {cmd_display}{confirm_info} {flags_display} ', cancel='n', begin='\033[2K\r', include_last=False)
-        confirm = confirm.lower()
-        if confirm == '':
-            confirm = default 
-        if confirm in ['y','yes']:
-            save = True
-            break
-        elif confirm in ['u','use']:
-            break
-        elif confirm in ['n','no','q','quit','exit']:
-            cmd = ''
-            break
-        elif confirm in ['k','think']:
-            think_display = think.replace('\n', '\n\r')
-            os.write(sys.stdout.fileno(), b'\r')
-            os.write(sys.stdout.fileno(), think_display.encode())
-        elif confirm in ['r','re','retry']:
-            cmd, think = generate_cmd(prompt, context)
-        elif confirm in ['e','edit']:
-            prompt = read_line('(gen-prompt): ', begin='\033[2K\r', include_last=False, value=prompt)
-            if prompt == '':
-                break
-            cmd, think = generate_cmd(prompt, context)
-        elif confirm in ['t','teach']:
-            default = 'y'
-            cmd = read_line(f'(gen-cmd): ', begin='\033[2K\r', include_last=False)
-            if cmd == '':
-                break
-        else:
-            confirm_info = ", please input 'y' or 'n':"
-    print_context()
-    if save:
-        save_history(prompt, context, cmd)
-    return cmd
+        if save:
+            save_history(prompt, context, cmd)
+        return cmd
+    finally:
+        mode = 'char'
 
 def line_mode():
     global mode
-    mode = 'char'
-    cmd = ''
-    while True:
-        cmd = read_line(begin='\033[2K\r', cancel='q', include_last=False)
-        if cmd == '':
-            pass
-        elif cmd in ['q','quit','exit']:
-            print_context()
-            return ''
-        elif cmd in ['s','show']:
-            print('\033[2J\033[H\r', end='')
-            print_perfect(screen, end='\r\n')
-        elif cmd in ['r','raw']:
-            print('\033[2J\033[H\r', end='')
-            print(screen.raw(), end='\r\n')
-        elif cmd in ['reset']:
-            print_context()
-            termios.tcsetattr(slave_fd, termios.TCSADRAIN, slave_tty)
-            screen.mode = 'normal'
-            screen.esc = ''
-            return ''
-        elif cmd in ['c','clear']:
-            print('\033[2J\033[H\r', end='')
-        else:
-            read_line(f"{cmd}: command not found", begin='\033[2K\r', max_chars=1)
+    try:
+        cmd = ''
+        while True:
+            cmd = read_line(begin='\033[2K\r', cancel='q', include_last=False)
+            if cmd == '':
+                pass
+            elif cmd in ['q','quit','exit']:
+                print_context()
+                return ''
+            elif cmd in ['s','show']:
+                print('\033[2J\033[H\r', end='')
+                print_perfect(screen, end='\r\n')
+            elif cmd in ['r','raw']:
+                print('\033[2J\033[H\r', end='')
+                print(screen.raw(), end='\r\n')
+            elif cmd in ['reset']:
+                print_context()
+                termios.tcsetattr(slave_fd, termios.TCSADRAIN, slave_tty)
+                screen.mode = 'normal'
+                screen.esc = ''
+                return ''
+            elif cmd in ['c','clear']:
+                print('\033[2J\033[H\r', end='')
+            elif cmd in ['t','tail','w','watch']:
+                global total_chars
+                total_chars = 0
+                def show_screen(*args):
+                    global total_chars
+                    if total_chars != screen.total_chars:
+                        total_chars = screen.total_chars
+                        print('\033[2J\033[H\r', end='')
+                        print_perfect(screen, end='\r\n')
+                        print('\r\n')
+                    time_display = time.asctime(time.localtime(time.time()))
+                    print(f'\033[1A\033[2K\rEvery 2.0s: show\t{time_display}', end='\r\n')
+                    signal.setitimer(signal.ITIMER_REAL, 2)
+                signal.signal(signal.SIGALRM, show_screen)
+                show_screen()
+                read_line('', begin='', max_chars=1)
+                print('\033[2K\r^C')
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, signal.SIG_DFL)
+                del total_chars
+                print_context()
+                return ''
+            else:
+                read_line(f"{cmd}: command not found", begin='\033[2K\r', max_chars=1)
+    finally:
+        mode = 'char'
 
 def char_mode():
     global mode

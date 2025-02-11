@@ -88,6 +88,7 @@ class Screen:
         self.mode = 'normal'
         self.esc = ''
         self.max_height = 100
+        self.total_chars = 0
 
     def start_y(self):
         start = 0
@@ -151,6 +152,7 @@ class Screen:
             self.write_char(char)
 
     def write_char(self, c):
+        self.total_chars += 1
         self._raw += c
         if self.mode == 'normal':
             self._write_char_normal_mode(c)
