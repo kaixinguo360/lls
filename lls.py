@@ -10,12 +10,27 @@ import pty
 import sys
 import os
 
+import signal
+import struct
+import fcntl
+
 from generate import generate_cmd
 from terminal import Screen, print_perfect
 
 old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
 master_fd, slave_fd = pty.openpty()
+
+def set_winsize(fd, row, col, xpix=0, ypix=0):
+    winsize = struct.pack("HHHH", row, col, xpix, ypix)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+
+def sync_winsize(*args, **kwargs):
+    winsize = os.get_terminal_size()
+    set_winsize(slave_fd, winsize.lines, winsize.columns)
+
+sync_winsize()
+signal.signal(signal.SIGWINCH, sync_winsize)
 
 command = ['bash', '-i']
 proc = subprocess.Popen(
