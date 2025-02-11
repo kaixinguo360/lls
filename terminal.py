@@ -59,9 +59,13 @@ def esc_clear_screen(s, mode):
         s.lines.append('')
     esc_clear_line(s, mode)
 
+def esc_raw(s, chars):
+    return '^' + chars
+
 esc_patterns = {
+    r'\033.*\a': '',
     r'\033O(.)': esc_arrow_and_keypad,
-    r'\033\[([0-9]+)m': '',
+    r'\033\[([0-9;]+)m': '',
     r'\033\[([0-9]+)([ABCD])': esc_move_cursor,
     r'\033\[([0-9]+);([0-9]+)[Hf]': esc_set_cursor,
     r'\033\[;?[Hf]': esc_reset_cursor,
@@ -69,13 +73,13 @@ esc_patterns = {
     r'\0338': esc_restore_cursor_pos,
     r'\033\[([0-9]?)K': esc_clear_line,
     r'\033\[([0-9]?)J': esc_clear_screen,
-    r'\033(........)': '',
 }
 
 class Screen:
 
     def __init__(self):
         self.lines = ['']
+        self._raw = ''
         self.saved_lines = None
         self.saved_cursor_pos = (0, 0)
         self.x = 0
@@ -147,6 +151,7 @@ class Screen:
             self.write_char(char)
 
     def write_char(self, c):
+        self._raw += c
         if self.mode == 'normal':
             self._write_char_normal_mode(c)
         elif self.mode == 'esc':
@@ -184,6 +189,11 @@ class Screen:
         self.lines = lines
 
     def _write_char_esc_mode(self, c):
+
+        if self.mode == 'esc' and c == '\033':
+            self.write_chars(self.esc[1:])
+            self.esc = ''
+
         self.mode = 'esc'
         self.esc += c
         esc = self.esc
@@ -207,26 +217,36 @@ class Screen:
 
                 return
 
-    def text(self):
-        return '\n'.join(self.lines)
+    def text(self, end='\n'):
+        return end.join(self.lines)
 
-def write_and_print(screen, i, msg=''):
-    print('\033[2J\033[H', end='')
-    if isinstance(i, bytes):
-        s.write(i)
-        print('>>> ', i, msg)
-    if isinstance(i, str):
-        s.write_chars(i)
-        print('>>> ', i.encode(), msg)
-    print('\r+--------+--------+--------+--------+')
+    def raw(self):
+        return self._raw
+
+def print_perfect(s, end='\n'):
+    print(f"x={s.x}, y={s.y}, mode={s.mode}", end='')
+    if s.mode == 'esc':
+        print('esc=', s.esc.encode(), end='')
+    print('', end=end)
+    print('+--------+--------+--------+--------+', end=end)
     for i in range(len(s.lines)):
         line = s.lines[i]
         if s.y == i:
             while len(line) < s.x + 1:
                 line += ' '
             line = line[:s.x] + '\033[7m' + line[s.x:s.x+1] + '\033[0m' + line[s.x+1:]
-        print(line)
-    print('\r+--------+--------+--------+--------+')
+        print(line, end=end)
+    print('+--------+--------+--------+--------+', end=end)
+
+def write_and_print(s, i, msg=''):
+    print('\033[H\033[2J', end='')
+    if isinstance(i, bytes):
+        s.write(i)
+        print('>>> ', i, msg)
+    if isinstance(i, str):
+        s.write_chars(i)
+        print('>>> ', i.encode(), msg)
+    print_perfect(s)
     sys.stdin.read(1)
 
 if __name__ == '__main__':

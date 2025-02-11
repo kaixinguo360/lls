@@ -11,6 +11,7 @@ import sys
 import os
 
 from generate import generate_cmd
+from terminal import Screen, print_perfect
 
 old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
@@ -30,6 +31,7 @@ proc = subprocess.Popen(
 
 context = ''
 exit = False
+screen = Screen()
 
 def read_stdout():
     global context
@@ -42,8 +44,9 @@ def read_stdout():
                     context = context[:-1]
                 else:
                     context += chars.decode()
+                screen.write(chars)
         except Exception as e:
-            print('error: ' + e)
+            print('error:', e, end='\r\n')
 
 stdout_thread = threading.Thread(target=read_stdout)
 stdout_thread.daemon = True
@@ -67,7 +70,7 @@ mode = 'char'
 def print_context():
     global context
     last_line = context.split('\n')[-1]
-    os.write(sys.stdout.fileno(), ('\033[1K\r' + last_line).encode())
+    os.write(sys.stdout.fileno(), ('\033[2K\r' + last_line).encode())
 
 def read_line(prompt=':', include_last=True, max_chars=-1, cancel=None, begin='\n', value=''):
     global mode
@@ -89,7 +92,7 @@ def read_line(prompt=':', include_last=True, max_chars=-1, cancel=None, begin='\
             elif len(line) > 0 and i == 127:
                 line = line[:-1]
                 last_line = (f'{prompt}' + line).split('\n')[-1]
-                os.write(sys.stdout.fileno(), (f'\033[1K\r{last_line}').encode())
+                os.write(sys.stdout.fileno(), (f'\033[2K\r{last_line}').encode())
             elif unicodedata.category(o)[0] != "C":
                 line += o
                 os.write(sys.stdout.fileno(), o.encode())
@@ -102,16 +105,16 @@ def save_history(prompt, context, cmd):
             line = f"prompt: {prompt}\t{cmd}\n"
             f.write(line)
     except Exception as e:
-        print(e)
+        print('error:', e, end='\r\n')
 
 def prompt_mode():
     global context, mode
     mode = 'char'
-    prompt = read_line('(gen-prompt): ', cancel='', begin='\033[1K\r', include_last=False)
+    prompt = read_line('(gen-prompt): ', cancel='', begin='\033[2K\r', include_last=False)
     if prompt == '':
         print_context()
         return ''
-    cmd, think = generate_cmd(prompt, context)
+    cmd, think = generate_cmd(prompt, screen.text())
     confirm_info = ', confirm?'
     flags = '[y/u/n/e/r/k/t]'
     default = 'u'
@@ -120,7 +123,7 @@ def prompt_mode():
     while True:
         cmd_display = cmd.replace('\n', '\n\r')
         flags_display = flags.replace(default, default.upper())
-        confirm = read_line(f'(gen-cmd): {cmd_display}{confirm_info} {flags_display} ', cancel='n', begin='\033[1K\r', include_last=False)
+        confirm = read_line(f'(gen-cmd): {cmd_display}{confirm_info} {flags_display} ', cancel='n', begin='\033[2K\r', include_last=False)
         if confirm == '':
             confirm = default 
         if confirm.lower() == 'y' or confirm.lower() == 'yes':
@@ -138,13 +141,13 @@ def prompt_mode():
         elif confirm.lower() == 'r' or confirm.lower() == 're':
             cmd, think = generate_cmd(prompt, context)
         elif confirm.lower() == 'e' or confirm.lower() == 'edit':
-            prompt = read_line('(gen-prompt): ', begin='\033[1K\r', include_last=False, value=prompt)
+            prompt = read_line('(gen-prompt): ', begin='\033[2K\r', include_last=False, value=prompt)
             if prompt == '':
                 break
             cmd, think = generate_cmd(prompt, context)
         elif confirm.lower() == 't' or confirm.lower() == 'teach':
             default = 'y'
-            cmd = read_line(f'(gen-cmd): ', begin='\033[1K\r', include_last=False)
+            cmd = read_line(f'(gen-cmd): ', begin='\033[2K\r', include_last=False)
             if cmd == '':
                 break
         else:
@@ -157,9 +160,18 @@ def prompt_mode():
 def line_mode():
     global mode
     mode = 'char'
-    cmd = read_line(begin='\033[1K\r', include_last=False)
-    print_context()
-    return cmd
+    cmd = ''
+    while mode == 'char':
+        cmd = read_line(begin='\033[2K\r', cancel='q', include_last=False)
+        if cmd == 's' or cmd == 'show':
+            print('\033[2J\033[H\r', end='')
+            print_perfect(screen, end='\r\n')
+        elif cmd == 'r' or cmd == 'raw':
+            print('\033[2J\033[H\r', end='')
+            print(screen.raw(), end='\r\n')
+        elif cmd == 'q' or cmd == 'exit':
+            print_context()
+            return ''
 
 def char_mode():
     global mode
@@ -192,10 +204,10 @@ try:
             cmd = read_command()
             os.write(master_fd, cmd.encode())
         except Exception as e:
-            print('error: ' + e)
+            print('error:', e, end='\r\n')
             mode = 'char'
 finally:
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
     exit = True
-    print('exited, if not exit, please input ctrl-c again\n')
+    print('exited, if not exit, please input ctrl-c again')
 
