@@ -105,29 +105,33 @@ def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='',
     if begin:
         os.write(sys.stdout.fileno(), begin.encode())
     line = value
+    cursor = 0
     os.write(sys.stdout.fileno(), (f'\r{prompt}' + line).encode())
+    def print_prompt():
+        last_line = (f'{prompt}' + line).split('\n')[-1]
+        os.write(sys.stdout.fileno(), (f'\033[2K\r{last_line}').encode())
     while True:
         chars = os.read(sys.stdin.fileno(), 10240).decode()
-        for o in chars:
-            i = o.encode()[0]
-            if cancel is not None and i in [3, 4]:
+        for c in chars:
+            if cancel is not None and c in ['\x03','\x04']:
                 return cancel
-            if i in [3, 4, 13]:
+            if c in ['\x03','\x04','\r','\n']:
                 os.write(sys.stdout.fileno(), f'\r{prompt}'.encode())
                 if include_last:
-                    line += o
+                    line += c
                 return line
-            elif i in [127]:
+            elif c in ['\x7f']:
                 if backspace is not None:
                     line += backspace
-                    os.write(sys.stdout.fileno(), o.encode())
-                elif len(line) > 0:
-                    line = line[:-1]
-                    last_line = (f'{prompt}' + line).split('\n')[-1]
-                    os.write(sys.stdout.fileno(), (f'\033[2K\r{last_line}').encode())
-            elif unicodedata.category(o)[0] != "C":
-                line += o
-                os.write(sys.stdout.fileno(), o.encode())
+                    print_prompt()
+                elif cursor > 0:
+                    line = line[:cursor-1] + line[cursor:]
+                    cursor -= 1
+                    print_prompt()
+            elif unicodedata.category(c)[0] != "C":
+                line = line[:cursor] + c + line[cursor:]
+                cursor += 1
+                print_prompt()
             if max_chars != -1 and len(line) >= max_chars:
                 return line
 
