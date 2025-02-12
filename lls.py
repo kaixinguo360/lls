@@ -37,18 +37,27 @@ def sync_winsize(*args, **kwargs):
 sync_winsize()
 signal.signal(signal.SIGWINCH, sync_winsize)
 
-command = ['bash', '-i']
-proc = subprocess.Popen(
-    command,
-    preexec_fn=os.setsid,
-    stdin=slave_fd,
-    stdout=slave_fd,
-    stderr=slave_fd,
-    shell=False,
-    text=False,
-    bufsize=0,
-)
+if len(sys.argv) > 1:
+    command = sys.argv[1:]
+else:
+    command = ['bash', '-i']
 
+try:
+    proc = subprocess.Popen(
+        command,
+        preexec_fn=os.setsid,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        shell=False,
+        text=False,
+        bufsize=0,
+    )
+except Exception as e:
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
+    raise e
+
+mode = 'char'
 context = ''
 exit = False
 slave_tty = termios.tcgetattr(slave_fd)
@@ -86,14 +95,12 @@ stdout_thread.start()
 #        cur = ''
 #    os.write(master_fd, d)
 
-mode = 'char'
-
 def print_context():
     global context
     last_line = context.split('\n')[-1]
     os.write(sys.stdout.fileno(), ('\033[2K\r' + last_line).encode())
 
-def read_line(prompt=':', include_last=True, max_chars=-1, cancel=None, begin='\n', value=''):
+def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='', cancel=None, backspace=None):
     global mode
     if begin:
         os.write(sys.stdout.fileno(), begin.encode())
@@ -110,10 +117,14 @@ def read_line(prompt=':', include_last=True, max_chars=-1, cancel=None, begin='\
                 if include_last:
                     line += o
                 return line
-            elif len(line) > 0 and i == 127:
-                line = line[:-1]
-                last_line = (f'{prompt}' + line).split('\n')[-1]
-                os.write(sys.stdout.fileno(), (f'\033[2K\r{last_line}').encode())
+            elif i in [127]:
+                if backspace is not None:
+                    line += backspace
+                    os.write(sys.stdout.fileno(), o.encode())
+                elif len(line) > 0:
+                    line = line[:-1]
+                    last_line = (f'{prompt}' + line).split('\n')[-1]
+                    os.write(sys.stdout.fileno(), (f'\033[2K\r{last_line}').encode())
             elif unicodedata.category(o)[0] != "C":
                 line += o
                 os.write(sys.stdout.fileno(), o.encode())
@@ -175,8 +186,8 @@ def cmd_generate():
         save_history(prompt, context, cmd)
     return cmd
 
-def cmd_exec():
-    cmd = read_line('(cmd): ', cancel='', begin='\033[2K\r', include_last=False)
+def cmd_exec(prompt='cmd'):
+    cmd = read_line(f'({prompt}): ', cancel='', begin='\033[2K\r', include_last=False)
     print('\033[2K\r', end='')
     return cmd
 
@@ -196,22 +207,39 @@ def cmd_watch():
     signal.signal(signal.SIGALRM, show_screen)
     show_screen()
     while True:
-        c = read_line('', begin='\033[2K\r', max_chars=1)
+        c = read_line('', begin='\033[2K\r', max_chars=1, backspace='b')
         signal.setitimer(signal.ITIMER_REAL, 0)
         if c in ['\x03','q']:
             break
-        elif c in ['e']:
-            cmd = cmd_exec()
-            if cmd:
-                cmd += '\n'
-                os.write(master_fd, cmd.encode())
-                time.sleep(0.1)
         elif c in ['g']:
             cmd = cmd_generate()
             if cmd:
                 cmd += '\n'
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
+        elif c in ['e']:
+            cmd = cmd_exec()
+            if cmd:
+                cmd += '\n'
+                os.write(master_fd, cmd.encode())
+                time.sleep(0.1)
+        elif c in ['i']:
+            cmd = cmd_exec('input')
+            if cmd:
+                os.write(master_fd, cmd.encode())
+                time.sleep(0.1)
+        elif c in ['b']:
+            os.write(master_fd, '\b'.encode())
+            time.sleep(0.1)
+        elif c in ['n']:
+            os.write(master_fd, '\n'.encode())
+            time.sleep(0.1)
+        elif c in ['c']:
+            os.write(master_fd, '\x03'.encode())
+            time.sleep(0.1)
+        elif c in ['d']:
+            os.write(master_fd, '\x04'.encode())
+            time.sleep(0.1)
         show_screen()
     print('\033[2K\r^C')
     signal.setitimer(signal.ITIMER_REAL, 0)
@@ -264,6 +292,11 @@ def line_mode():
                 cmd = cmd_exec()
                 if cmd:
                     cmd += '\n'
+                    os.write(master_fd, cmd.encode())
+                    cmd_watch()
+            elif cmd in ['i','input']:
+                cmd = cmd_exec('input')
+                if cmd:
                     os.write(master_fd, cmd.encode())
                     cmd_watch()
             else:
