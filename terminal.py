@@ -30,6 +30,8 @@ def esc_arrow_and_keypad(s, c):
     return padkey_map.get(c)
 
 def esc_move_cursor(s, i, c):
+    if i == '':
+        i = 1
     s.move_cursor(int(i), c)
 
 def esc_set_cursor(s, y, x):
@@ -78,7 +80,7 @@ esc_patterns = {
     r'\033\[3~': esc_delete,
     r'\033O(.)': esc_arrow_and_keypad,
     r'\033\[([0-9;]+)m': '',
-    r'\033\[([0-9]+)([ABCD])': esc_move_cursor,
+    r'\033\[([0-9]*)([ABCD])': esc_move_cursor,
     r'\033\[([0-9]+);([0-9]+)[Hf]': esc_set_cursor,
     r'\033\[;?[Hf]': esc_reset_cursor,
     r'\0337': esc_save_cursor_pos,
@@ -99,7 +101,9 @@ class Screen:
         self._start_y = 0
         self.mode = 'normal'
         self.esc = ''
-        self.max_height = 100
+        self.dropped_lines = 0
+        self.max_lines = 500
+        self.max_height = 30
         self.total_chars = 0
         self.keep_logs_when_clean_screen = False
         self.insert_mode = False
@@ -195,6 +199,12 @@ class Screen:
         while s.x > len(line):
             line += ' '
         s.lines[s.y] = line
+        if len(s.lines) > s.max_lines:
+            offset = len(s.lines) - s.max_lines
+            s.lines = s.lines[offset:]
+            s.y -= offset
+            s._start_y -= offset
+            s.dropped_lines += offset
 
     def _write_char_normal_mode(s, c):
         if c == '\033':
