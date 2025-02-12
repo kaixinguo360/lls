@@ -38,10 +38,10 @@ def create_client():
 def convert_output(output):
     global client
     think = ''
-    if '</think>' in output:
+    if '<think>' in output:
         res = output.replace('<think>', '').split('</think>')
         think = res[0]
-        output = res[1]
+        output = res[1] if len(res) > 1 else ''
     output = output.strip()
     think = think.strip()
     return output, think
@@ -52,21 +52,27 @@ def generate_cmd(prompt, context):
             create_client()
         system_info = system_template.format(prompt=prompt, context=context)
         user_info = user_template.format(prompt=prompt, context=context)
-        response = client.chat.completions.create(
+        stream = client.chat.completions.create(
             model=model,
             messages=[
                 { 'role': 'system', 'content': system_info },
                 { 'role': 'user', 'content': user_info },
             ],
+            stream=True,
         )
-        output = response.choices[0].message.content
-        return convert_output(output)
+        output = ''
+        for chunk in stream:
+            output += chunk.choices[0].delta.content or ''
+            yield convert_output(output)
     except Exception as e:
-        return f'error: {e}', ''
+        yield f'error: {e}', ''
 
 if __name__ == '__main__':
-    cmd, think = generate_cmd('列出目录内所有文件', '')
-    print(f"cmd: {cmd}")
-    if think:
-        print(f"think: {think}")
+    output = generate_cmd('列出目录内所有文件', '')
+    for chunk in output:
+        cmd = chunk[0]
+        think = chunk[1]
+        print(f"cmd: {cmd}")
+        if think:
+            print(f"think: {think}")
 

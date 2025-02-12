@@ -156,16 +156,50 @@ def cmd_generate():
     prompt = read_line('(gen-prompt): ', cancel='', begin='\033[2K\r', include_last=False)
     if prompt == '':
         return ''
-    cmd, think = generate_cmd(prompt, screen.text())
+    output = generate_cmd(prompt, screen.text())
+    cmd, think = '', ''
     confirm_info = ', confirm?'
     flags = '[y/u/n/e/r/k/t]'
     default = 'u'
     save = False
     show_think = False
+    global display_lines
+    display_lines = 1
+    def clear_lines():
+        global display_lines
+        for _ in range(display_lines - 1):
+            os.write(sys.stdout.fileno(), b'\033[2K\r\033[1A')
+        display_lines = 1
     while True:
-        cmd_display = cmd.replace('\n', '\n\r')
+        clear_lines()
+        if output is not None:
+            for chunk in output:
+                clear_lines()
+                cmd, think = chunk[0], chunk[1]
+                display = '(gen-cmd): '
+                if cmd == '':
+                    display += think
+                else:
+                    display += cmd
+                display = display.split('\n')
+                tmp = []
+                width = round(winsize.columns / 2)
+                for line in display:
+                    for i in range(0, len(line) + 1, width):
+                        tmp.append(line[i:i+width])
+                display = tmp
+                display_lines = len(display)
+                display = '\r\n'.join(display)
+                os.write(sys.stdout.fileno(), b'\033[2K\r')
+                os.write(sys.stdout.fileno(), display.encode())
+            clear_lines()
+            output = None
         flags_display = flags.replace(default, default.upper())
-        confirm = read_line(f'(gen-cmd): {cmd_display}{confirm_info} {flags_display} ', cancel='n', begin='\033[2K\r', include_last=False)
+        display = f'(gen-cmd): {cmd}{confirm_info} {flags_display} '
+        display_lines = len(display.split('\n'))
+        display = display.replace('\n', '\n\r')
+        confirm_info = ', confirm?'
+        confirm = read_line(display, cancel='n', begin='\033[2K\r', include_last=False)
         confirm = confirm.lower()
         if confirm == '':
             confirm = default
@@ -178,23 +212,30 @@ def cmd_generate():
             cmd = ''
             break
         elif confirm in ['k','think']:
+            clear_lines()
             think_display = think.replace('\n', '\n\r')
             os.write(sys.stdout.fileno(), b'\r')
             os.write(sys.stdout.fileno(), think_display.encode())
         elif confirm in ['r','re','retry']:
-            cmd, think = generate_cmd(prompt, context)
+            output = generate_cmd(prompt, context)
         elif confirm in ['e','edit']:
-            prompt = read_line('(gen-prompt): ', begin='\033[2K\r', include_last=False, value=prompt)
+            a = display_lines
+            clear_lines()
+            prompt = read_line('(gen-prompt): ', cancel='', begin='\033[2K\r', include_last=False, value=prompt)
             if prompt == '':
+                cmd = ''
                 break
-            cmd, think = generate_cmd(prompt, context)
+            output = generate_cmd(prompt, context)
         elif confirm in ['t','teach']:
+            clear_lines()
             default = 'y'
             cmd = read_line(f'(gen-cmd): ', begin='\033[2K\r', include_last=False)
             if cmd == '':
                 break
         else:
             confirm_info = ", please input 'y' or 'n':"
+    clear_lines()
+    del display_lines
     if save:
         save_history(prompt, context, cmd)
     return cmd
@@ -319,18 +360,16 @@ def line_mode():
 
 def char_mode():
     global mode
-    char = ''
-    o = os.read(sys.stdin.fileno(), 10240)
-    i = None
-    if len(o) == 1:
-        i = o[0]
-    if i == 5:
-        mode = 'line'
-    elif i == 6:
-        mode = 'prompt'
-    else:
-        char = o.decode()
-    return char
+    output = ''
+    chars = os.read(sys.stdin.fileno(), 10240).decode()
+    for c in chars:
+        if c in ['\005']:
+            mode = 'line'
+        elif c in ['\007']:
+            mode = 'prompt'
+        else:
+            output += c
+    return output
 
 def read_command():
     if mode == 'char':
