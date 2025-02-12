@@ -110,25 +110,38 @@ def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='',
     buf.limit_move = True
     buf.max_height = 1
     buf.write_chars(value)
-    os.write(sys.stdout.fileno(), (f'\r{prompt}' + buf.current_line()).encode())
+    cmd = None
+    global prompt_lines
+    prompt_lines = 1
     def print_prompt():
+        global prompt_lines
+        for _ in range(prompt_lines - 1):
+            os.write(sys.stdout.fileno(), b'\033[2K\r\033[1A')
         os.write(sys.stdout.fileno(), b'\033[2K\r')
-        line = buf.current_line()
-        line_prev = line[:buf.x]
-        os.write(sys.stdout.fileno(), (prompt + line).split('\n')[-1].encode())
+        line = prompt + buf.current_line()
+        os.write(sys.stdout.fileno(), line.encode())
+        prompt_lines = len(line.split('\n'))
+        for _ in range(prompt_lines - 1):
+            os.write(sys.stdout.fileno(), b'\r\033[1A')
         os.write(sys.stdout.fileno(), b'\r')
-        os.write(sys.stdout.fileno(), (prompt + line_prev).split('\n')[-1].encode())
+        line_prev = prompt + buf.current_line()[:buf.x]
+        os.write(sys.stdout.fileno(), line_prev.encode())
+    print_prompt()
     while True:
         chars = os.read(sys.stdin.fileno(), 10240).decode()
         for c in chars:
             if cancel is not None and c in ['\x03','\x04']:
-                return cancel
+                cmd = cancel
+                break
             if c in ['\x03','\x04','\r','\n']:
-                os.write(sys.stdout.fileno(), f'\r{prompt}'.encode())
+                for _ in range(prompt_lines - 1):
+                    os.write(sys.stdout.fileno(), b'\033[2K\r\033[1A')
+                os.write(sys.stdout.fileno(), b'\033[2K\r')
                 line = buf.current_line()
                 if include_last:
                     line += c
-                return line
+                cmd = line
+                break
             elif c in ['\x7f']:
                 if backspace is not None:
                     buf.write_chars(backspace)
@@ -141,8 +154,13 @@ def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='',
             else:
                 buf.write_char(c)
             if max_chars != -1 and len(buf.current_line()) >= max_chars:
-                return buf.current_line()
+                cmd = buf.current_line()
+                break
+        if cmd is not None:
+            break
         print_prompt()
+    del prompt_lines
+    return cmd
 
 def save_history(prompt, context, cmd):
     try:
@@ -173,6 +191,7 @@ def cmd_generate():
     while True:
         clear_lines()
         if output is not None:
+            os.write(sys.stdout.fileno(), b'\033[2K\r(gen-cmd): waiting...')
             for chunk in output:
                 clear_lines()
                 cmd, think = chunk[0], chunk[1]
