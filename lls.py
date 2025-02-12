@@ -60,12 +60,12 @@ except Exception as e:
 
 mode = 'char'
 context = ''
-exit = False
+running = True
 slave_tty = termios.tcgetattr(slave_fd)
 
 def read_stdout():
     global context, mode
-    while not exit:
+    while running:
         try:
             chars = os.read(master_fd, 10240)
             if chars:
@@ -105,12 +105,19 @@ def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='',
     global mode
     if begin:
         os.write(sys.stdout.fileno(), begin.encode())
-    line = value
-    cursor = 0
-    os.write(sys.stdout.fileno(), (f'\r{prompt}' + line).encode())
+    buf = Screen()
+    buf.insert_mode = True
+    buf.limit_move = True
+    buf.max_height = 1
+    buf.write_chars(value)
+    os.write(sys.stdout.fileno(), (f'\r{prompt}' + buf.current_line()).encode())
     def print_prompt():
-        last_line = (f'{prompt}' + line).split('\n')[-1]
-        os.write(sys.stdout.fileno(), (f'\033[2K\r{last_line}').encode())
+        os.write(sys.stdout.fileno(), b'\033[2K\r')
+        line = buf.current_line()
+        line_prev = line[:buf.x]
+        os.write(sys.stdout.fileno(), (prompt + line).split('\n')[-1].encode())
+        os.write(sys.stdout.fileno(), b'\r')
+        os.write(sys.stdout.fileno(), (prompt + line_prev).split('\n')[-1].encode())
     while True:
         chars = os.read(sys.stdin.fileno(), 10240).decode()
         for c in chars:
@@ -118,23 +125,24 @@ def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='',
                 return cancel
             if c in ['\x03','\x04','\r','\n']:
                 os.write(sys.stdout.fileno(), f'\r{prompt}'.encode())
+                line = buf.current_line()
                 if include_last:
                     line += c
                 return line
             elif c in ['\x7f']:
                 if backspace is not None:
-                    line += backspace
-                    print_prompt()
-                elif cursor > 0:
-                    line = line[:cursor-1] + line[cursor:]
-                    cursor -= 1
-                    print_prompt()
-            elif unicodedata.category(c)[0] != "C":
-                line = line[:cursor] + c + line[cursor:]
-                cursor += 1
-                print_prompt()
-            if max_chars != -1 and len(line) >= max_chars:
-                return line
+                    buf.write_chars(backspace)
+                else:
+                    buf.write_chars('\b')
+            elif c in ['\033']:
+                buf.write_char(c)
+            elif unicodedata.category(c)[0] == "C":
+                pass
+            else:
+                buf.write_char(c)
+            if max_chars != -1 and len(buf.current_line()) >= max_chars:
+                return buf.current_line()
+        print_prompt()
 
 def save_history(prompt, context, cmd):
     try:
@@ -214,7 +222,7 @@ def cmd_watch():
     while True:
         c = read_line('', begin='\033[2K\r', max_chars=1, backspace='b')
         signal.setitimer(signal.ITIMER_REAL, 0)
-        if c in ['\x03','q']:
+        if c in ['\x03','\x04','q']:
             break
         elif c in ['g']:
             cmd = cmd_generate()
@@ -344,6 +352,6 @@ try:
             mode = 'char'
 finally:
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
-    exit = True
+    running = False
     print('exited, if not exit, please input ctrl-c again')
 

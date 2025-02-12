@@ -16,6 +16,14 @@ def to_int(i):
         print(e)
     return 0
 
+def esc_delete(s):
+    line = s.lines[s.y]
+    if s.insert_mode:
+        line = line[:s.x] + line[s.x+1:]
+    else:
+        line = line[:s.x] + ' ' + line[s.x+1:]
+    s.lines[s.y] = line
+
 def esc_arrow_and_keypad(s, c):
     s.move_cursor(1, c)
     padkey_map = { 'p': '0', 'q': '1', 'r': '2', 's': '3', 't': '4', 'u': '5', 'v': '6', 'w': '7', 'x': '8', 'y': '9', 'm': '-', 'l': ',', 'n': '.', 'M': '\r', }
@@ -67,6 +75,7 @@ def esc_raw(s, chars):
 
 esc_patterns = {
     r'\033.*\a': '',
+    r'\033\[3~': esc_delete,
     r'\033O(.)': esc_arrow_and_keypad,
     r'\033\[([0-9;]+)m': '',
     r'\033\[([0-9]+)([ABCD])': esc_move_cursor,
@@ -93,6 +102,8 @@ class Screen:
         self.max_height = 100
         self.total_chars = 0
         self.keep_logs_when_clean_screen = False
+        self.insert_mode = False
+        self.limit_move = False
 
     def start_y(self):
         start = 0
@@ -116,36 +127,36 @@ class Screen:
         y = self.start_y() + y
         return y
 
-    def set_cursor(s, x=None, y=None):
+    def set_cursor(s, x=None, y=None, limit=None):
         if y is not None:
             ox = s.x
             s.x = 0
-            s.nor()
+            s.nor(limit)
             s.x = ox
             s.y = s.real_y(y - 1)
-            s.nor()
+            s.nor(limit)
         if x is not None:
             s.x = s.real_x(x - 1)
-            s.nor()
+            s.nor(limit)
 
-    def move_cursor(s, i, c):
+    def move_cursor(s, i, c, limit=None):
         if c == 'A':
             ox = s.x
             s.x = 0
-            s.nor()
+            s.nor(limit)
             s.x = ox
             s.y -= i
         if c == 'B':
             ox = s.x
             s.x = 0
-            s.nor()
+            s.nor(limit)
             s.x = ox
             s.y += i
         if c == 'C':
             s.x += i
         if c == 'D':
             s.x -= i
-        s.nor()
+        s.nor(limit)
 
     def write(self, b):
         try:
@@ -165,11 +176,18 @@ class Screen:
         elif self.mode == 'esc':
             self._write_char_esc_mode(c)
 
-    def nor(s):
+    def nor(s, limit=None):
         if s.x < 0:
             s.x = 0
         if s.y < 0:
             s.y = 0
+        if limit is None:
+            limit = s.limit_move
+        if limit:
+            if s.y > len(s.lines) - 1:
+                s.y = len(s.lines) - 1
+            if s.x > len(s.lines[s.y]):
+                s.x = len(s.lines[s.y])
         while s.y > len(s.lines) - 1:
             s.lines.append('')
         line = s.lines[s.y]
@@ -185,15 +203,33 @@ class Screen:
         if c == '\b':
             if s.x > 0:
                 s.x -= 1
+                if s.insert_mode:
+                    line = s.lines[s.y]
+                    line = line[:s.x] + line[s.x+1:]
+                    s.lines[s.y] = line
         elif c == '\r':
             s.x = 0
         elif c == '\n':
-            s.y += 1
+            if s.insert_mode:
+                line = s.lines[s.y]
+                lines_prev = s.lines[:s.y]
+                lines_after = s.lines[s.y+1:]
+                chars_prev = line[:s.x]
+                chars_after = line[s.x:]
+                s.lines = [*lines_prev, chars_prev, chars_after, *lines_after]
+                s.y += 1
+                s.x = 0
+            else:
+                s.y += 1
+                s.nor(limit=False)
         else:
             s.x += 1
-            s.nor()
+            s.nor(limit=False)
             line = s.lines[s.y]
-            line = line[:s.x-1] + c + line[s.x:]
+            if s.insert_mode:
+                line = line[:s.x-1] + c + line[s.x-1:]
+            else:
+                line = line[:s.x-1] + c + line[s.x:]
             s.lines[s.y] = line
         s.nor()
 
@@ -231,6 +267,9 @@ class Screen:
 
     def raw(self):
         return self._raw
+
+    def current_line(self):
+        return self.lines[self.y]
 
 def print_perfect(s, end='\n', tail=''):
     print('+---------+---------+---------+---------+', end=end)
