@@ -23,6 +23,7 @@ tty.setraw(sys.stdin.fileno())
 master_fd, slave_fd = pty.openpty()
 winsize = os.get_terminal_size()
 screen = Screen()
+screen.keep_logs_when_clean_screen = True
 
 def set_winsize(fd, row, col, xpix=0, ypix=0):
     winsize = struct.pack("HHHH", row, col, xpix, ypix)

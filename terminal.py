@@ -38,6 +38,7 @@ def esc_save_cursor_pos(s):
 def esc_restore_cursor_pos(s):
     s.x = s.saved_cursor_pos[0]
     s.y = s.saved_cursor_pos[1]
+    s.nor()
 
 def esc_clear_line(s, mode):
     if mode == '' or mode == '0': 
@@ -46,8 +47,7 @@ def esc_clear_line(s, mode):
         s.lines[s.y] = ' ' * s.x + s.lines[s.y][s.x:]
     if mode == '2':
         s.lines[s.y] = ''
-    while len(s.lines[s.y]) < s.x + 1:
-        s.lines[s.y] += ' '
+    s.nor()
 
 def esc_clear_screen(s, mode):
     if mode == '' or mode == '0': 
@@ -59,8 +59,7 @@ def esc_clear_screen(s, mode):
         if s.keep_logs_when_clean_screen:
             s._start_y = s.y
         s.lines = s.lines[:s.real_y(0)]
-    while len(s.lines) - 1 < s.y:
-        s.lines.append('')
+    s.nor()
     esc_clear_line(s, mode)
 
 def esc_raw(s, chars):
@@ -93,7 +92,7 @@ class Screen:
         self.esc = ''
         self.max_height = 100
         self.total_chars = 0
-        self.keep_logs_when_clean_screen = True
+        self.keep_logs_when_clean_screen = False
 
     def start_y(self):
         start = 0
@@ -117,34 +116,36 @@ class Screen:
         y = self.start_y() + y
         return y
 
-    def set_cursor(self, x=None, y=None):
-        lines = self.lines
+    def set_cursor(s, x=None, y=None):
         if y is not None:
-            y = self.real_y(y - 1)
-            while len(lines) - 1 < y:
-                lines.append('')
-            self.y = y
+            ox = s.x
+            s.x = 0
+            s.nor()
+            s.x = ox
+            s.y = s.real_y(y - 1)
+            s.nor()
         if x is not None:
-            line = lines[self.y]
-            x = self.real_x(x - 1)
-            while len(line) < x:
-                line += ' '
-            self.x = x
-        self.lines = lines
+            s.x = s.real_x(x - 1)
+            s.nor()
 
     def move_cursor(s, i, c):
         if c == 'A':
+            ox = s.x
+            s.x = 0
+            s.nor()
+            s.x = ox
             s.y -= i
         if c == 'B':
+            ox = s.x
+            s.x = 0
+            s.nor()
+            s.x = ox
             s.y += i
         if c == 'C':
             s.x += i
         if c == 'D':
             s.x -= i
-        if s.x < 0:
-            s.x = 0
-        if s.y < 0:
-            s.y = 0
+        s.nor()
 
     def write(self, b):
         try:
@@ -164,36 +165,37 @@ class Screen:
         elif self.mode == 'esc':
             self._write_char_esc_mode(c)
 
-    def _write_char_normal_mode(self, c):
-        x = self.x
-        y = self.y
-        lines = self.lines
-        i = to_int(c)
+    def nor(s):
+        if s.x < 0:
+            s.x = 0
+        if s.y < 0:
+            s.y = 0
+        while s.y > len(s.lines) - 1:
+            s.lines.append('')
+        line = s.lines[s.y]
+        line = line.rstrip(' ')
+        while s.x > len(line):
+            line += ' '
+        s.lines[s.y] = line
 
+    def _write_char_normal_mode(s, c):
         if c == '\033':
-            self._write_char_esc_mode(c)
+            s._write_char_esc_mode(c)
             return
         if c == '\b':
-            if x > 0:
-                x -= 1
+            if s.x > 0:
+                s.x -= 1
         elif c == '\r':
-            x = 0
+            s.x = 0
         elif c == '\n':
-            y += 1
+            s.y += 1
         else:
-            x += 1
-            line = lines[y]
-            while len(line) < x:
-                line += ' '
-            line = line[:x-1] + c + line[x:]
-            line.rstrip(' ')
-            lines[y] = line
-
-        self.x = x
-        self.y = y
-        while len(lines) - 1 < y:
-            lines.append('')
-        self.lines = lines
+            s.x += 1
+            s.nor()
+            line = s.lines[s.y]
+            line = line[:s.x-1] + c + line[s.x:]
+            s.lines[s.y] = line
+        s.nor()
 
     def _write_char_esc_mode(self, c):
 
@@ -230,12 +232,12 @@ class Screen:
     def raw(self):
         return self._raw
 
-def print_perfect(s, end='\n'):
+def print_perfect(s, end='\n', tail=''):
     print('+---------+---------+---------+---------+', end=end)
     for i in range(len(s.lines)):
-        line = s.lines[i]
+        line = s.lines[i] + tail
         if s.y == i:
-            while len(line) < s.x + 1:
+            while s.x > len(line) - 1:
                 line += ' '
             line = line[:s.x] + '\033[7m' + line[s.x:s.x+1] + '\033[0m' + line[s.x+1:]
         print(line, end=end)
@@ -249,16 +251,18 @@ def print_perfect(s, end='\n'):
         print(', esc=', s.esc.encode(), end='')
     print('', end=end)
 
-def write_and_print(s, i, msg=''):
-    print('\033[H\033[2J', end='')
-    if isinstance(i, bytes):
-        s.write(i)
-        print('>>> ', i, msg)
-    if isinstance(i, str):
-        s.write_chars(i)
-        print('>>> ', i.encode(), msg)
-    print_perfect(s)
-    sys.stdin.read(1)
+def write_and_print(s, chars, msg=''):
+    import time
+    if isinstance(chars, bytes):
+        chars = chars.decode()
+    for c in chars:
+        print('\033[H\033[2J', end='')
+        s.write_char(c)
+        print('>>> ', chars.encode(), msg)
+        print_perfect(s, end='\n', tail='<')
+        time.sleep(0.05)
+    #sys.stdin.read(1)
+    time.sleep(0.5)
 
 if __name__ == '__main__':
     s = Screen()
@@ -272,21 +276,21 @@ if __name__ == '__main__':
     write_and_print(s, '\033OD+')
     write_and_print(s, '\r\n\033Op111')
     write_and_print(s, '\r\n\033[3A\033[3CXXXXXX')
-    write_and_print(s, '\033[1;1H+========+')
-    write_and_print(s, '\033[2;10H+========+')
-    write_and_print(s, '\033[;H+--------+')
-    write_and_print(s, '\033[H+========+')
+    write_and_print(s, '\033[1;1H+=========+')
+    write_and_print(s, '\033[2;11H+=========+')
+    write_and_print(s, '\033[;H+---------+')
+    write_and_print(s, '\033[H+=========+')
     write_and_print(s, '\0337\033[10;10f(+++++)')
     write_and_print(s, '\0338(+++++)')
-    write_and_print(s, '\033[2;10H', '重置光标位置(1,9)')
+    write_and_print(s, '\033[2;11H', '重置光标位置(2,11)')
     write_and_print(s, '\033[1K', '清除光标前的内容')
     write_and_print(s, '\033[K', '清除光标后的内容')
-    write_and_print(s, '\033[3;10H', '重置光标位置(2,9)')
+    write_and_print(s, '\033[3;11H', '重置光标位置(3,11)')
     write_and_print(s, '\033[2K', '清除本行所有内容')
-    write_and_print(s, '\033[4;5Haaaaaaaaaaaaa\033[4;10H', '打印内容并重置光标位置(3,9)')
+    write_and_print(s, '\033[4;5Haaaaaaaaaaaaa\033[4;11H', '打印内容并重置光标位置(4,11)')
     write_and_print(s, '\033[J', '清除本行以下所有内容')
-    write_and_print(s, '\033[4;5Haaaaaaaaaaaaa\033[4;10H', '打印内容并重置光标位置(3,9)')
+    write_and_print(s, '\033[4;5Haaaaaaaaaaaaa\033[4;11H', '打印内容并重置光标位置(4,11)')
     write_and_print(s, '\033[1J', '清除本行以上所有内容')
-    write_and_print(s, '\033[Haaaaaaaaaaaaa\033[4;5Haaaaaaaaaaaa\033[3;10H', '打印内容并重置光标位置(3,9)')
+    write_and_print(s, '\033[Haaaaaaaaaaaaa\033[4;5Haaaaaaaaaaaa\033[3;11H', '打印内容并重置光标位置(3,11)')
     write_and_print(s, '\033[2J', '清除所有内容')
 
