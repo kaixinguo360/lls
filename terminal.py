@@ -28,6 +28,8 @@ def esc_set_cursor(s, y, x):
     s.set_cursor(int(x), int(y))
 
 def esc_reset_cursor(s):
+    if s.keep_logs_when_clean_screen:
+        s._start_y = s.y
     s.set_cursor(0, 0)
 
 def esc_save_cursor_pos(s):
@@ -54,6 +56,8 @@ def esc_clear_screen(s, mode):
         for i in range(s.real_y(0), s.y):
             s.lines[i] = ''
     if mode == '2':
+        if s.keep_logs_when_clean_screen:
+            s._start_y = s.y
         s.lines = s.lines[:s.real_y(0)]
     while len(s.lines) - 1 < s.y:
         s.lines.append('')
@@ -89,6 +93,7 @@ class Screen:
         self.esc = ''
         self.max_height = 100
         self.total_chars = 0
+        self.keep_logs_when_clean_screen = True
 
     def start_y(self):
         start = 0
@@ -235,7 +240,11 @@ def print_perfect(s, end='\n'):
             line = line[:s.x] + '\033[7m' + line[s.x:s.x+1] + '\033[0m' + line[s.x+1:]
         print(line, end=end)
     print('+---------+---------+---------+---------+', end=end)
-    print(f"cursor: {{x={s.x+1},y={s.y+1}}}, lines: {len(s.lines)}, mode: {s.mode}", end='')
+    print(f"cursor: {{x={s.x+1},y={s.y-s.start_y()+1}}}", end='')
+    print(f", lines: {len(s.lines)}", end='')
+    print(f", offset: {s._start_y}", end='')
+    print(f", height: {s.max_height}", end='')
+    print(f", mode: {s.mode}", end='')
     if s.mode == 'esc':
         print(', esc=', s.esc.encode(), end='')
     print('', end=end)

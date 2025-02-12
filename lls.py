@@ -22,6 +22,7 @@ old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
 master_fd, slave_fd = pty.openpty()
 winsize = os.get_terminal_size()
+screen = Screen()
 
 def set_winsize(fd, row, col, xpix=0, ypix=0):
     winsize = struct.pack("HHHH", row, col, xpix, ypix)
@@ -30,6 +31,7 @@ def set_winsize(fd, row, col, xpix=0, ypix=0):
 def sync_winsize(*args, **kwargs):
     global winsize
     winsize = os.get_terminal_size()
+    screen.max_height = winsize.lines
     set_winsize(slave_fd, winsize.lines, winsize.columns)
 
 sync_winsize()
@@ -49,7 +51,6 @@ proc = subprocess.Popen(
 
 context = ''
 exit = False
-screen = Screen()
 slave_tty = termios.tcgetattr(slave_fd)
 
 def read_stdout():
