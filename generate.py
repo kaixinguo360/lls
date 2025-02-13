@@ -5,8 +5,8 @@ import os
 model = os.environ.get('LLS_OPENAI_MODEL', 'gpt-4o-mini')
 base_url = os.environ.get('LLS_OPENAI_BASE_URL', 'https://api.openai.com')
 api_key = os.environ.get('LLS_OPENAI_API_KEY', '')
-system_template = '''
-你是一个能干的助手, 需要根据user的指令和当前的shell控制台输出, 生成一条满足用户指令的shell命令. 你的输出将直接发送给控制台并执行, 因此你不能输出shell命令以外的任何无关内容. 你不需要用任何引号包裹输出的shell命令, 也不需要格式化输出的shell命令.
+prompt_template = '''
+你是一个能干的助手, 需要根据user的指令和当前的shell控制台输出, 生成一条满足user指令的shell命令. 你的输出将直接发送给控制台并执行, 因此你不能输出shell命令以外的任何无关内容. 你不需要用任何引号包裹输出的shell命令, 也不需要格式化输出的shell命令.
 
 例如, 如果user指令为"列出文件", 你需要输出下面一行内容:
 ls
@@ -22,21 +22,25 @@ ls -a
 
 以下是当前的控制台输出:
 {context}
+
+以下是当前user的指令:
+{instruct}
+
+以下是满足user指令的shell命令:
 '''
-user_template = '请输出一行shell命令, 完成如下任务:{prompt}, 不要对输出shell命令进行格式化, 也不要输出任何说明与解释'
 
 client = None
 
-def create_client():
+def get_openai_client():
     global client
     from openai import OpenAI
     client = OpenAI(
        base_url=base_url,
        api_key=api_key, 
     )
+    return client
 
 def convert_output(output):
-    global client
     think = ''
     if '<think>' in output:
         res = output.replace('<think>', '').split('</think>')
@@ -46,23 +50,18 @@ def convert_output(output):
     think = think.strip()
     return output, think
 
-def generate_cmd(prompt, context):
+def generate_cmd(instruct, context):
     try:
-        if client == None:
-            create_client()
-        system_info = system_template.format(prompt=prompt, context=context)
-        user_info = user_template.format(prompt=prompt, context=context)
-        stream = client.chat.completions.create(
+        client = get_openai_client()
+        prompt = prompt_template.format(instruct=instruct, context=context)
+        stream = client.completions.create(
             model=model,
-            messages=[
-                { 'role': 'system', 'content': system_info },
-                { 'role': 'user', 'content': user_info },
-            ],
+            prompt=prompt,
             stream=True,
         )
         output = ''
         for chunk in stream:
-            output += chunk.choices[0].delta.content or ''
+            output += chunk.choices[0].text or ''
             yield convert_output(output)
     except Exception as e:
         yield f'error: {e}', ''
@@ -72,7 +71,9 @@ if __name__ == '__main__':
     for chunk in output:
         cmd = chunk[0]
         think = chunk[1]
-        print(f"cmd: {cmd}")
+        print(f"\033[H\033[2J", end='')
         if think:
             print(f"think: {think}")
+        if cmd:
+            print(f"cmd: {cmd}")
 
