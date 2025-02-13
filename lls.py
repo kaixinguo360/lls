@@ -83,23 +83,44 @@ stdout_thread = threading.Thread(target=read_stdout)
 stdout_thread.daemon = True
 stdout_thread.start()
 
-#cur = ''
-#def main_input():
-#    global cur
-#    d = os.read(sys.stdin.fileno(), 10240)
-#    if d[0] != 13:
-#        cur += d.decode()
-#    else:
-#        if cur.strip(' ') == 'show':
-#            os.write(sys.stdout.fileno(), context.encode())
-#            return
-#        cur = ''
-#    os.write(master_fd, d)
-
 def print_context():
     global context
     last_line = context.split('\n')[-1]
     os.write(sys.stdout.fileno(), ('\033[2K\r' + last_line).encode())
+
+def wrap_multi_lines(display, padding=4):
+    global winsize
+    display = display.split('\n')
+    tmp = []
+    width = round((winsize.columns - padding) / 2)
+    for line in display:
+        for i in range(0, len(line) + 1, width):
+            tmp.append(line[i:i+width])
+    display = tmp
+    return '\r\n'.join(display), len(display)
+
+def clear_lines(lines_all, lines_cur):
+    if lines_all != lines_cur:
+        for _ in range(lines_all - lines_cur):
+            os.write(sys.stdout.fileno(), b'\r\033[1B')
+    for _ in range(lines_all - 1):
+        os.write(sys.stdout.fileno(), b'\033[2K\r\033[1A')
+    os.write(sys.stdout.fileno(), b'\033[2K\r')
+    return 1, 1
+
+def print_lines(display, cursor=None):
+    line, lines_all = wrap_multi_lines(display)
+    os.write(sys.stdout.fileno(), b'\033[2K\r')
+    os.write(sys.stdout.fileno(), line.encode())
+    if cursor is not None and cursor != len(display):
+        for _ in range(lines_all - 1):
+            os.write(sys.stdout.fileno(), b'\r\033[1A')
+        line_prev, lines_cur = wrap_multi_lines(display[:cursor])
+        os.write(sys.stdout.fileno(), b'\r')
+        os.write(sys.stdout.fileno(), line_prev.encode())
+    else:
+        lines_cur = lines_all
+    return lines_all, lines_cur
 
 def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='', cancel=None, backspace=None):
     global mode
@@ -111,22 +132,7 @@ def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='',
     buf.max_height = 1
     buf.write_chars(value)
     cmd = None
-    global prompt_lines
-    prompt_lines = 1
-    def print_prompt():
-        global prompt_lines
-        for _ in range(prompt_lines - 1):
-            os.write(sys.stdout.fileno(), b'\033[2K\r\033[1A')
-        os.write(sys.stdout.fileno(), b'\033[2K\r')
-        line = prompt + buf.current_line()
-        os.write(sys.stdout.fileno(), line.encode())
-        prompt_lines = len(line.split('\n'))
-        for _ in range(prompt_lines - 1):
-            os.write(sys.stdout.fileno(), b'\r\033[1A')
-        os.write(sys.stdout.fileno(), b'\r')
-        line_prev = prompt + buf.current_line()[:buf.x]
-        os.write(sys.stdout.fileno(), line_prev.encode())
-    print_prompt()
+    lines_all, lines_cur = print_lines(prompt + buf.current_line(), len(prompt) + buf.x)
     while True:
         chars = os.read(sys.stdin.fileno(), 10240).decode()
         for c in chars:
@@ -134,9 +140,6 @@ def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='',
                 cmd = cancel
                 break
             if c in ['\x03','\x04','\r','\n']:
-                for _ in range(prompt_lines - 1):
-                    os.write(sys.stdout.fileno(), b'\033[2K\r\033[1A')
-                os.write(sys.stdout.fileno(), b'\033[2K\r')
                 line = buf.current_line()
                 if include_last:
                     line += c
@@ -158,8 +161,9 @@ def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='',
                 break
         if cmd is not None:
             break
-        print_prompt()
-    del prompt_lines
+        clear_lines(lines_all, lines_cur)
+        lines_all, lines_cur = print_lines(prompt + buf.current_line(), len(prompt) + buf.x)
+    clear_lines(lines_all, lines_cur)
     return cmd
 
 def save_history(prompt, context, cmd):
@@ -195,28 +199,22 @@ def cmd_generate():
             for chunk in output:
                 clear_lines()
                 cmd, think = chunk[0], chunk[1]
-                display = '(gen-cmd): '
                 if cmd == '':
-                    display += think
+                    display = '(gen-think): ' + think
                 else:
-                    display += cmd
-                display = display.split('\n')
-                tmp = []
-                width = round(winsize.columns / 2)
-                for line in display:
-                    for i in range(0, len(line) + 1, width):
-                        tmp.append(line[i:i+width])
-                display = tmp
-                display_lines = len(display)
-                display = '\r\n'.join(display)
+                    display = '(gen-cmd): ' + cmd
+                display, display_lines = wrap_multi_lines(display)
                 os.write(sys.stdout.fileno(), b'\033[2K\r')
                 os.write(sys.stdout.fileno(), display.encode())
             clear_lines()
             output = None
         flags_display = flags.replace(default, default.upper())
         display = f'(gen-cmd): {cmd}{confirm_info} {flags_display} '
+        if show_think:
+            display = f"(gen-think): {think}\n{display}"
+        show_think = False
+        prefix_info = ''
         display_lines = len(display.split('\n'))
-        display = display.replace('\n', '\n\r')
         confirm_info = ', confirm?'
         confirm = read_line(display, cancel='n', begin='\033[2K\r', include_last=False)
         confirm = confirm.lower()
@@ -231,10 +229,7 @@ def cmd_generate():
             cmd = ''
             break
         elif confirm in ['k','think']:
-            clear_lines()
-            think_display = think.replace('\n', '\n\r')
-            os.write(sys.stdout.fileno(), b'\r')
-            os.write(sys.stdout.fileno(), think_display.encode())
+            show_think = True
         elif confirm in ['r','re','retry']:
             output = generate_cmd(prompt, context)
         elif confirm in ['e','edit']:
