@@ -59,22 +59,17 @@ except Exception as e:
     raise e
 
 mode = 'char'
-context = ''
 running = True
 slave_tty = termios.tcgetattr(slave_fd)
 
 def read_stdout():
-    global context, mode
+    global mode
     while running:
         try:
             chars = os.read(master_fd, 10240)
             if chars:
                 if mode != 'line':
                     os.write(sys.stdout.fileno(), chars)
-                if len(chars) == 1 and chars[0] == 127:
-                    context = context[:-1]
-                else:
-                    context += chars.decode()
                 screen.write(chars)
         except Exception as e:
             print('error:', e, end='\r\n')
@@ -84,9 +79,8 @@ stdout_thread.daemon = True
 stdout_thread.start()
 
 def print_context():
-    global context
-    last_line = context.split('\n')[-1]
-    os.write(sys.stdout.fileno(), ('\033[2K\r' + last_line).encode())
+    line = screen._raw.split('\n')[-1]
+    os.write(sys.stdout.fileno(), ('\033[2K\r' + line).encode())
 
 def wrap_multi_lines(display, padding=4):
     global winsize
@@ -178,7 +172,8 @@ def cmd_generate():
     prompt = read_line('(gen-prompt): ', cancel='', include_last=False)
     if prompt == '':
         return ''
-    output = generate_cmd(prompt, screen.text())
+    context = screen.text()
+    output = generate_cmd(prompt, context)
     cmd, think = '', ''
     confirm_info = ', confirm?'
     flags = '[y/u/n/e/r/k/t]'
@@ -300,7 +295,7 @@ def cmd_watch():
     del total_chars
 
 def prompt_mode():
-    global context, mode
+    global mode
     try:
         return cmd_generate()
     finally:

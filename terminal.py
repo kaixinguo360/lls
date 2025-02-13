@@ -101,7 +101,9 @@ class Screen:
         self._start_y = 0
         self.mode = 'normal'
         self.esc = ''
+        self.dropped_chars = 0
         self.dropped_lines = 0
+        self.max_chars = 8000
         self.max_lines = 500
         self.max_height = 30
         self.total_chars = 0
@@ -175,6 +177,10 @@ class Screen:
     def write_char(self, c):
         self.total_chars += 1
         self._raw += c
+        if len(self._raw) > self.max_chars:
+            offset = len(self._raw) - self.max_chars
+            self.dropped_chars += offset
+            self._raw = self._raw[offset:]
         if self.mode == 'normal':
             self._write_char_normal_mode(c)
         elif self.mode == 'esc':
