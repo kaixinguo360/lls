@@ -366,6 +366,14 @@ def line_mode():
                 if cmd:
                     os.write(master_fd, cmd.encode())
                     cmd_watch()
+            elif cmd in ['err','error']:
+                print('\033[2J\033[H\r', end='')
+                if len(screen.err_esc) == 0:
+                    print('no catched unknown escape sequences', end='\r\n')
+                else:
+                    print('catched unknown escape sequences:', end='\r\n')
+                for err in screen.err_esc:
+                    print('esc:', err.encode(), end='\r\n')
             else:
                 read_line(f"{cmd}: command not found", max_chars=1)
     finally:
