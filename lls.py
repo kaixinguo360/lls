@@ -122,7 +122,7 @@ def print_lines(display, cursor=None):
         lines_cur = lines_all
     return lines_all, lines_cur
 
-def read_line(prompt=':', include_last=True, max_chars=-1, begin='\n', value='', cancel=None, backspace=None):
+def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None, cancel=None, backspace=None):
     global mode
     if begin:
         os.write(sys.stdout.fileno(), begin.encode())
@@ -175,7 +175,7 @@ def save_history(prompt, context, cmd):
         print('error:', e, end='\r\n')
 
 def cmd_generate():
-    prompt = read_line('(gen-prompt): ', cancel='', begin='\033[2K\r', include_last=False)
+    prompt = read_line('(gen-prompt): ', cancel='', include_last=False)
     if prompt == '':
         return ''
     output = generate_cmd(prompt, screen.text())
@@ -185,28 +185,19 @@ def cmd_generate():
     default = 'u'
     save = False
     show_think = False
-    global display_lines
-    display_lines = 1
-    def clear_lines():
-        global display_lines
-        for _ in range(display_lines - 1):
-            os.write(sys.stdout.fileno(), b'\033[2K\r\033[1A')
-        display_lines = 1
     while True:
-        clear_lines()
         if output is not None:
+            lines_all, lines_cur = 1, 1
             os.write(sys.stdout.fileno(), b'\033[2K\r(gen-cmd): waiting...')
             for chunk in output:
-                clear_lines()
+                clear_lines(lines_all, lines_cur)
                 cmd, think = chunk[0], chunk[1]
                 if cmd == '':
                     display = '(gen-think): ' + think
                 else:
                     display = '(gen-cmd): ' + cmd
-                display, display_lines = wrap_multi_lines(display)
-                os.write(sys.stdout.fileno(), b'\033[2K\r')
-                os.write(sys.stdout.fileno(), display.encode())
-            clear_lines()
+                lines_all, lines_cur = print_lines(display)
+            lines_all, lines_cur = clear_lines(lines_all, lines_cur)
             output = None
         flags_display = flags.replace(default, default.upper())
         display = f'(gen-cmd): {cmd}{confirm_info} {flags_display} '
@@ -214,9 +205,8 @@ def cmd_generate():
             display = f"(gen-think): {think}\n{display}"
         show_think = False
         prefix_info = ''
-        display_lines = len(display.split('\n'))
         confirm_info = ', confirm?'
-        confirm = read_line(display, cancel='n', begin='\033[2K\r', include_last=False)
+        confirm = read_line(display, cancel='n', include_last=False)
         confirm = confirm.lower()
         if confirm == '':
             confirm = default
@@ -233,29 +223,24 @@ def cmd_generate():
         elif confirm in ['r','re','retry']:
             output = generate_cmd(prompt, context)
         elif confirm in ['e','edit']:
-            a = display_lines
-            clear_lines()
-            prompt = read_line('(gen-prompt): ', cancel='', begin='\033[2K\r', include_last=False, value=prompt)
+            prompt = read_line('(gen-prompt): ', cancel='', include_last=False, value=prompt)
             if prompt == '':
                 cmd = ''
                 break
             output = generate_cmd(prompt, context)
         elif confirm in ['t','teach']:
-            clear_lines()
             default = 'y'
-            cmd = read_line(f'(gen-cmd): ', begin='\033[2K\r', include_last=False)
+            cmd = read_line(f'(gen-cmd): ', include_last=False)
             if cmd == '':
                 break
         else:
             confirm_info = ", please input 'y' or 'n':"
-    clear_lines()
-    del display_lines
     if save:
         save_history(prompt, context, cmd)
     return cmd
 
 def cmd_exec(prompt='cmd'):
-    cmd = read_line(f'({prompt}): ', cancel='', begin='\033[2K\r', include_last=False)
+    cmd = read_line(f'({prompt}): ', cancel='', include_last=False)
     print('\033[2K\r', end='')
     return cmd
 
@@ -275,7 +260,7 @@ def cmd_watch():
     signal.signal(signal.SIGALRM, show_screen)
     show_screen()
     while True:
-        c = read_line('', begin='\033[2K\r', max_chars=1, backspace='b')
+        c = read_line('', max_chars=1, backspace='b')
         signal.setitimer(signal.ITIMER_REAL, 0)
         if c in ['\x03','\x04','q']:
             break
@@ -327,7 +312,7 @@ def line_mode():
     try:
         cmd = ''
         while True:
-            cmd = read_line(begin='\033[2K\r', cancel='q', include_last=False)
+            cmd = read_line(cancel='q', include_last=False)
             if cmd == '':
                 pass
             elif cmd in ['q','quit','exit']:
@@ -368,7 +353,7 @@ def line_mode():
                     os.write(master_fd, cmd.encode())
                     cmd_watch()
             else:
-                read_line(f"{cmd}: command not found", begin='\033[2K\r', max_chars=1)
+                read_line(f"{cmd}: command not found", max_chars=1)
     finally:
         mode = 'char'
 
