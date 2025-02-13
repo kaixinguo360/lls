@@ -15,13 +15,14 @@ import signal
 import struct
 import fcntl
 
-from generate import generate_cmd
+from chat import Chat, print_chat_perfect
 from terminal import Screen, print_perfect
 
 old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
 master_fd, slave_fd = pty.openpty()
 winsize = os.get_terminal_size()
+chat = Chat()
 screen = Screen()
 screen.keep_logs_when_clean_screen = True
 
@@ -169,12 +170,18 @@ def save_history(prompt, context, cmd):
         print('error:', e, end='\r\n')
 
 def cmd_generate():
-    prompt = read_line('(gen-prompt): ', cancel='', include_last=False)
-    if prompt == '':
+    instrct = read_line('(gen-instrct): ', cancel='', include_last=False)
+    if instrct == '':
         return ''
     context = screen.text()
-    output = generate_cmd(prompt, context)
     cmd, think = '', ''
+    if '#' in instrct:
+        args = instrct.split('#')
+        instrct = args[0].strip()
+        cmd = args[-1].strip()
+        output = None
+    else:
+        output = chat.try_generate(instrct, context)
     confirm_info = ', confirm?'
     flags = '[y/u/n/e/r/k/t]'
     default = 'u'
@@ -216,13 +223,13 @@ def cmd_generate():
         elif confirm in ['k','think']:
             show_think = True
         elif confirm in ['r','re','retry']:
-            output = generate_cmd(prompt, context)
+            output = chat.try_generate(instrct, context)
         elif confirm in ['e','edit']:
-            prompt = read_line('(gen-prompt): ', cancel='', include_last=False, value=prompt)
-            if prompt == '':
+            instrct = read_line('(gen-instrct): ', cancel='', include_last=False, value=instrct)
+            if instrct == '':
                 cmd = ''
                 break
-            output = generate_cmd(prompt, context)
+            output = chat.try_generate(instrct, context)
         elif confirm in ['t','teach']:
             default = 'y'
             cmd = read_line(f'(gen-cmd): ', include_last=False)
@@ -231,13 +238,20 @@ def cmd_generate():
         else:
             confirm_info = ", please input 'y' or 'n':"
     if save:
-        save_history(prompt, context, cmd)
+        save_history(instrct, context, cmd)
+    if cmd:
+        chat.add_chat(instrct, context, cmd)
     return cmd
 
 def cmd_exec(prompt='cmd'):
     cmd = read_line(f'({prompt}): ', cancel='', include_last=False)
+    instrct = None
+    if '#' in cmd:
+        args = cmd.split('#')
+        cmd = args[0].strip()
+        instrct = args[-1].strip()
     print('\033[2K\r', end='')
-    return cmd
+    return cmd, instrct
 
 def cmd_watch():
     global total_chars
@@ -266,13 +280,14 @@ def cmd_watch():
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['e']:
-            cmd = cmd_exec()
+            cmd, instrct = cmd_exec()
             if cmd:
+                chat.add_chat(instrct, screen.text(), cmd)
                 cmd += '\n'
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['i']:
-            cmd = cmd_exec('input')
+            cmd, instrct = cmd_exec('input')
             if cmd:
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
@@ -319,6 +334,9 @@ def line_mode():
             elif cmd in ['r','raw']:
                 print('\033[2J\033[H\r', end='')
                 print(screen.raw(), end='\r\n')
+            elif cmd in ['ch','chat']:
+                print('\033[2J\033[H\r', end='')
+                print_chat_perfect(chat, end='\r\n')
             elif cmd in ['reset']:
                 print_context()
                 termios.tcsetattr(slave_fd, termios.TCSADRAIN, slave_tty)
@@ -337,13 +355,14 @@ def line_mode():
                 os.write(master_fd, cmd.encode())
                 cmd_watch()
             elif cmd in ['e','exec']:
-                cmd = cmd_exec()
+                cmd, instrct = cmd_exec()
                 if cmd:
+                    chat.add_chat(instrct, screen.text(), cmd)
                     cmd += '\n'
                     os.write(master_fd, cmd.encode())
                     cmd_watch()
             elif cmd in ['i','input']:
-                cmd = cmd_exec('input')
+                cmd, instrct = cmd_exec('input')
                 if cmd:
                     os.write(master_fd, cmd.encode())
                     cmd_watch()
