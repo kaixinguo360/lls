@@ -182,6 +182,9 @@ class Screen:
         self._start_y = 0
         self.mode = 'normal'
         self.esc = ''
+        self.esc_debug = False
+        self.esc_record = []
+        self.esc_err = []
         self.buffer = 'main'
         self.dropped_chars = 0
         self.dropped_lines = 0
@@ -192,7 +195,6 @@ class Screen:
         self.keep_logs_when_clean_screen = False
         self.insert_mode = False
         self.limit_move = False
-        self.err_esc = []
 
     def start_y(self):
         start = 0
@@ -347,6 +349,10 @@ class Screen:
                     self.mode = 'normal'
                     self.esc = ''
 
+                    if self.esc_debug:
+                        self.esc_record.append((esc.encode(), pattern, opr))
+                        self.esc_record = self.esc_record[-100:]
+
                     if prev is not None:
                         self.write_chars(prev)
 
@@ -383,8 +389,8 @@ class Screen:
             prev_esc = ''.join(lines)
             last_esc = '\033' + lines[-1]
             if self._check_esc(last_esc, prev_esc):
-                self.err_esc.append(esc)
-                self.err_esc = self.err_esc[-100:]
+                self.esc_err.append(esc)
+                self.esc_err = self.esc_err[-100:]
                 return
 
     def text(self, end='\n'):

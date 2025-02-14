@@ -420,14 +420,32 @@ def line_mode():
                     os.write(master_fd, cmd.encode())
                     time.sleep(0.1)
                     cmd_show()
-            elif cmd in ['err','error']:
-                print('\033[2J\033[H\r', end='')
-                if len(screen.err_esc) == 0:
-                    print('no catched unknown escape sequences', end='\r\n')
+            elif cmd in ['esc']:
+                if args is None:
+                    args = 'show'
+                if args in ['e','err','error']:
+                    print('\033[2J\033[H\r', end='')
+                    if len(screen.esc_err) == 0:
+                        print('no catched unknown escape sequences', end='\r\n')
+                    else:
+                        print('catched unknown escape sequences:', end='\r\n')
+                    for esc in screen.esc_err:
+                        print('esc:', esc.encode(), end='\r\n')
+                elif args in ['s','save','saved']:
+                    print('\033[2J\033[H\r', end='')
+                    if len(screen.esc_record) == 0:
+                        print('no saved escape sequences', end='\r\n')
+                    else:
+                        print('saved escape sequences:', end='\r\n')
+                    for esc in screen.esc_record:
+                        print('esc:', esc, end='\r\n')
+                elif args in ['d','debug']:
+                    screen.esc_debug = not screen.esc_debug
+                    print(f'debug mode: {screen.esc_debug}', end='\r\n')
+                elif args in ['show','status']:
+                    print(f'debug mode: {screen.esc_debug}', end='\r\n')
                 else:
-                    print('catched unknown escape sequences:', end='\r\n')
-                for err in screen.err_esc:
-                    print('esc:', err.encode(), end='\r\n')
+                    print('usage: esc [err|saved|status|debug]', end='\r\n')
             elif cmd in ['t','tty']:
                 def callback_fun():
                     cmd_show(raw=True)
