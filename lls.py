@@ -147,12 +147,14 @@ def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None,
             buf.insert_mode = True
             buf.limit_move = True
             buf.max_height = 1
+            buf.auto_move_to_end = True
             bufs[id] = buf
     else:
         buf = Screen()
         buf.insert_mode = True
         buf.limit_move = True
         buf.max_height = 1
+        buf.auto_move_to_end = True
     buf.write_chars(value)
     cmd = None
     lines_all, lines_cur = print_lines(prompt + buf.current_line(), len(prompt) + buf.x)

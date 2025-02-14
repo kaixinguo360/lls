@@ -195,6 +195,7 @@ class Screen:
         self.keep_logs_when_clean_screen = False
         self.insert_mode = False
         self.limit_move = False
+        self.auto_move_to_end = False
 
     def start_y(self):
         start = 0
@@ -240,12 +241,18 @@ class Screen:
             s.nor(limit)
             s.x = ox
             s.y -= i
+            if s.auto_move_to_end:
+                s.nor(limit)
+                s.x = len(s.lines[s.y])
         if c == 'B':
             ox = s.x
             s.x = 0
             s.nor(limit)
             s.x = ox
             s.y += i
+            if s.auto_move_to_end:
+                s.nor(limit)
+                s.x = len(s.lines[s.y])
         if c == 'C':
             s.x += i
         if c == 'D':
