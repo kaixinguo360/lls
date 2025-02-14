@@ -135,21 +135,33 @@ def print_lines(text, cursor=None):
         lines_cur = lines_all
     return lines_all, lines_cur
 
-def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None, cancel=None, backspace=None):
-    global mode
+bufs = {}
+
+def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None, cancel=None, backspace=None, id=None, no_save=None):
     if begin:
         os.write(sys.stdout.fileno(), begin.encode())
-    buf = Screen()
-    buf.insert_mode = True
-    buf.limit_move = True
-    buf.max_height = 1
+    if id is not None:
+        buf = bufs.get(id)
+        if buf is None:
+            buf = Screen()
+            buf.insert_mode = True
+            buf.limit_move = True
+            buf.max_height = 1
+            bufs[id] = buf
+    else:
+        buf = Screen()
+        buf.insert_mode = True
+        buf.limit_move = True
+        buf.max_height = 1
     buf.write_chars(value)
     cmd = None
     lines_all, lines_cur = print_lines(prompt + buf.current_line(), len(prompt) + buf.x)
+    cancelled = False
     while True:
         chars = os.read(sys.stdin.fileno(), 10240).decode()
         for c in chars:
             if cancel is not None and c in ['\x03','\x04']:
+                cancelled = True
                 cmd = cancel
                 break
             if c in ['\x03','\x04','\r','\n']:
@@ -177,6 +189,16 @@ def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None,
         clear_lines(lines_all, lines_cur)
         lines_all, lines_cur = print_lines(prompt + buf.current_line(), len(prompt) + buf.x)
     clear_lines(lines_all, lines_cur)
+    if id is not None:
+        buf.y = len(buf.lines) - 1
+        if cancelled or cmd == '' or (len(buf.lines) > 1 and buf.lines[buf.y - 1] == cmd
+                ) or (no_save is not None and cmd in no_save):
+            buf.lines[buf.y] = ''
+            buf.x = 0
+        else:
+            buf.lines[buf.y] = cmd
+            buf.x = len(buf.lines[buf.y])
+            buf.write_char('\n')
     return cmd
 
 def save_history(prompt, context, cmd):
@@ -189,7 +211,7 @@ def save_history(prompt, context, cmd):
 
 def cmd_generate(instrct=None):
     if instrct is None:
-        instrct = read_line('(gen-instrct): ', cancel='', include_last=False)
+        instrct = read_line('(gen-instrct): ', cancel='', include_last=False, id='instrct')
     if instrct == '':
         return ''
     context = screen.text()
@@ -227,7 +249,7 @@ def cmd_generate(instrct=None):
         show_think = False
         prefix_info = ''
         confirm_info = ', confirm?'
-        confirm = read_line(text, cancel='n', include_last=False)
+        confirm = read_line(text, cancel='n', include_last=False, id='gen-confirm', no_save=['q'])
         confirm = confirm.lower()
         if confirm == '':
             confirm = default
@@ -244,14 +266,14 @@ def cmd_generate(instrct=None):
         elif confirm in ['r','re','retry']:
             output = chat.try_generate(instrct, context)
         elif confirm in ['e','edit']:
-            instrct = read_line('(gen-instrct): ', cancel='', include_last=False, value=instrct)
+            instrct = read_line('(gen-instrct): ', cancel='', include_last=False, value=instrct, id='instrct')
             if instrct == '':
                 cmd = ''
                 break
             output = chat.try_generate(instrct, context)
         elif confirm in ['t','teach']:
             default = 'y'
-            cmd = read_line(f'(gen-cmd): ', include_last=False)
+            cmd = read_line(f'(gen-cmd): ', include_last=False, id='cmd')
             if cmd == '':
                 break
         else:
@@ -262,9 +284,9 @@ def cmd_generate(instrct=None):
         chat.add_chat(instrct, context, cmd)
     return cmd
 
-def cmd_exec(prompt='cmd', cmd=None):
+def cmd_exec(prompt='cmd', cmd=None, id=None):
     if cmd is None:
-        cmd = read_line(f'({prompt}): ', cancel='', include_last=False)
+        cmd = read_line(f'({prompt}): ', cancel='', include_last=False, id=id)
     instrct = None
     if '#' in cmd:
         args = cmd.split('#')
@@ -299,14 +321,14 @@ def cmd_watch():
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['e']:
-            cmd, instrct = cmd_exec()
+            cmd, instrct = cmd_exec(id='cmd')
             if cmd:
                 chat.add_chat(instrct, screen.text(), cmd)
                 cmd += '\n'
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['i']:
-            cmd, instrct = cmd_exec('input')
+            cmd, instrct = cmd_exec('input', id='cmd_input')
             if cmd:
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
@@ -346,7 +368,7 @@ def line_mode():
         cmd = ''
         args = ''
         while True:
-            cmd = read_line(cancel='q', include_last=False)
+            cmd = read_line(cancel='q', include_last=False, id='line_mode', no_save=['q'])
             cmd = cmd.strip()
             args = None
             if ' ' in cmd and cmd[:1] != ' ':
@@ -385,7 +407,7 @@ def line_mode():
                 time.sleep(0.1)
                 cmd_show()
             elif cmd in ['e','exec']:
-                cmd, instrct = cmd_exec(cmd=args)
+                cmd, instrct = cmd_exec(cmd=args, id='cmd')
                 if cmd:
                     chat.add_chat(instrct, screen.text(), cmd)
                     cmd += '\n'
@@ -393,7 +415,7 @@ def line_mode():
                     time.sleep(0.1)
                     cmd_show()
             elif cmd in ['i','input']:
-                cmd, instrct = cmd_exec('input', cmd=args)
+                cmd, instrct = cmd_exec('input', cmd=args, id='cmd_input')
                 if cmd:
                     os.write(master_fd, cmd.encode())
                     time.sleep(0.1)
