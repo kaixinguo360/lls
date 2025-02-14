@@ -16,7 +16,7 @@ import struct
 import fcntl
 
 from chat import Chat, print_chat_perfect
-from terminal import Screen, print_perfect
+from terminal import Screen, print_screen_perfect
 
 old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
@@ -265,8 +265,7 @@ def cmd_watch():
         global total_chars
         if total_chars != screen.total_chars:
             total_chars = screen.total_chars
-            print('\033[2J\033[H\r', end='')
-            print_perfect(screen, end='\r\n')
+            cmd_show()
             print('\r\n')
         time_display = time.asctime(time.localtime(time.time()))
         print(f'\033[1A\033[2K\rEvery 2.0s: show\t{time_display}', end='\r\n')
@@ -316,7 +315,7 @@ def cmd_watch():
 
 def cmd_show():
     print('\033[2J\033[H\r', end='')
-    print_perfect(screen, end='\r\n')
+    print_screen_perfect(screen, end='\r\n')
 
 def prompt_mode():
     global mode

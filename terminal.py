@@ -396,25 +396,59 @@ class Screen:
     def current_line(self):
         return self.lines[self.y]
 
-def print_perfect(s, end='\n', tail=''):
-    print('+---------+---------+---------+---------+', end=end)
-    for i in range(len(s.lines)):
-        line = s.lines[i] + tail
+def print_screen_perfect(s, end='\n', tail='', width=None, height=None, frame=False, raw=False):
+    import os
+    if width is None:
+        winsize = os.get_terminal_size()
+        if frame:
+            width = winsize.columns - 4
+        else:
+            width = winsize.columns - 2
+    if height is None:
+        if frame:
+            height = s.max_height
+        else:
+            height = len(s.lines)
+    y_begin = len(s.lines) - y_end if len(s.lines) > height else 0
+    y_end = len(s.lines) if len(s.lines) > height else height
+    if not raw:
+        print('+' + '-'*width + '+', end=end)
+    for i in range(y_begin, y_end):
+        line = s.lines[i] if i < len(s.lines) else ''
+        line += tail
+        x_begin = 0
+        if frame:
+            x_end = width if len(line) > width else len(line)
+        else:
+            x_end = len(line)
+        display = line[x_begin:x_end] + ' ' * (width - (x_end - x_begin))
         if s.y == i:
-            while s.x > len(line) - 1:
-                line += ' '
-            line = line[:s.x] + '\033[7m' + line[s.x:s.x+1] + '\033[0m' + line[s.x+1:]
-        print(line, end=end)
-    print('+---------+---------+---------+---------+', end=end)
-    print(f"cursor: {{x={s.x+1},y={s.y-s.start_y()+1}}}", end='')
-    print(f", lines: {len(s.lines)}", end='')
-    print(f", offset: {s._start_y}", end='')
-    print(f", height: {s.max_height}", end='')
-    print(f", buffer: {s.buffer}", end='')
-    print(f", mode: {s.mode}", end='')
-    if s.mode == 'esc':
-        print(', esc=', s.esc.encode(), end='')
-    print('', end=end)
+            if frame:
+                if s.x >= x_begin and s.x < x_end:
+                    cursor = s.x + x_begin
+                    display = display[:cursor] + '\033[7m' + display[cursor:cursor+1] + '\033[0m' + display[cursor+1:]
+            else:
+                while s.x > len(display) - 1:
+                    display += ' '
+                display = display[:s.x] + '\033[7m' + display[s.x:s.x+1] + '\033[0m' + display[s.x+1:]
+        if frame:
+            print('|' + display + '|', end='')
+        else:
+            print(display.rstrip(' '), end='')
+        if not (raw and i == (y_end - 1)):
+            print('', end=end)
+        print('\r', end='')
+    if not raw:
+        print('+' + '-'*width + '+', end=end)
+        print(f"cursor: {{x={s.x+1},y={s.y-s.start_y()+1}}}", end='')
+        print(f", lines: {len(s.lines)}", end='')
+        print(f", offset: {s._start_y}", end='')
+        print(f", height: {s.max_height}", end='')
+        print(f", buffer: {s.buffer}", end='')
+        print(f", mode: {s.mode}", end='')
+        if s.mode == 'esc':
+            print(', esc=', s.esc.encode(), end='')
+        print('', end=end)
 
 print_wait = False
 
@@ -426,7 +460,7 @@ def write_and_print(s, chars, msg='', delay=0.05, sleep=0.5):
         print('\033[H\033[2J', end='')
         s.write_char(c)
         print('>>> ', chars.encode(), msg)
-        print_perfect(s, end='\n', tail='<')
+        print_screen_perfect(s, end='\n', tail='<')
         if not print_wait and delay:
             time.sleep(delay)
     if print_wait:
