@@ -17,6 +17,7 @@ import fcntl
 
 from chat import Chat, print_chat_perfect
 from terminal import Screen, print_screen_perfect
+from display import wrap_multi_lines
 
 old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
@@ -89,17 +90,6 @@ def print_context():
     else:
         os.write(sys.stdout.fileno(), ('\033[2K\r' + screen._raw).encode())
 
-def wrap_multi_lines(display, padding=4):
-    global winsize
-    display = display.split('\n')
-    tmp = []
-    width = round((winsize.columns - padding) / 2)
-    for line in display:
-        for i in range(0, len(line) + 1, width):
-            tmp.append(line[i:i+width])
-    display = tmp
-    return '\r\n'.join(display), len(display)
-
 def clear_lines(lines_all, lines_cur):
     if lines_all != lines_cur:
         for _ in range(lines_all - lines_cur):
@@ -109,14 +99,14 @@ def clear_lines(lines_all, lines_cur):
     os.write(sys.stdout.fileno(), b'\033[2K\r')
     return 1, 1
 
-def print_lines(display, cursor=None):
-    line, lines_all = wrap_multi_lines(display)
+def print_lines(text, cursor=None):
+    line, lines_all = wrap_multi_lines(text)
     os.write(sys.stdout.fileno(), b'\033[2K\r')
     os.write(sys.stdout.fileno(), line.encode())
-    if cursor is not None and cursor != len(display):
+    if cursor is not None and cursor != len(text):
         for _ in range(lines_all - 1):
             os.write(sys.stdout.fileno(), b'\r\033[1A')
-        line_prev, lines_cur = wrap_multi_lines(display[:cursor])
+        line_prev, lines_cur = wrap_multi_lines(text[:cursor])
         os.write(sys.stdout.fileno(), b'\r')
         os.write(sys.stdout.fileno(), line_prev.encode())
     else:
@@ -202,20 +192,20 @@ def cmd_generate(instrct=None):
                 clear_lines(lines_all, lines_cur)
                 cmd, think = chunk[0], chunk[1]
                 if cmd == '':
-                    display = '(gen-think): ' + think
+                    text = '(gen-think): ' + think
                 else:
-                    display = '(gen-cmd): ' + cmd
-                lines_all, lines_cur = print_lines(display)
+                    text = '(gen-cmd): ' + cmd
+                lines_all, lines_cur = print_lines(text)
             lines_all, lines_cur = clear_lines(lines_all, lines_cur)
             output = None
-        flags_display = flags.replace(default, default.upper())
-        display = f'(gen-cmd): {cmd}{confirm_info} {flags_display} '
+        flags_text = flags.replace(default, default.upper())
+        text = f'(gen-cmd): {cmd}{confirm_info} {flags_text} '
         if show_think:
-            display = f"(gen-think): {think}\n{display}"
+            text = f"(gen-think): {think}\n{text}"
         show_think = False
         prefix_info = ''
         confirm_info = ', confirm?'
-        confirm = read_line(display, cancel='n', include_last=False)
+        confirm = read_line(text, cancel='n', include_last=False)
         confirm = confirm.lower()
         if confirm == '':
             confirm = default
@@ -270,8 +260,8 @@ def cmd_watch():
             total_chars = screen.total_chars
             cmd_show()
             print('\r\n')
-        time_display = time.asctime(time.localtime(time.time()))
-        print(f'\033[1A\033[2K\rEvery 2.0s: show\t{time_display}', end='\r\n')
+        time_text = time.asctime(time.localtime(time.time()))
+        print(f'\033[1A\033[2K\rEvery 2.0s: show\t{time_text}', end='\r\n')
         signal.setitimer(signal.ITIMER_REAL, 2)
     signal.signal(signal.SIGALRM, show_screen)
     show_screen()
