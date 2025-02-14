@@ -87,6 +87,12 @@ def esc_end(s):
     s.y = len(s.lines)
     s.x = len(s.lines[s.y])
 
+def esc_use_alter_buffer(s):
+    s.buffer = 'alter'
+
+def esc_use_main_buffer(s):
+    s.buffer = 'main'
+
 def esc_raw(s, chars):
     return '^' + chars
 
@@ -116,8 +122,6 @@ esc_patterns = {
     r'\0337|\033\[s': esc_save_cursor_pos, # 光标位置保存
     r'\0338|\033\[u': esc_restore_cursor_pos, # 光标位置还原
     r'\033\[20[hl]': '\n', # 换行
-    # 光标可见性,设置窗口宽度
-    r'\033\[\?[0-9;]*[hl]': '',
     # 光标形状
     r'\033\[[0-9]*\x20q': '',
     # LED控制
@@ -145,9 +149,11 @@ esc_patterns = {
     r'\033[\(\)].': '',
     # 设置滚动边距
     r'\033\[([0-9]*);?([0-9]*)r': '',
-    # 备用屏幕缓冲区
-    r'\033\[1049h': '', # TODO 使用备用屏幕缓冲区
-    r'\033\[1049l': '', # TODO 使用主屏幕缓冲区
+    # 设置幕缓冲区
+    r'\033\[\?(?:1049|47)h': esc_use_alter_buffer, # 使用备用屏幕缓冲区
+    r'\033\[\?(?:1049|47)l': esc_use_main_buffer, # 使用主用屏幕缓冲区
+    # 光标可见性,设置窗口宽度
+    r'\033\[\?[0-9;]*[hl]': '',
     # 换行模式设置
     r'\033E': '', # TODO 光标移动到下一行第一个位置
     r'\033M': '', # TODO 光标移动到上一行相同水平位置
@@ -176,6 +182,7 @@ class Screen:
         self._start_y = 0
         self.mode = 'normal'
         self.esc = ''
+        self.buffer = 'main'
         self.dropped_chars = 0
         self.dropped_lines = 0
         self.max_chars = 8000
@@ -403,6 +410,7 @@ def print_perfect(s, end='\n', tail=''):
     print(f", lines: {len(s.lines)}", end='')
     print(f", offset: {s._start_y}", end='')
     print(f", height: {s.max_height}", end='')
+    print(f", buffer: {s.buffer}", end='')
     print(f", mode: {s.mode}", end='')
     if s.mode == 'esc':
         print(', esc=', s.esc.encode(), end='')

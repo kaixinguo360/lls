@@ -80,8 +80,11 @@ stdout_thread.daemon = True
 stdout_thread.start()
 
 def print_context():
-    line = screen._raw.split('\n')[-1]
-    os.write(sys.stdout.fileno(), ('\033[2K\r' + line).encode())
+    if screen.buffer == 'main' and screen.y == len(screen.lines) - 1:
+        line = screen._raw.split('\n')[-1]
+        os.write(sys.stdout.fileno(), ('\033[2K\r' + line).encode())
+    else:
+        os.write(sys.stdout.fileno(), ('\033[2K\r' + screen._raw).encode())
 
 def wrap_multi_lines(display, padding=4):
     global winsize
@@ -345,7 +348,7 @@ def line_mode():
                 return ''
             elif cmd in ['c','clear']:
                 print('\033[2J\033[H\r', end='')
-            elif cmd in ['t','tail','w','watch']:
+            elif cmd in ['w','watch']:
                 cmd_watch()
             elif cmd in ['g','gen','generate']:
                 cmd = cmd_generate()
@@ -367,7 +370,7 @@ def line_mode():
                     os.write(master_fd, cmd.encode())
                     cmd_watch()
             elif cmd in ['err','error']:
-                print('\033[2J\033[H\r', end='')
+                print('\r', end='')
                 if len(screen.err_esc) == 0:
                     print('no catched unknown escape sequences', end='\r\n')
                 else:
