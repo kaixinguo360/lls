@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 
+import importlib.util
 import subprocess
 import sys
 import os
+
+config_file_path = os.path.join(os.environ['HOME'], '.llsrc.py')
+if os.path.exists(config_file_path):
+    try:
+        spec = importlib.util.spec_from_file_location(name='lls_config', location=config_file_path)
+        lls_config_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lls_config_module)
+    except Exception as e:
+        print('error:', e, file=sys.stderr)
 
 if len(sys.argv) > 2 and sys.argv[1] == '--':
     main_cmd = sys.argv[2]
