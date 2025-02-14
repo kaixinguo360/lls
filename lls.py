@@ -1,15 +1,32 @@
 #!/usr/bin/env python3
 
-import unicodedata
 import subprocess
+import sys
+import os
+
+if len(sys.argv) > 2 and sys.argv[1] == '--':
+    main_cmd = sys.argv[2]
+    argv = sys.argv[3:]
+else:
+    if os.path.realpath(os.environ['SHELL']) != os.path.realpath(sys.argv[0]):
+        main_cmd = os.environ['SHELL']
+    else:
+        main_cmd = os.environ.get('LLS_FALLBACK_SHELL', 'bash')
+    argv = sys.argv[1:]
+
+command = [main_cmd, *argv]
+
+if not sys.stdin.isatty():
+    result_code = subprocess.call(command)
+    exit(result_code)
+
+import unicodedata
 import threading
 import termios
 import string
 import time
 import tty
 import pty
-import sys
-import os
 
 import signal
 import struct
@@ -39,11 +56,6 @@ def sync_winsize(*args, **kwargs):
 
 sync_winsize()
 signal.signal(signal.SIGWINCH, sync_winsize)
-
-if len(sys.argv) > 1:
-    command = sys.argv[1:]
-else:
-    command = ['bash', '-i']
 
 try:
     proc = subprocess.Popen(
