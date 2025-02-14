@@ -61,6 +61,7 @@ except Exception as e:
 
 mode = 'char'
 running = True
+slave_callback = None
 slave_tty = termios.tcgetattr(slave_fd)
 
 def read_stdout():
@@ -72,6 +73,8 @@ def read_stdout():
                 if mode != 'line':
                     os.write(sys.stdout.fileno(), chars)
                 screen.write(chars)
+            if slave_callback is not None:
+                slave_callback()
         except Exception as e:
             print('error:', e, end='\r\n')
 
@@ -313,9 +316,9 @@ def cmd_watch():
     signal.signal(signal.SIGALRM, signal.SIG_DFL)
     del total_chars
 
-def cmd_show():
+def cmd_show(**kwargs):
     print('\033[2J\033[H\r', end='')
-    print_screen_perfect(screen, end='\r\n')
+    print_screen_perfect(screen, end='\r\n', **kwargs)
 
 def prompt_mode():
     global mode
@@ -326,7 +329,7 @@ def prompt_mode():
         mode = 'char'
 
 def line_mode():
-    global mode
+    global mode, slave_callback
     try:
         cmd = ''
         args = ''
@@ -391,6 +394,26 @@ def line_mode():
                     print('catched unknown escape sequences:', end='\r\n')
                 for err in screen.err_esc:
                     print('esc:', err.encode(), end='\r\n')
+            elif cmd in ['t','tty']:
+                def callback_fun():
+                    cmd_show(raw=True)
+                os.write(sys.stdout.fileno(), b'\033[?25l')
+                callback_fun()
+                slave_callback = callback_fun
+                run = True
+                while True:
+                    chars = os.read(sys.stdin.fileno(), 10240).decode()
+                    for c in chars:
+                        if c in ['\005']:
+                            run = False
+                            break
+                        os.write(master_fd, c.encode())
+                    if not run:
+                        break
+                slave_callback = None
+                os.write(sys.stdout.fileno(), b'\033[?25h')
+                print_context()
+                return ''
             else:
                 read_line(f"{cmd}: command not found", max_chars=1)
     finally:
