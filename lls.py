@@ -172,8 +172,9 @@ def save_history(prompt, context, cmd):
     except Exception as e:
         print('error:', e, end='\r\n')
 
-def cmd_generate():
-    instrct = read_line('(gen-instrct): ', cancel='', include_last=False)
+def cmd_generate(instrct=None):
+    if instrct is None:
+        instrct = read_line('(gen-instrct): ', cancel='', include_last=False)
     if instrct == '':
         return ''
     context = screen.text()
@@ -246,8 +247,9 @@ def cmd_generate():
         chat.add_chat(instrct, context, cmd)
     return cmd
 
-def cmd_exec(prompt='cmd'):
-    cmd = read_line(f'({prompt}): ', cancel='', include_last=False)
+def cmd_exec(prompt='cmd', cmd=None):
+    if cmd is None:
+        cmd = read_line(f'({prompt}): ', cancel='', include_last=False)
     instrct = None
     if '#' in cmd:
         args = cmd.split('#')
@@ -312,6 +314,10 @@ def cmd_watch():
     signal.signal(signal.SIGALRM, signal.SIG_DFL)
     del total_chars
 
+def cmd_show():
+    print('\033[2J\033[H\r', end='')
+    print_perfect(screen, end='\r\n')
+
 def prompt_mode():
     global mode
     try:
@@ -324,16 +330,22 @@ def line_mode():
     global mode
     try:
         cmd = ''
+        args = ''
         while True:
             cmd = read_line(cancel='q', include_last=False)
+            cmd = cmd.strip()
+            args = None
+            if ' ' in cmd and cmd[:1] != ' ':
+                index = cmd.find(' ')
+                args = cmd[index+1:].strip()
+                cmd = cmd[:index].strip()
             if cmd == '':
                 pass
             elif cmd in ['q','quit','exit']:
                 print_context()
                 return ''
             elif cmd in ['s','show','status']:
-                print('\033[2J\033[H\r', end='')
-                print_perfect(screen, end='\r\n')
+                cmd_show()
             elif cmd in ['r','raw']:
                 print('\033[2J\033[H\r', end='')
                 print(screen.raw(), end='\r\n')
@@ -351,26 +363,29 @@ def line_mode():
             elif cmd in ['w','watch']:
                 cmd_watch()
             elif cmd in ['g','gen','generate']:
-                cmd = cmd_generate()
+                cmd = cmd_generate(args)
                 if cmd == '':
                     continue
                 cmd += '\n'
                 os.write(master_fd, cmd.encode())
-                cmd_watch()
+                time.sleep(0.1)
+                cmd_show()
             elif cmd in ['e','exec']:
-                cmd, instrct = cmd_exec()
+                cmd, instrct = cmd_exec(cmd=args)
                 if cmd:
                     chat.add_chat(instrct, screen.text(), cmd)
                     cmd += '\n'
                     os.write(master_fd, cmd.encode())
-                    cmd_watch()
+                    time.sleep(0.1)
+                    cmd_show()
             elif cmd in ['i','input']:
-                cmd, instrct = cmd_exec('input')
+                cmd, instrct = cmd_exec('input', cmd=args)
                 if cmd:
                     os.write(master_fd, cmd.encode())
-                    cmd_watch()
+                    time.sleep(0.1)
+                    cmd_show()
             elif cmd in ['err','error']:
-                print('\r', end='')
+                print('\033[2J\033[H\r', end='')
                 if len(screen.err_esc) == 0:
                     print('no catched unknown escape sequences', end='\r\n')
                 else:
