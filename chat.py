@@ -74,29 +74,34 @@ class Chat():
             s.messages = s.messages[:-1]
             return m
 
-    def generate(s, callback=None):
+    def generate(s, callback=None, append_messages=None):
+        yield '', ''
         client = get_openai_client()
+        messages = s.messages[:]
+        if append_messages:
+            messages += append_messages
         stream = client.chat.completions.create(
             model=model,
-            messages=s.messages,
+            messages=messages,
             stream=True,
         )
         output = ''
         cmd, think = '', ''
-        for chunk in stream:
-            output += chunk.choices[0].delta.content or ''
-            cmd, think = convert_output(output)
-            yield cmd, think
-        if callback:
-            callback(cmd, think)
+        try:
+            for chunk in stream:
+                output += chunk.choices[0].delta.content or ''
+                cmd, think = convert_output(output)
+                yield cmd, think
+        finally:
+            if callback:
+                callback(cmd, think)
 
     def try_generate(s, instruct, console):
-        s.add_user(instruct, console)
+        m_user = s.create_user_message(instruct, console)
         def callback(cmd, think):
-            m_user = s.pop()
             m_ass = dict(role=s.assistant, content=cmd)
             s.last_try = (m_user, m_ass)
-        return s.generate(callback)
+        return s.generate(append_messages=[m_user])
 
     def commit(s, cmd=None):
         if s.last_try:

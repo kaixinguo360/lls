@@ -38,6 +38,8 @@ import unicodedata
 import threading
 import termios
 import string
+import select
+import queue
 import time
 import tty
 import pty
@@ -224,6 +226,44 @@ def save_history(prompt, context, cmd):
         print('error:', e, end='\r\n')
         err = traceback.format_exc()
 
+def check_cancel(cancel_chars=['\x03','\x04']):
+    f, _, _ = select.select([sys.stdin.fileno()], [], [], 0)
+    if sys.stdin.fileno() in f:
+        chars = os.read(sys.stdin.fileno(), 10240).decode()
+        for c in chars:
+            if c in cancel_chars:
+                return True
+    return False
+
+def cancelable(generator):
+    q = queue.Queue()
+    is_exit = False
+    def read_fun():
+        try:
+            for i in generator:
+                if is_exit:
+                    generator.close()
+                    return
+                q.put(i)
+        finally:
+            q.put(generator) # End of generator
+    read_thread = threading.Thread(target=read_fun)
+    read_thread.start()
+    try:
+        while True:
+            if check_cancel():
+                break
+            if not q.empty():
+                i = q.get_nowait()
+                if i == generator: # End of generator
+                    break
+                else:
+                    yield i
+    except GeneratorExit:
+        generator.close()
+    finally:
+        is_exit = True
+
 def cmd_generate(instrct=None, prompt='gen'):
     if instrct is None:
         instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, id='instrct')
@@ -249,15 +289,21 @@ def cmd_generate(instrct=None, prompt='gen'):
         if output is not None:
             lines_all, lines_cur = 1, 1
             os.write(sys.stdout.fileno(), f'\033[2K\r({prompt}-cmd): waiting...'.encode())
-            for chunk in output:
+            cancelled = False
+            gen_cmd, gen_think = '', ''
+            for chunk in cancelable(output):
                 clear_lines(lines_all, lines_cur)
-                cmd, think = chunk[0], chunk[1]
-                if cmd == '':
-                    text = f'({prompt}-think): ' + think
+                gen_cmd, gen_think = chunk[0], chunk[1]
+                if gen_cmd:
+                    text = f'({prompt}-cmd): ' + gen_cmd
+                elif gen_think:
+                    text = f'({prompt}-think): ' + gen_think
                 else:
-                    text = f'({prompt}-cmd): ' + cmd
+                    text = f'({prompt}-cmd): waiting...'
                 lines_all, lines_cur = print_lines(text)
             lines_all, lines_cur = clear_lines(lines_all, lines_cur)
+            if not cancelled:
+                cmd, think = gen_cmd, gen_think
             output = None
         if cmd:
             record_line(cmd, id='cmd')
