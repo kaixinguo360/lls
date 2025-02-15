@@ -2,10 +2,13 @@
 
 import importlib.util
 import subprocess
+import traceback
 import sys
 import os
 
 config_file_path = os.path.join(os.environ['HOME'], '.llsrc.py')
+err = None
+
 if os.path.exists(config_file_path):
     try:
         spec = importlib.util.spec_from_file_location(name='lls_config', location=config_file_path)
@@ -13,6 +16,7 @@ if os.path.exists(config_file_path):
         spec.loader.exec_module(lls_config_module)
     except Exception as e:
         print('error:', e, file=sys.stderr)
+        err = traceback.format_exc()
 
 if len(sys.argv) > 2 and sys.argv[1] == '--':
     main_cmd = sys.argv[2]
@@ -88,7 +92,7 @@ slave_callback = None
 slave_tty = termios.tcgetattr(slave_fd)
 
 def read_stdout():
-    global mode
+    global mode, err
     while running:
         try:
             chars = os.read(master_fd, 10240)
@@ -100,6 +104,7 @@ def read_stdout():
                 slave_callback()
         except Exception as e:
             print('error:', e, end='\r\n')
+            err = traceback.format_exc()
 
 stdout_thread = threading.Thread(target=read_stdout)
 stdout_thread.daemon = True
@@ -210,12 +215,14 @@ def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None,
     return cmd
 
 def save_history(prompt, context, cmd):
+    global err
     try:
         with open(os.path.join(os.environ['HOME'], '.cmd_history'), 'a') as f:
             line = f"prompt: {prompt}\t{cmd}\n"
             f.write(line)
     except Exception as e:
         print('error:', e, end='\r\n')
+        err = traceback.format_exc()
 
 def cmd_generate(instrct=None, prompt='gen'):
     if instrct is None:
@@ -370,6 +377,15 @@ def cmd_show(**kwargs):
     print('\033[2J\033[H\r', end='')
     print_screen_perfect(screen, end='\r\n', **kwargs)
 
+def cmd_err():
+    global err
+    print('\033[2J\033[H\r', end='')
+    if err is None:
+        print('no catched error', end='\r\n')
+    else:
+        print('catched error:', end='\r\n')
+        os.write(sys.stdout.fileno(), err.replace('\n', '\r\n').encode())
+
 def cmd_tty():
     global slave_callback
     def callback_fun():
@@ -505,6 +521,8 @@ def line_mode():
                 return ''
             elif cmd in ['a','auto']:
                 cmd_auto(args)
+            elif cmd in ['err']:
+                cmd_err()
             else:
                 read_line(f"{cmd}: command not found", max_chars=1)
     finally:
@@ -540,6 +558,7 @@ try:
             os.write(master_fd, cmd.encode())
         except Exception as e:
             print('error:', e, end='\r\n')
+            err = traceback.format_exc()
             mode = 'char'
 finally:
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
