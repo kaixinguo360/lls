@@ -217,13 +217,13 @@ def save_history(prompt, context, cmd):
     except Exception as e:
         print('error:', e, end='\r\n')
 
-def cmd_generate(instrct=None):
+def cmd_generate(instrct=None, prompt='gen'):
     if instrct is None:
-        instrct = read_line('(gen-instrct): ', cancel='', include_last=False, id='instrct')
+        instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, id='instrct')
     else:
         record_line(instrct, id='instrct')
     if instrct == '':
-        return ''
+        return '', ''
     context = screen.text()
     cmd, think = '', ''
     if '#' in instrct:
@@ -234,34 +234,34 @@ def cmd_generate(instrct=None):
     else:
         output = chat.try_generate(instrct, context)
     confirm_info = ', confirm?'
-    flags = '[y/u/n/e/r/k/t]'
+    flags = '[y/u/n/e/s/r/k/t]'
     default = 'u'
     save = False
     show_think = False
     while True:
         if output is not None:
             lines_all, lines_cur = 1, 1
-            os.write(sys.stdout.fileno(), b'\033[2K\r(gen-cmd): waiting...')
+            os.write(sys.stdout.fileno(), f'\033[2K\r({prompt}-cmd): waiting...'.encode())
             for chunk in output:
                 clear_lines(lines_all, lines_cur)
                 cmd, think = chunk[0], chunk[1]
                 if cmd == '':
-                    text = '(gen-think): ' + think
+                    text = f'({prompt}-think): ' + think
                 else:
-                    text = '(gen-cmd): ' + cmd
+                    text = f'({prompt}-cmd): ' + cmd
                 lines_all, lines_cur = print_lines(text)
             lines_all, lines_cur = clear_lines(lines_all, lines_cur)
             output = None
         if cmd:
             record_line(cmd, id='cmd')
         flags_text = flags.replace(default, default.upper())
-        text = f'(gen-cmd): {cmd}{confirm_info} {flags_text} '
+        text = f'({prompt}-cmd): {cmd}{confirm_info} {flags_text} '
         if show_think:
-            text = f"(gen-think): {think}\n{text}"
+            text = f"({prompt}-think): {think}\n{text}"
         show_think = False
         prefix_info = ''
         confirm_info = ', confirm?'
-        confirm = read_line(text, cancel='n', include_last=False, id='gen-confirm', no_save=['q'])
+        confirm = read_line(text, cancel='n', include_last=False)
         confirm = confirm.lower()
         if confirm == '':
             confirm = default
@@ -278,25 +278,27 @@ def cmd_generate(instrct=None):
         elif confirm in ['r','re','retry']:
             output = chat.try_generate(instrct, context)
         elif confirm in ['e','edit']:
-            instrct = read_line('(gen-instrct): ', cancel='', include_last=False, value=instrct, id='instrct')
+            instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, value=instrct, id='instrct')
             if instrct == '':
                 cmd = ''
                 break
             output = chat.try_generate(instrct, context)
         elif confirm in ['t','teach']:
             default = 'y'
-            cmd = read_line(f'(gen-cmd): ', include_last=False, id='cmd')
+            cmd = read_line(f'({prompt}-cmd): ', include_last=False, id='cmd')
             if cmd == '':
                 break
+        elif confirm in ['s','show','status']:
+            cmd_show()
         else:
             confirm_info = ", please input 'y' or 'n':"
     if save:
         save_history(instrct, context, cmd)
     if cmd:
         chat.add_chat(instrct, context, cmd)
-    return cmd
+    return cmd, instrct
 
-def cmd_exec(prompt='cmd', cmd=None, id=None):
+def cmd_exec(prompt='cmd', cmd=None, id='cmd'):
     if cmd is None:
         cmd = read_line(f'({prompt}): ', cancel='', include_last=False, id=id)
     else:
@@ -329,13 +331,13 @@ def cmd_watch():
         if c in ['\x03','\x04','q']:
             break
         elif c in ['g']:
-            cmd = cmd_generate()
+            cmd = cmd_generate()[0]
             if cmd:
                 cmd += '\n'
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['e']:
-            cmd, instrct = cmd_exec(id='cmd')
+            cmd, instrct = cmd_exec()
             if cmd:
                 chat.add_chat(instrct, screen.text(), cmd)
                 cmd += '\n'
@@ -359,7 +361,7 @@ def cmd_watch():
             os.write(master_fd, '\x04'.encode())
             time.sleep(0.1)
         show_screen()
-    print('\033[2K\r^C')
+    #print('\033[2K\r^C')
     signal.setitimer(signal.ITIMER_REAL, 0)
     signal.signal(signal.SIGALRM, signal.SIG_DFL)
     del total_chars
@@ -368,16 +370,54 @@ def cmd_show(**kwargs):
     print('\033[2J\033[H\r', end='')
     print_screen_perfect(screen, end='\r\n', **kwargs)
 
+def cmd_tty():
+    global slave_callback
+    def callback_fun():
+        cmd_show(raw=True)
+    os.write(sys.stdout.fileno(), b'\033[?25l')
+    callback_fun()
+    slave_callback = callback_fun
+    run = True
+    while True:
+        chars = os.read(sys.stdin.fileno(), 10240).decode()
+        for c in chars:
+            if c in ['\005']:
+                run = False
+                break
+            os.write(master_fd, c.encode())
+        if not run:
+            break
+    slave_callback = None
+    os.write(sys.stdout.fileno(), b'\033[?25h')
+    print_context()
+
+def cmd_auto(instrct):
+    if instrct is None:
+        instrct = read_line('(auto-instrct): ', cancel='', include_last=False, id='auto-instrct')
+    else:
+        record_line(instrct, id='auto-instrct')
+    if instrct == '':
+        return ''
+    while True:
+        cmd, instrct = cmd_generate(instrct, prompt='auto')
+        if cmd == '':
+            break
+        cmd += '\n'
+        os.write(master_fd, cmd.encode())
+        time.sleep(0.1)
+        cmd_show()
+    #print('\033[2K\r^C')
+
 def prompt_mode():
     global mode
     try:
-        return cmd_generate()
+        return cmd_generate()[0]
     finally:
         print_context()
         mode = 'char'
 
 def line_mode():
-    global mode, slave_callback
+    global mode
     try:
         cmd = ''
         args = ''
@@ -413,7 +453,7 @@ def line_mode():
             elif cmd in ['w','watch']:
                 cmd_watch()
             elif cmd in ['g','gen','generate']:
-                cmd = cmd_generate(args)
+                cmd = cmd_generate(args)[0]
                 if cmd == '':
                     continue
                 cmd += '\n'
@@ -421,7 +461,7 @@ def line_mode():
                 time.sleep(0.1)
                 cmd_show()
             elif cmd in ['e','exec']:
-                cmd, instrct = cmd_exec(cmd=args, id='cmd')
+                cmd, instrct = cmd_exec(cmd=args)
                 if cmd:
                     chat.add_chat(instrct, screen.text(), cmd)
                     cmd += '\n'
@@ -461,25 +501,10 @@ def line_mode():
                 else:
                     print('usage: esc [err|saved|status|debug]', end='\r\n')
             elif cmd in ['t','tty']:
-                def callback_fun():
-                    cmd_show(raw=True)
-                os.write(sys.stdout.fileno(), b'\033[?25l')
-                callback_fun()
-                slave_callback = callback_fun
-                run = True
-                while True:
-                    chars = os.read(sys.stdin.fileno(), 10240).decode()
-                    for c in chars:
-                        if c in ['\005']:
-                            run = False
-                            break
-                        os.write(master_fd, c.encode())
-                    if not run:
-                        break
-                slave_callback = None
-                os.write(sys.stdout.fileno(), b'\033[?25h')
-                print_context()
+                cmd_tty()
                 return ''
+            elif cmd in ['a','auto']:
+                cmd_auto(args)
             else:
                 read_line(f"{cmd}: command not found", max_chars=1)
     finally:
