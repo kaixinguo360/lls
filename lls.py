@@ -147,7 +147,7 @@ bufs = {}
 def record_line(value, id):
     read_line(value=value, id=id, skip_input=True)
 
-def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None, cancel=None, backspace=None, id=None, no_save=None, skip_input=False):
+def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None, cancel=None, exit=None, backspace=None, id=None, no_save=None, skip_input=False):
     if id is not None:
         buf = bufs.get(id)
         if buf is None:
@@ -175,10 +175,16 @@ def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None,
         while True:
             chars = os.read(sys.stdin.fileno(), 10240).decode()
             for c in chars:
-                if cancel is not None and c in ['\x03','\x04']:
-                    cancelled = True
-                    cmd = cancel
-                    break
+                if c in ['\x03']:
+                    if cancel is not None:
+                        cancelled = True
+                        cmd = cancel
+                        break
+                if c in ['\x04']:
+                    if exit is not None or cancel is not None:
+                        cancelled = True
+                        cmd = exit if exit is not None else cancel
+                        break
                 if c in ['\x03','\x04','\r','\n']:
                     line = buf.current_line()
                     if include_last:
@@ -285,6 +291,8 @@ def cmd_generate(instrct=None, prompt='gen'):
     default = 'u'
     save = False
     show_think = False
+    cancel_confirm = False
+    gen_time = time.time()
     while True:
         if output is not None:
             lines_all, lines_cur = 1, 1
@@ -304,6 +312,7 @@ def cmd_generate(instrct=None, prompt='gen'):
             lines_all, lines_cur = clear_lines(lines_all, lines_cur)
             if not cancelled:
                 cmd, think = gen_cmd, gen_think
+            gen_time = time.time()
             output = None
         if cmd:
             record_line(cmd, id='cmd')
@@ -314,7 +323,7 @@ def cmd_generate(instrct=None, prompt='gen'):
         show_think = False
         prefix_info = ''
         confirm_info = ', confirm?'
-        confirm = read_line(text, cancel='n', include_last=False)
+        confirm = read_line(text, cancel='cancel', exit='n', include_last=False)
         confirm = confirm.lower()
         if confirm == '':
             confirm = default
@@ -343,6 +352,11 @@ def cmd_generate(instrct=None, prompt='gen'):
                 break
         elif confirm in ['s','show','status']:
             cmd_show()
+        elif confirm in ['cancel']:
+            if time.time() - gen_time > 0.6:
+                cmd = ''
+                break
+            gen_time = time.time()
         else:
             confirm_info = ", please input 'y' or 'n':"
     if save:
@@ -455,7 +469,7 @@ def cmd_tty():
 
 def cmd_auto(instrct):
     if instrct is None:
-        instrct = read_line('(auto-instrct): ', cancel='', include_last=False, id='auto-instrct')
+        instrct = read_line('(auto-instrct): ', cancel='', include_last=False, id='instrct')
     else:
         record_line(instrct, id='auto-instrct')
     if instrct == '':
