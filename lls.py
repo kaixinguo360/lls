@@ -6,9 +6,9 @@ import traceback
 import sys
 import os
 
-config_file_path = os.path.join(os.environ['HOME'], '.llsrc.py')
 err = None
 
+config_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.llsrc.py')
 if os.path.exists(config_file_path):
     try:
         spec = importlib.util.spec_from_file_location(name='lls_config', location=config_file_path)
@@ -22,7 +22,7 @@ if len(sys.argv) > 2 and sys.argv[1] == '--':
     main_cmd = sys.argv[2]
     argv = sys.argv[3:]
 else:
-    if os.path.realpath(os.environ['SHELL']) != os.path.realpath(sys.argv[0]):
+    if 'SHELL' in os.environ and os.path.realpath(os.environ['SHELL']) != os.path.realpath(sys.argv[0]):
         main_cmd = os.environ['SHELL']
     else:
         main_cmd = os.environ.get('LLS_FALLBACK_SHELL', 'bash')
