@@ -137,9 +137,10 @@ def print_lines(text, cursor=None):
 
 bufs = {}
 
-def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None, cancel=None, backspace=None, id=None, no_save=None):
-    if begin:
-        os.write(sys.stdout.fileno(), begin.encode())
+def record_line(value, id):
+    read_line(value=value, id=id, skip_input=True)
+
+def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None, cancel=None, backspace=None, id=None, no_save=None, skip_input=False):
     if id is not None:
         buf = bufs.get(id)
         if buf is None:
@@ -157,40 +158,45 @@ def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None,
         buf.auto_move_to_end = True
     buf.write_chars(value)
     cmd = None
-    lines_all, lines_cur = print_lines(prompt + buf.current_line(), len(prompt) + buf.x)
     cancelled = False
-    while True:
-        chars = os.read(sys.stdin.fileno(), 10240).decode()
-        for c in chars:
-            if cancel is not None and c in ['\x03','\x04']:
-                cancelled = True
-                cmd = cancel
-                break
-            if c in ['\x03','\x04','\r','\n']:
-                line = buf.current_line()
-                if include_last:
-                    line += c
-                cmd = line
-                break
-            elif c in ['\x7f']:
-                if backspace is not None:
-                    buf.write_chars(backspace)
-                else:
-                    buf.write_chars('\b')
-            elif c in ['\033']:
-                buf.write_char(c)
-            elif unicodedata.category(c)[0] == "C":
-                pass
-            else:
-                buf.write_char(c)
-            if max_chars != -1 and len(buf.current_line()) >= max_chars:
-                cmd = buf.current_line()
-                break
-        if cmd is not None:
-            break
-        clear_lines(lines_all, lines_cur)
+    if skip_input:
+        cmd = buf.lines[buf.y]
+    else:
+        if begin:
+            os.write(sys.stdout.fileno(), begin.encode())
         lines_all, lines_cur = print_lines(prompt + buf.current_line(), len(prompt) + buf.x)
-    clear_lines(lines_all, lines_cur)
+        while True:
+            chars = os.read(sys.stdin.fileno(), 10240).decode()
+            for c in chars:
+                if cancel is not None and c in ['\x03','\x04']:
+                    cancelled = True
+                    cmd = cancel
+                    break
+                if c in ['\x03','\x04','\r','\n']:
+                    line = buf.current_line()
+                    if include_last:
+                        line += c
+                    cmd = line
+                    break
+                elif c in ['\x7f']:
+                    if backspace is not None:
+                        buf.write_chars(backspace)
+                    else:
+                        buf.write_chars('\b')
+                elif c in ['\033']:
+                    buf.write_char(c)
+                elif unicodedata.category(c)[0] == "C":
+                    pass
+                else:
+                    buf.write_char(c)
+                if max_chars != -1 and len(buf.current_line()) >= max_chars:
+                    cmd = buf.current_line()
+                    break
+            if cmd is not None:
+                break
+            clear_lines(lines_all, lines_cur)
+            lines_all, lines_cur = print_lines(prompt + buf.current_line(), len(prompt) + buf.x)
+        clear_lines(lines_all, lines_cur)
     if id is not None:
         buf.y = len(buf.lines) - 1
         if cancelled or cmd == '' or (len(buf.lines) > 1 and buf.lines[buf.y - 1] == cmd
@@ -214,6 +220,8 @@ def save_history(prompt, context, cmd):
 def cmd_generate(instrct=None):
     if instrct is None:
         instrct = read_line('(gen-instrct): ', cancel='', include_last=False, id='instrct')
+    else:
+        record_line(instrct, id='instrct')
     if instrct == '':
         return ''
     context = screen.text()
@@ -244,6 +252,8 @@ def cmd_generate(instrct=None):
                 lines_all, lines_cur = print_lines(text)
             lines_all, lines_cur = clear_lines(lines_all, lines_cur)
             output = None
+        if cmd:
+            record_line(cmd, id='cmd')
         flags_text = flags.replace(default, default.upper())
         text = f'(gen-cmd): {cmd}{confirm_info} {flags_text} '
         if show_think:
@@ -289,6 +299,8 @@ def cmd_generate(instrct=None):
 def cmd_exec(prompt='cmd', cmd=None, id=None):
     if cmd is None:
         cmd = read_line(f'({prompt}): ', cancel='', include_last=False, id=id)
+    else:
+        record_line(cmd, id=id)
     instrct = None
     if '#' in cmd:
         args = cmd.split('#')
