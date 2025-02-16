@@ -48,7 +48,7 @@ import signal
 import struct
 import fcntl
 
-from chat import Chat, print_chat_perfect
+from chat import ChatAI
 from terminal import Screen, print_screen_perfect
 from display import wrap_multi_lines
 
@@ -56,7 +56,7 @@ old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
 master_fd, slave_fd = pty.openpty()
 winsize = os.get_terminal_size()
-chat = Chat()
+ai = ChatAI()
 screen = Screen()
 screen.keep_logs_when_clean_screen = True
 
@@ -285,7 +285,7 @@ def cmd_generate(instrct=None, prompt='gen'):
         cmd = args[-1].strip()
         output = None
     else:
-        output = chat.try_generate(instrct, context)
+        output = ai.generate(instrct, context)
     confirm_info = ', confirm?'
     flags = '[y/u/n/e/s/r/k/t]'
     default = 'u'
@@ -338,13 +338,13 @@ def cmd_generate(instrct=None, prompt='gen'):
         elif confirm in ['k','think']:
             show_think = True
         elif confirm in ['r','re','retry']:
-            output = chat.try_generate(instrct, context)
+            output = ai.generate(instrct, context)
         elif confirm in ['e','edit']:
             instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, value=instrct, id='instrct')
             if instrct == '':
                 cmd = ''
                 break
-            output = chat.try_generate(instrct, context)
+            output = ai.generate(instrct, context)
         elif confirm in ['t','teach']:
             default = 'y'
             cmd = read_line(f'({prompt}-cmd): ', include_last=False, id='cmd')
@@ -362,7 +362,7 @@ def cmd_generate(instrct=None, prompt='gen'):
     if save:
         save_history(instrct, context, cmd)
     if cmd:
-        chat.add_chat(instrct, context, cmd)
+        ai.save(instrct, context, cmd)
     return cmd, instrct
 
 def cmd_exec(prompt='cmd', cmd=None, id='cmd'):
@@ -406,7 +406,7 @@ def cmd_watch():
         elif c in ['e']:
             cmd, instrct = cmd_exec()
             if cmd:
-                chat.add_chat(instrct, screen.text(), cmd)
+                ai.save(instrct, screen.text(), cmd)
                 cmd += '\n'
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
@@ -517,7 +517,7 @@ def line_mode():
                 print(screen.raw(), end='\r\n')
             elif cmd in ['ch','chat']:
                 print('\033[2J\033[H\r', end='')
-                print_chat_perfect(chat, end='\r\n')
+                ai.print()
             elif cmd in ['reset']:
                 print_context()
                 termios.tcsetattr(slave_fd, termios.TCSADRAIN, slave_tty)
@@ -539,7 +539,7 @@ def line_mode():
             elif cmd in ['e','exec']:
                 cmd, instrct = cmd_exec(cmd=args)
                 if cmd:
-                    chat.add_chat(instrct, screen.text(), cmd)
+                    ai.save(instrct, screen.text(), cmd)
                     cmd += '\n'
                     os.write(master_fd, cmd.encode())
                     time.sleep(0.1)
