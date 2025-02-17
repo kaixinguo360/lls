@@ -583,6 +583,25 @@ def line_mode():
                 cmd_auto(args)
             elif cmd in ['err']:
                 cmd_err()
+            elif cmd in ['conf','config','configs']:
+                ai.printConfigs(end='\r\n')
+            elif cmd in ['set']:
+                try:
+                    i = args.index(' ')
+                    key = args[:i].strip()
+                    value = args[i:].strip()
+                except:
+                    print('usage: set [key] [value]', end='\r\n')
+                    continue
+                ai.set(key, value)
+                print(f'set {key} = {value}')
+            elif cmd in ['get']:
+                if not args:
+                    ai.printConfigs()
+                else:
+                    key = args
+                    value = str(ai.get(key)).replace('\n', '\r\n')
+                    print(f'{key} = {value}')
             else:
                 read_line(f"{cmd}: command not found", max_chars=1)
     finally:

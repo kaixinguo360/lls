@@ -2,7 +2,7 @@
 
 import os
 
-model = os.environ.get('LLS_OPENAI_MODEL', 'gpt-4o-mini')
+default_model = os.environ.get('LLS_OPENAI_MODEL', 'gpt-4o-mini')
 base_url = os.environ.get('LLS_OPENAI_BASE_URL', 'https://api.openai.com')
 api_key = os.environ.get('LLS_OPENAI_API_KEY', '')
 
@@ -62,9 +62,37 @@ class AI():
     def print(s, **kwargs):
         pass
 
+    def set(s, key, value):
+        old = s.get(key)
+        if old is not None:
+            if isinstance(old, int):
+                value = int(value)
+            elif isinstance(old, float):
+                value = float(value)
+        setattr(s, key, value)
+
+    def get(s, key):
+        return getattr(s, key)
+
+    def configs(s):
+        c = [i for i in s.__dict__.items() if i[0][:1] != '_']
+        return sorted(c, key=lambda x:x[0])
+
+    def printConfigs(s, end='\r\n'):
+        for c in s.configs():
+            key = c[0]
+            value = str(c[1])
+            _type = type(c[1]).__name__
+            if isinstance(value, str):
+                value = value.replace('\n', '\\n')
+                if len(value) > 30:
+                    value = value[:30] + '...'
+            print(f"({_type}) {key} = {value}", end=end)
+
 class TextCompletionAI(AI):
 
-    def __init__(s, prompt_template=default_prompt_template):
+    def __init__(s, model=default_model, prompt_template=default_prompt_template):
+        s.model = model
         s.prompt_template = prompt_template
 
     def generate(s, instrct, console):
@@ -73,7 +101,7 @@ class TextCompletionAI(AI):
             client = get_openai_client()
             prompt = s.prompt_template.format(instrct=instrct, console=console)
             stream = client.completions.create(
-                model=model,
+                model=s.model,
                 prompt=prompt,
                 stream=True,
             )

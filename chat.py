@@ -3,7 +3,7 @@
 import os
 import json
 
-from generate import AI, get_openai_client, convert_output, model
+from generate import AI, get_openai_client, convert_output, default_model
 
 default_system_instrct = '''你是一个能干的助手, 需要根据user的指令和当前的shell控制台输出, 生成一条满足user指令的shell命令. 你的输出将直接发送给控制台并执行, 因此你不能输出shell命令以外的任何无关内容. 你不需要用任何引号包裹输出的shell命令, 也不需要格式化输出的shell命令.
 
@@ -30,7 +30,8 @@ default_user_template = '''生成一条满足user指令的shell命令
 
 class ChatAI(AI):
 
-    def __init__(s, system_instrct=default_system_instrct, user_template=default_user_template):
+    def __init__(s, model=default_model, system_instrct=default_system_instrct, user_template=default_user_template):
+        s.model = model
         s.user = 'user'
         s.user_template = default_user_template
         s.assistant = 'assistant'
@@ -82,7 +83,7 @@ class ChatAI(AI):
             for m in append_messages:
                 messages.append(dict(role=m['role'], content=m['content']))
         stream = client.chat.completions.create(
-            model=model,
+            model=s.model,
             messages=messages,
             stream=True,
         )
