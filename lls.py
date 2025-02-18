@@ -306,7 +306,7 @@ def cancelable(generator):
     finally:
         is_exit = True
 
-def cmd_generate(instrct=None, prompt='gen'):
+def cmd_generate(instrct=None, prompt='gen', default='u'):
     if instrct is None:
         instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, id='instrct')
     else:
@@ -323,12 +323,12 @@ def cmd_generate(instrct=None, prompt='gen'):
     else:
         output = ai.generate(instrct, context)
     confirm_info = ', confirm?'
-    flags = '[y/u/n/e/s/r/k/t]'
-    default = 'u'
+    flags = '[y/u/i/n/e/s/r/k/t]'
     save = False
     show_think = False
     cancel_confirm = False
     gen_time = time.time()
+    enter = True
     while True:
         if output is not None:
             lines_all, lines_cur = 1, 1
@@ -368,6 +368,11 @@ def cmd_generate(instrct=None, prompt='gen'):
             break
         elif confirm in ['u','use']:
             break
+        elif confirm in ['i','input']:
+            enter = False
+            break
+        elif confirm in ['u','use']:
+            break
         elif confirm in ['n','no','q','quit','exit']:
             cmd = ''
             break
@@ -399,6 +404,8 @@ def cmd_generate(instrct=None, prompt='gen'):
         save_history(instrct, context, cmd)
     if cmd:
         ai.save(instrct, context, cmd)
+        if enter:
+            cmd += '\n'
     return cmd, instrct
 
 def cmd_exec(prompt='cmd', cmd=None, id='cmd'):
@@ -436,7 +443,6 @@ def cmd_watch():
         elif c in ['g']:
             cmd = cmd_generate()[0]
             if cmd:
-                cmd += '\n'
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['e']:
@@ -523,7 +529,7 @@ def cmd_auto(instrct):
 def prompt_mode():
     global mode
     try:
-        return cmd_generate()[0]
+        return cmd_generate(default='i')[0]
     finally:
         print_context()
         mode = 'char'
@@ -569,7 +575,6 @@ def line_mode():
                     cmd = cmd_generate(args)[0]
                     if cmd == '':
                         continue
-                    cmd += '\n'
                     os.write(master_fd, cmd.encode())
                     time.sleep(0.1)
                     cmd_show()
