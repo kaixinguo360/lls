@@ -529,117 +529,121 @@ def prompt_mode():
         mode = 'char'
 
 def line_mode():
-    global mode
+    global mode, err
     try:
         cmd = ''
         args = ''
         while True:
-            cmd = read_line(cancel='q', include_last=False, id='line_mode', no_save=['q'])
-            cmd = cmd.strip()
-            args = None
-            if ' ' in cmd and cmd[:1] != ' ':
-                index = cmd.find(' ')
-                args = cmd[index+1:].strip()
-                cmd = cmd[:index].strip()
-            if cmd == '':
-                pass
-            elif cmd in ['q','quit','exit']:
-                print_context()
-                return ''
-            elif cmd in ['s','show','status']:
-                cmd_show()
-            elif cmd in ['r','raw']:
-                print('\033[2J\033[H\r', end='')
-                print(screen.raw(), end='\r\n')
-            elif cmd in ['ch','chat']:
-                print('\033[2J\033[H\r', end='')
-                ai.print()
-            elif cmd in ['reset']:
-                print_context()
-                termios.tcsetattr(slave_fd, termios.TCSADRAIN, slave_tty)
-                screen.mode = 'normal'
-                screen.esc = ''
-                return ''
-            elif cmd in ['c','clear']:
-                print('\033[2J\033[H\r', end='')
-            elif cmd in ['w','watch']:
-                cmd_watch()
-            elif cmd in ['g','gen','generate']:
-                cmd = cmd_generate(args)[0]
+            try:
+                cmd = read_line(cancel='q', include_last=False, id='line_mode', no_save=['q'])
+                cmd = cmd.strip()
+                args = None
+                if ' ' in cmd and cmd[:1] != ' ':
+                    index = cmd.find(' ')
+                    args = cmd[index+1:].strip()
+                    cmd = cmd[:index].strip()
                 if cmd == '':
-                    continue
-                cmd += '\n'
-                os.write(master_fd, cmd.encode())
-                time.sleep(0.1)
-                cmd_show()
-            elif cmd in ['e','exec']:
-                cmd, instrct = cmd_exec(cmd=args)
-                if cmd:
-                    ai.save(instrct, screen.text(), cmd)
+                    pass
+                elif cmd in ['q','quit','exit']:
+                    print_context()
+                    return ''
+                elif cmd in ['s','show','status']:
+                    cmd_show()
+                elif cmd in ['r','raw']:
+                    print('\033[2J\033[H\r', end='')
+                    print(screen.raw(), end='\r\n')
+                elif cmd in ['ch','chat']:
+                    print('\033[2J\033[H\r', end='')
+                    ai.print()
+                elif cmd in ['reset']:
+                    print_context()
+                    termios.tcsetattr(slave_fd, termios.TCSADRAIN, slave_tty)
+                    screen.mode = 'normal'
+                    screen.esc = ''
+                    return ''
+                elif cmd in ['c','clear']:
+                    print('\033[2J\033[H\r', end='')
+                elif cmd in ['w','watch']:
+                    cmd_watch()
+                elif cmd in ['g','gen','generate']:
+                    cmd = cmd_generate(args)[0]
+                    if cmd == '':
+                        continue
                     cmd += '\n'
                     os.write(master_fd, cmd.encode())
                     time.sleep(0.1)
                     cmd_show()
-            elif cmd in ['i','input']:
-                cmd, instrct = cmd_exec('input', cmd=args, id='cmd_input')
-                if cmd:
-                    os.write(master_fd, cmd.encode())
-                    time.sleep(0.1)
-                    cmd_show()
-            elif cmd in ['esc']:
-                if args is None:
-                    args = 'show'
-                if args in ['e','err','error']:
-                    print('\033[2J\033[H\r', end='')
-                    if len(screen.esc_err) == 0:
-                        print('no catched unknown escape sequences', end='\r\n')
+                elif cmd in ['e','exec']:
+                    cmd, instrct = cmd_exec(cmd=args)
+                    if cmd:
+                        ai.save(instrct, screen.text(), cmd)
+                        cmd += '\n'
+                        os.write(master_fd, cmd.encode())
+                        time.sleep(0.1)
+                        cmd_show()
+                elif cmd in ['i','input']:
+                    cmd, instrct = cmd_exec('input', cmd=args, id='cmd_input')
+                    if cmd:
+                        os.write(master_fd, cmd.encode())
+                        time.sleep(0.1)
+                        cmd_show()
+                elif cmd in ['esc']:
+                    if args is None:
+                        args = 'show'
+                    if args in ['e','err','error']:
+                        print('\033[2J\033[H\r', end='')
+                        if len(screen.esc_err) == 0:
+                            print('no catched unknown escape sequences', end='\r\n')
+                        else:
+                            print('catched unknown escape sequences:', end='\r\n')
+                        for esc in screen.esc_err:
+                            print('esc:', esc.encode(), end='\r\n')
+                    elif args in ['s','save','saved']:
+                        print('\033[2J\033[H\r', end='')
+                        if len(screen.esc_record) == 0:
+                            print('no saved escape sequences', end='\r\n')
+                        else:
+                            print('saved escape sequences:', end='\r\n')
+                        for esc in screen.esc_record:
+                            print('esc:', esc, end='\r\n')
+                    elif args in ['d','debug']:
+                        screen.esc_debug = not screen.esc_debug
+                        print(f'debug mode: {screen.esc_debug}', end='\r\n')
+                    elif args in ['show','status']:
+                        print(f'debug mode: {screen.esc_debug}', end='\r\n')
                     else:
-                        print('catched unknown escape sequences:', end='\r\n')
-                    for esc in screen.esc_err:
-                        print('esc:', esc.encode(), end='\r\n')
-                elif args in ['s','save','saved']:
-                    print('\033[2J\033[H\r', end='')
-                    if len(screen.esc_record) == 0:
-                        print('no saved escape sequences', end='\r\n')
+                        print('usage: esc [err|saved|status|debug]', end='\r\n')
+                elif cmd in ['t','tty']:
+                    cmd_tty()
+                    return ''
+                elif cmd in ['a','auto']:
+                    cmd_auto(args)
+                elif cmd in ['err']:
+                    cmd_err()
+                elif cmd in ['conf','config','configs']:
+                    ai.printConfigs(end='\r\n')
+                elif cmd in ['set']:
+                    try:
+                        i = args.index(' ')
+                        key = args[:i].strip()
+                        value = args[i:].strip()
+                    except:
+                        print('usage: set [key] [value]', end='\r\n')
+                        continue
+                    ai.set(key, value)
+                    print(f'set {key} = {value}')
+                elif cmd in ['get']:
+                    if not args:
+                        ai.printConfigs()
                     else:
-                        print('saved escape sequences:', end='\r\n')
-                    for esc in screen.esc_record:
-                        print('esc:', esc, end='\r\n')
-                elif args in ['d','debug']:
-                    screen.esc_debug = not screen.esc_debug
-                    print(f'debug mode: {screen.esc_debug}', end='\r\n')
-                elif args in ['show','status']:
-                    print(f'debug mode: {screen.esc_debug}', end='\r\n')
+                        key = args
+                        value = str(ai.get(key)).replace('\n', '\r\n')
+                        print(f'{key} = {value}')
                 else:
-                    print('usage: esc [err|saved|status|debug]', end='\r\n')
-            elif cmd in ['t','tty']:
-                cmd_tty()
-                return ''
-            elif cmd in ['a','auto']:
-                cmd_auto(args)
-            elif cmd in ['err']:
-                cmd_err()
-            elif cmd in ['conf','config','configs']:
-                ai.printConfigs(end='\r\n')
-            elif cmd in ['set']:
-                try:
-                    i = args.index(' ')
-                    key = args[:i].strip()
-                    value = args[i:].strip()
-                except:
-                    print('usage: set [key] [value]', end='\r\n')
-                    continue
-                ai.set(key, value)
-                print(f'set {key} = {value}')
-            elif cmd in ['get']:
-                if not args:
-                    ai.printConfigs()
-                else:
-                    key = args
-                    value = str(ai.get(key)).replace('\n', '\r\n')
-                    print(f'{key} = {value}')
-            else:
-                read_line(f"{cmd}: command not found", max_chars=1)
+                    read_line(f"{cmd}: command not found", max_chars=1)
+            except Exception as e:
+                print('error:', e, end='\r\n')
+                err = traceback.format_exc()
     finally:
         mode = 'char'
 
