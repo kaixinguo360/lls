@@ -50,6 +50,7 @@ import struct
 import fcntl
 
 from chat import ChatAI
+from generate import TextCompletionAI
 from terminal import Screen, print_screen_perfect
 from display import wrap_multi_lines
 
@@ -306,9 +307,61 @@ def cancelable(generator):
     finally:
         is_exit = True
 
+def read_instrct(prompt):
+    global ai
+    instrct = None
+    while instrct is None:
+        instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, id='instrct')
+        instrct = instrct.strip()
+        if instrct[:1] == '/':
+            cmd = instrct[1:]
+            args = None
+            instrct = None
+            if ' ' in cmd and cmd[:1] != ' ':
+                index = cmd.find(' ')
+                args = cmd[index+1:].strip()
+                cmd = cmd[:index].strip()
+            if cmd in ['s','show','status']:
+                cmd_show()
+            elif cmd in ['set']:
+                cmd_set(args)
+            elif cmd in ['get']:
+                cmd_get(args)
+            elif cmd in ['m','mode']:
+                cmd_mode(args, quiet=True)
+            elif cmd in ['c','ch','chat']:
+                instrct = args
+                cmd_mode('chat', quiet=True)
+            elif cmd in ['t', 'text']:
+                instrct = args
+                cmd_mode('text', quiet=True)
+    return instrct
+
+def cmd_mode(args, quiet=False, end='\r\n'):
+    global ai
+    info = ''
+    if args is None:
+        if isinstance(ai, ChatAI):
+            info = f"current mode: 'chat'"
+        elif isinstance(ai, TextCompletionAI):
+            info = f"current mode: 'text'"
+    elif args in ['c','ch','chat']:
+        if not isinstance(ai, ChatAI):
+            ai = ChatAI()
+            info = "change mode to 'chat'"
+    elif args in ['t','text']:
+        if not isinstance(ai, TextCompletionAI):
+            ai = TextCompletionAI()
+            info = "change mode to 'text'"
+    if info:
+        if quiet:
+            read_line(info, max_chars=1, backspace='b')
+        else:
+            print(info, end=end)
+
 def cmd_generate(instrct=None, prompt='gen', default='u'):
     if instrct is None:
-        instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, id='instrct')
+        instrct = read_instrct(prompt)
     else:
         record_line(instrct, id='instrct')
     if instrct == '':
@@ -381,7 +434,7 @@ def cmd_generate(instrct=None, prompt='gen', default='u'):
         elif confirm in ['r','re','retry']:
             output = ai.generate(instrct, context)
         elif confirm in ['e','edit']:
-            instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, value=instrct, id='instrct')
+            instrct = read_instrct(prompt)
             if instrct == '':
                 cmd = ''
                 break
@@ -526,6 +579,35 @@ def cmd_auto(instrct):
         cmd_show()
     #print('\033[2K\r^C')
 
+def cmd_get(args):
+    global err
+    try:
+        if not args:
+            ai.printConfigs()
+        else:
+            key = args
+            value = str(ai.get(key)).replace('\n', '\r\n')
+            print(f'{key} = {value}')
+    except Exception as e:
+        print('error:', e, end='\r\n')
+        err = traceback.format_exc()
+
+def cmd_set(args):
+    global err
+    try:
+        i = args.index(' ')
+        key = args[:i].strip()
+        value = args[i:].strip()
+    except:
+        print('usage: set [key] [value]', end='\r\n')
+        return
+    try:
+        ai.set(key, value)
+        print(f'set {key} = {value}')
+    except Exception as e:
+        print('error:', e, end='\r\n')
+        err = traceback.format_exc()
+
 def prompt_mode():
     global mode
     try:
@@ -628,22 +710,11 @@ def line_mode():
                 elif cmd in ['conf','config','configs']:
                     ai.printConfigs(end='\r\n')
                 elif cmd in ['set']:
-                    try:
-                        i = args.index(' ')
-                        key = args[:i].strip()
-                        value = args[i:].strip()
-                    except:
-                        print('usage: set [key] [value]', end='\r\n')
-                        continue
-                    ai.set(key, value)
-                    print(f'set {key} = {value}')
+                    cmd_set(args)
                 elif cmd in ['get']:
-                    if not args:
-                        ai.printConfigs()
-                    else:
-                        key = args
-                        value = str(ai.get(key)).replace('\n', '\r\n')
-                        print(f'{key} = {value}')
+                    cmd_get(args)
+                elif cmd in ['m','mode']:
+                    cmd_mode(args)
                 else:
                     read_line(f"{cmd}: command not found", max_chars=1)
             except Exception as e:
