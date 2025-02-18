@@ -41,6 +41,7 @@ import string
 import select
 import queue
 import time
+import json
 import tty
 import pty
 
@@ -143,6 +144,41 @@ def print_lines(text, cursor=None):
     return lines_all, lines_cur
 
 bufs = {}
+
+def load_bufs():
+    global bufs, err
+    try:
+        history_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_history')
+        with open(history_file_path, 'r') as f:
+            history = json.load(f)
+        for id in history.keys():
+            buf = Screen()
+            buf.insert_mode = True
+            buf.limit_move = True
+            buf.max_height = 1
+            buf.auto_move_to_end = True
+            buf.lines = history.get(id)
+            buf.x = 0
+            buf.y = len(buf.lines) - 1
+            bufs[id] = buf
+    except Exception as e:
+        print('error: load history failed', end='\r\n')
+        err = 'load history failed\n' + traceback.format_exc()
+
+def save_bufs():
+    global bufs, err
+    try:
+        history_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_history')
+        history = {}
+        for id in bufs.keys():
+            buf = bufs.get(id)
+            history[id] = buf.lines
+        text = json.dumps(history)
+        with open(history_file_path, 'w') as f:
+            f.write(text)
+    except Exception as e:
+        print('error: save history failed', end='\r\n')
+        err = 'save history failed\n' + traceback.format_exc()
 
 def record_line(value, id):
     read_line(value=value, id=id, skip_input=True)
@@ -629,6 +665,8 @@ def read_command():
         cmd = prompt_mode()
     return cmd
 
+load_bufs()
+
 try:
     os.write(sys.stdout.fileno(), b'\033c')
     while proc.poll() is None:
@@ -640,6 +678,7 @@ try:
             err = traceback.format_exc()
             mode = 'char'
 finally:
+    save_bufs()
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
     running = False
     print('exited, if not exit, please input ctrl-c again')
