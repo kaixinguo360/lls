@@ -50,7 +50,7 @@ import struct
 import fcntl
 
 from chat import ChatAI
-from generate import TextCompletionAI
+from generate import MixedAI, TextCompletionAI
 from terminal import Screen, print_screen_perfect
 from display import wrap_multi_lines
 
@@ -58,8 +58,7 @@ old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
 master_fd, slave_fd = pty.openpty()
 winsize = os.get_terminal_size()
-ais = {}
-ai = None
+ai = MixedAI()
 screen = Screen()
 screen.keep_logs_when_clean_screen = True
 
@@ -201,7 +200,12 @@ def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None,
         buf.limit_move = True
         buf.max_height = 1
         buf.auto_move_to_end = True
-    buf.write_chars(value)
+    if len(buf.lines) > 1 and buf.lines[-2] == value:
+        buf.lines = buf.lines[:-1]
+        buf.y = len(buf.lines) - 1
+        buf.x = len(buf.lines[-1])
+    else:
+        buf.write_chars(value)
     cmd = None
     cancelled = False
     if skip_input:
@@ -308,16 +312,18 @@ def cancelable(generator):
     finally:
         is_exit = True
 
-def read_instrct(prompt):
+def read_instrct(prompt, value=''):
     global ai
     instrct = None
     while instrct is None:
-        instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, id='instrct')
+        instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, value=value, id='instrct')
+        value = instrct
         instrct = instrct.strip()
         if instrct[:1] == '/':
             cmd = instrct[1:]
             args = None
             instrct = None
+            value = ''
             if ' ' in cmd and cmd[:1] != ' ':
                 index = cmd.find(' ')
                 args = cmd[index+1:].strip()
@@ -339,18 +345,18 @@ def read_instrct(prompt):
     return instrct
 
 def cmd_ls():
-    global ai, ais
+    global ai
     info = 'STATUS\tID\tTYPE\r\n'
-    for id in ais.keys():
-        a = ais[id]
-        if ai == a:
+    for id in ai.ais.keys():
+        a = ai.ais[id]
+        if ai.ai == a:
             info += f" [*]\t{id}\t{type(a).__name__}\r\n"
         else:
             info += f" [ ]\t{id}\t{type(a).__name__}\r\n"
     read_line(info, max_chars=1, backspace='b')
 
 def cmd_create(id=None, type=None):
-    global ai, ais
+    global ai
     if not id:
         id = read_line('(create-ai) id: ', cancel='', include_last=False)
         if not id:
@@ -360,28 +366,29 @@ def cmd_create(id=None, type=None):
         if not type:
             return
     if type in ['t','text']:
-        ai = TextCompletionAI()
+        a = TextCompletionAI()
     elif type in ['c','ch','chat']:
-        ai = ChatAI()
+        a = ChatAI()
     else:
-        ai = TextCompletionAI()
-    ais[id] = ai
+        a = TextCompletionAI()
+    ai.add(id, a)
+    ai.switch(id)
     print(f"created new ai '{id}'")
 
 def cmd_mode(id, quiet=True, end='\r\n'):
-    global ai, ais
+    global ai
     info = ''
-    ids = '[' + ','.join(ais.keys()) + ']'
+    ids = '[' + ','.join(ai.ais.keys()) + ']'
     if not id:
-        for id in ais.keys():
-            if ais[id] == ai:
+        for id in ai.ais.keys():
+            if ai.ais[id] == ai.ai:
                 info = f"(select-ai) current ai is '{id}' {ids} "
                 break
         id = read_line(info, cancel='', include_last=False)
     if not id:
         return
-    if id in ais:
-        ai = ais[id]
+    if id in ai.ais:
+        ai.switch(id)
         info = f"change ai to '{id}'"
     else:
         info = f"no such ai '{id}' {ids}"
@@ -466,7 +473,7 @@ def cmd_generate(instrct=None, prompt='gen', default='u'):
         elif confirm in ['r','re','retry']:
             output = ai.generate(instrct, context)
         elif confirm in ['e','edit']:
-            instrct = read_instrct(prompt)
+            instrct = read_instrct(prompt, value=instrct)
             if instrct == '':
                 cmd = ''
                 break
@@ -791,7 +798,6 @@ def read_command():
     return cmd
 
 def load_ai():
-    global ai, ais
     cmd_create('text', 'text')
     cmd_create('chat', 'chat')
 

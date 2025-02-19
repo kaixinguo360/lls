@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import os
 
 default_model = os.environ.get('LLS_OPENAI_MODEL', 'gpt-4o-mini')
@@ -88,6 +89,56 @@ class AI():
                 if len(value) > 30:
                     value = value[:30] + '...'
             print(f"({_type}) {key} = {value}", end=end)
+
+class MixedAI(AI):
+
+    ais = {}
+    ai = None
+
+    def add(s, id, ai):
+        s.ais[id] = ai
+
+    def switch(s, id):
+        if id in s.ais.keys():
+            s.ai = s.ais[id]
+        else:
+            raise ValueError(f"No such ai '{id}'")
+
+    def generate(s, instrct, console):
+        if s.ai:
+            return s.ai.generate(instrct, console)
+        else:
+            def fun():
+                yield '', 'no selected ai'
+            return fun()
+
+    def save(s, instrct, console, output):
+        if s.ai:
+            s.ai.save(instrct, console, output)
+        else:
+            pass
+
+    def print(s, end='\r\n', **kwargs):
+        if s.ai:
+            s.ai.print(end=end, **kwargs)
+        else:
+            print("no selected ai", end=end)
+
+    def set(s, key, value):
+        if s.ai:
+            s.ai.set(key, value)
+        else:
+            pass
+
+    def get(s, key):
+        if s.ai:
+            return s.ai.get(key)
+        else:
+            return None
+
+    def configs(s):
+        if s.ai:
+            return s.ai.configs()
 
 class TextCompletionAI(AI):
 
