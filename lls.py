@@ -59,7 +59,8 @@ tty.setraw(sys.stdin.fileno())
 master_fd, slave_fd = pty.openpty()
 winsize = os.get_terminal_size()
 ai = MixedAI()
-screen = Screen()
+screen_history_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_screen_history')
+screen = Screen(screen_history_file_path)
 screen.keep_logs_when_clean_screen = True
 
 def set_winsize(fd, row, col, xpix=0, ypix=0):
@@ -824,6 +825,7 @@ try:
             err = traceback.format_exc()
             mode = 'char'
 finally:
+    screen.close()
     save_bufs()
     save_ai()
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)

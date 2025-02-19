@@ -172,7 +172,7 @@ esc_patterns = {
 
 class Screen:
 
-    def __init__(self):
+    def __init__(self, history_file=None):
         self.lines = ['']
         self._raw = ''
         self.saved_lines = None
@@ -196,6 +196,33 @@ class Screen:
         self.insert_mode = False
         self.limit_move = False
         self.auto_move_to_end = False
+        self.history_begin = '[lls is beginning]\n'
+        self.history_end = '[lls is terminating]\n'
+        self.history_file = history_file
+        if history_file:
+            self.history = open(history_file, 'a+')
+            self.history.write(self.history_begin)
+        else:
+            self.history = None
+
+    def write_history(s, line):
+        if s.history:
+            s.history.write(line + '\n')
+
+    def dump_history(s, left=0):
+        while len(s.lines) > left:
+            line = s.lines[0]
+            s.lines = s.lines[1:]
+            s.write_history(line)
+            s.y -= 1
+            s._start_y -= 1
+            s.dropped_lines += 1
+
+    def close(s):
+        s.dump_history()
+        if s.history:
+            s.history.write(s.history_end)
+            s.history.close()
 
     def start_y(self):
         start = 0
@@ -301,11 +328,7 @@ class Screen:
             line += ' '
         s.lines[s.y] = line
         if len(s.lines) > s.max_lines:
-            offset = len(s.lines) - s.max_lines
-            s.lines = s.lines[offset:]
-            s.y -= offset
-            s._start_y -= offset
-            s.dropped_lines += offset
+            s.dump_history(s.max_lines)
 
     def _write_char_normal_mode(s, c):
         if c in ['\a']:
