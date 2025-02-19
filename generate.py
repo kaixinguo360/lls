@@ -73,6 +73,10 @@ class AI():
                 value = int(value)
             elif isinstance(old, float):
                 value = float(value)
+            elif isinstance(old, str):
+                value = str(value)
+            else:
+                raise ValueError(f"unsupport argument type '{type(old).__name__}'")
         setattr(s, key, value)
 
     def get(s, key):

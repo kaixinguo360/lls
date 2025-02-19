@@ -50,7 +50,7 @@ import struct
 import fcntl
 
 from chat import ChatAI
-from generate import MixedAI, TextCompletionAI
+from generate import MixedAI, TextCompletionAI, to_ai_type
 from terminal import Screen, print_screen_perfect
 from display import wrap_multi_lines
 
@@ -184,6 +184,66 @@ def save_bufs():
 
 def record_line(value, id):
     read_line(value=value, id=id, skip_input=True)
+
+def read_lines(prompt='> ', include_last=False, value='', begin=None, cancel='', exit=None, backspace=None):
+    buf = Screen()
+    buf.insert_mode = True
+    buf.limit_move = True
+    buf.max_height = 1
+    buf.auto_remove_line = True
+    buf.auto_move_between_line = True
+    buf.write_chars(value)
+    cmd = None
+    cancelled = False
+    if begin:
+        os.write(sys.stdout.fileno(), begin.encode())
+    cursor = 0
+    for line in buf.lines[:buf.y]:
+        cursor += len(prompt) + len(line) + 1
+    cursor += len(prompt) + buf.x
+    lines_all, lines_cur = print_lines(buf.text(begin=prompt), cursor)
+    while True:
+        chars = os.read(sys.stdin.fileno(), 10240).decode()
+        for c in chars:
+            if c in ['\x03']:
+                if cancel is not None:
+                    cancelled = True
+                    cmd = cancel
+                    break
+            if c in ['\x04']:
+                if exit is not None:
+                    cancelled = True
+                    cmd = exit
+                    break
+            if c in ['\x03','\x04']:
+                lines = buf.text()
+                if include_last:
+                    lines += c
+                cmd = lines
+                break
+            if c in ['\r','\n']:
+                buf.write_chars('\n')
+            elif c in ['\x7f']:
+                if backspace is not None:
+                    buf.write_chars(backspace)
+                else:
+                    buf.write_chars('\b')
+            elif c in ['\033']:
+                buf.write_char(c)
+            elif unicodedata.category(c)[0] == "C":
+                pass
+            else:
+                buf.write_char(c)
+        if cmd is not None:
+            break
+        clear_lines(lines_all, lines_cur)
+        cursor = 0
+        for line in buf.lines[:buf.y]:
+            cursor += len(prompt) + len(line) + 1
+        cursor += len(prompt) + buf.x
+        lines_all, lines_cur = print_lines(buf.text(begin=prompt), cursor)
+    clear_lines(lines_all, lines_cur)
+    return cmd
 
 def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None, cancel=None, exit=None, backspace=None, id=None, no_save=None, skip_input=False):
     if id is not None:
@@ -366,12 +426,12 @@ def cmd_create(id=None, type=None):
         type = read_line('(create-ai) type: ', cancel='', include_last=False)
         if not type:
             return
-    if type in ['t','text']:
-        a = TextCompletionAI()
-    elif type in ['c','ch','chat']:
-        a = ChatAI()
-    else:
-        a = TextCompletionAI()
+    try:
+        t = to_ai_type(type)
+        a = t()
+    except:
+        print(f"no such ai type '{type}'")
+        return
     ai.add(id, a)
     ai.switch(id)
     print(f"created new ai '{id}'")
@@ -639,11 +699,22 @@ def cmd_set(args):
         key = args[:i].strip()
         value = args[i:].strip()
     except:
+        key = args
+        value = None
+    if not key:
         print('usage: set [key] [value]', end='\r\n')
         return
+    if not value:
+        value = str(ai.get(key))
+        value = read_lines(f"{key}> ", cancel='__cancel__', value=value)
+        if value == '__cancel__':
+            return
     try:
+        display = value.replace('\n', '\\n')
+        if len(display) > 30:
+            display = display[:30] + '...'
+        print(f'set {key} = {display}', end='\r\n')
         ai.set(key, value)
-        print(f'set {key} = {value}')
     except Exception as e:
         print('error:', e, end='\r\n')
         err = traceback.format_exc()

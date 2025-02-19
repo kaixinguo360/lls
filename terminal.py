@@ -19,7 +19,12 @@ def to_int(i):
 def esc_delete(s):
     line = s.lines[s.y]
     if s.insert_mode:
-        line = line[:s.x] + line[s.x+1:]
+        if s.x < len(line):
+            line = line[:s.x] + line[s.x+1:]
+        else:
+            if s.y < len(s.lines) - 1 and s.auto_remove_line:
+                line += s.lines[s.y+1]
+                s.lines = s.lines[:s.y] + s.lines[s.y+1:]
     else:
         line = line[:s.x] + ' ' + line[s.x+1:]
     s.lines[s.y] = line
@@ -196,6 +201,8 @@ class Screen:
         self.insert_mode = False
         self.limit_move = False
         self.auto_move_to_end = False
+        self.auto_move_between_line = False
+        self.auto_remove_line = False
         self.history_begin = '[lls is beginning]\n'
         self.history_end = '[lls is terminating]\n'
         self.history_file = history_file
@@ -281,9 +288,19 @@ class Screen:
                 s.nor(limit)
                 s.x = len(s.lines[s.y])
         if c == 'C':
-            s.x += i
+            if s.x < len(s.lines[s.y]):
+                s.x += i
+            else:
+                if s.y < len(s.lines) - 1 and s.auto_move_between_line:
+                    s.y += 1
+                    s.x = 0
         if c == 'D':
-            s.x -= i
+            if s.x > 0:
+                s.x -= i
+            else:
+                if s.y > 0 and s.auto_move_between_line:
+                    s.y -= 1
+                    s.x = len(s.lines[s.y])
         s.nor(limit)
 
     def write(self, b):
@@ -343,6 +360,12 @@ class Screen:
                     line = s.lines[s.y]
                     line = line[:s.x] + line[s.x+1:]
                     s.lines[s.y] = line
+            else:
+                if s.y > 0 and s.insert_mode and s.auto_remove_line:
+                    s.x = len(s.lines[s.y-1])
+                    s.lines[s.y-1] += s.lines[s.y]
+                    s.lines = s.lines[:s.y] + s.lines[s.y+1:]
+                    s.y -= 1
         elif c == '\r':
             s.x = 0
         elif c == '\n':
@@ -423,8 +446,8 @@ class Screen:
                 self.esc_err = self.esc_err[-100:]
                 return
 
-    def text(self, end='\n'):
-        return end.join(self.lines)
+    def text(self, end='\n', begin=''):
+        return begin + (end + begin).join(self.lines)
 
     def raw(self):
         return self._raw
