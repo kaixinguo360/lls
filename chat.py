@@ -3,7 +3,7 @@
 import os
 import json
 
-from generate import AI, get_openai_client, convert_output, default_model
+from generate import AI, get_openai_client, convert_output, default_model, register_ai_type
 
 default_system_instrct = '''你是一个能干的助手, 需要根据user的指令和当前的shell控制台输出, 生成一条满足user指令的shell命令. 你的输出将直接发送给控制台并执行, 因此你不能输出shell命令以外的任何无关内容. 你不需要用任何引号包裹输出的shell命令, 也不需要格式化输出的shell命令.
 
@@ -120,6 +120,43 @@ class ChatAI(AI):
                 content = m['content']
             print(f"{role.upper()}: {content}".replace('\n', end), end=end)
             print('+'+'-'*(winsize.columns-2)+'+', end=end)
+
+    @staticmethod
+    def from_config(path=None, config=None):
+        s = ChatAI()
+        if path:
+            with open(path, 'r') as f:
+                config = json.load(f)
+        s.model = config.get('model', s.model)
+        s.user = config.get('user', s.user)
+        s.user_template = config.get('user_template', s.user_template)
+        s.assistant = config.get('assistant', s.assistant)
+        s.system = config.get('system', s.system)
+        s.system_instrct = config.get('system_instrct', s.system_instrct)
+        s.default_instrct = config.get('default_instrct', s.default_instrct)
+        s.console_max_height = config.get('console_max_height', s.console_max_height)
+        s.messages = []
+        if s.system_instrct is not None:
+            s.add(s.system, s.system_instrct)
+        return s
+
+    def save_config(s, path=None):
+        config = {
+            'model': s.model,
+            'user': s.user,
+            'user_template': s.user_template,
+            'assistant': s.assistant,
+            'system': s.system,
+            'system_instrct': s.system_instrct,
+            'default_instrct': s.default_instrct,
+            'console_max_height': s.console_max_height,
+        }
+        if path:
+            with open(path, 'w') as f:
+                json.dump(config, f)
+        return config
+
+register_ai_type('chat', ChatAI)
 
 if __name__ == '__main__':
     c = ChatAI()

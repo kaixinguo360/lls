@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import traceback
 import json
 import os
 
@@ -8,6 +9,8 @@ base_url = os.environ.get('LLS_OPENAI_BASE_URL', 'https://api.openai.com')
 api_key = os.environ.get('LLS_OPENAI_API_KEY', '')
 
 client = None
+
+ai_types = {}
 
 def get_openai_client():
     global client
@@ -90,10 +93,18 @@ class AI():
                     value = value[:30] + '...'
             print(f"({_type}) {key} = {value}", end=end)
 
+    @staticmethod
+    def from_config(**kwargs):
+        raise NotImplementedError
+
+    def save_config(s, **kwargs):
+        raise NotImplementedError
+
 class MixedAI(AI):
 
     ais = {}
     ai = None
+    current_ai_id = None
 
     def add(s, id, ai):
         s.ais[id] = ai
@@ -101,6 +112,7 @@ class MixedAI(AI):
     def switch(s, id):
         if id in s.ais.keys():
             s.ai = s.ais[id]
+            s.current_ai_id = id
         else:
             raise ValueError(f"No such ai '{id}'")
 
@@ -140,6 +152,51 @@ class MixedAI(AI):
         if s.ai:
             return s.ai.configs()
 
+    @staticmethod
+    def from_config(path=None, config=None):
+        s = MixedAI()
+        try:
+            if path:
+                with open(path, 'r') as f:
+                    config = json.load(f)
+            ais = config.get('ai')
+            if ais:
+                for id in ais.keys():
+                    try:
+                        c = ais[id]
+                        id = c.get('id')
+                        t = to_ai_type(c.get('type'))
+                        conf = c.get('config')
+                        ai = t.from_config(config=conf)
+                        s.add(id, ai)
+                    except Exception as e:
+                        err = traceback.format_exc().replace('\n', '\r\n')
+                        print(f"prase ai config '{id}' failed:", err, end='\r\n')
+            id = config.get('current_ai_id')
+            if id:
+                s.switch(id)
+        except Exception as e:
+            err = traceback.format_exc().replace('\n', '\r\n')
+            print(f"prase ai config failed:", err, end='\r\n')
+        return s
+
+    def save_config(s, path=None):
+        config = {
+            'current_ai_id': s.current_ai_id,
+            'ai': {},
+        }
+        for id in s.ais.keys():
+            ai = s.ais[id]
+            config['ai'][id] = {
+                'id': id,
+                'type': get_ai_type(ai),
+                'config': ai.save_config(),
+            }
+        if path:
+            with open(path, 'w') as f:
+                json.dump(config, f)
+        return config
+
 class TextCompletionAI(AI):
 
     def __init__(s, model=default_model, prompt_template=default_prompt_template):
@@ -165,6 +222,46 @@ class TextCompletionAI(AI):
 
     def print(s, end='\r\n'):
         print(s.prompt_template.replace('\n', end), end=end)
+
+    @staticmethod
+    def from_config(path=None, config=None):
+        s = TextCompletionAI()
+        if path:
+            with open(path, 'r') as f:
+                config = json.load(f)
+        s.model = config.get('model', s.model)
+        s.prompt_template = config.get('prompt_template', s.prompt_template)
+        return s
+
+    def save_config(s, path=None):
+        config = {
+            'model': s.model,
+            'prompt_template': s.prompt_template,
+        }
+        if path:
+            with open(path, 'w') as f:
+                json.dump(config, f)
+        return config
+
+def register_ai_type(id, t):
+    global ai_types
+    ai_types[id] = t
+
+def to_ai_type(id):
+    global ai_types
+    return ai_types[id]
+
+def get_ai_type(ai):
+    global ai_types
+    for id in ai_types:
+        t = ai_types[id]
+        if type(ai) == t:
+            return id
+    return 'unknown'
+
+register_ai_type('base', AI)
+register_ai_type('mixed', MixedAI)
+register_ai_type('text', TextCompletionAI)
 
 if __name__ == '__main__':
     a = TextCompletionAI()

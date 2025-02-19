@@ -798,11 +798,17 @@ def read_command():
     return cmd
 
 def load_ai():
-    cmd_create('text', 'text')
-    cmd_create('chat', 'chat')
+    global ai
+    config_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_ai_config')
+    ai = MixedAI.from_config(config_file_path)
+    if len(ai.ais) == 0:
+        cmd_create('text', 'text')
+        cmd_create('chat', 'chat')
 
 def save_ai():
-    pass
+    global ai
+    config_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_ai_config')
+    ai.save_config(config_file_path)
 
 load_bufs()
 load_ai()
