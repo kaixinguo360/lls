@@ -664,7 +664,7 @@ def cmd_tty():
 
 def cmd_auto(instrct):
     if instrct is None:
-        instrct = read_line('(auto-instrct): ', cancel='', include_last=False, id='instrct')
+        instrct = read_instrct('auto')
     else:
         record_line(instrct, id='auto-instrct')
     if instrct == '':
