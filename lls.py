@@ -58,7 +58,8 @@ old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
 master_fd, slave_fd = pty.openpty()
 winsize = os.get_terminal_size()
-ai = ChatAI()
+ais = {}
+ai = None
 screen = Screen()
 screen.keep_logs_when_clean_screen = True
 
@@ -328,31 +329,62 @@ def read_instrct(prompt):
             elif cmd in ['get']:
                 cmd_get(args)
             elif cmd in ['m','mode']:
-                cmd_mode(args, quiet=True)
+                cmd_mode(args)
             elif cmd in ['c','ch','chat']:
                 instrct = args
-                cmd_mode('chat', quiet=True)
+                cmd_mode('chat')
             elif cmd in ['t', 'text']:
                 instrct = args
-                cmd_mode('text', quiet=True)
+                cmd_mode('text')
     return instrct
 
-def cmd_mode(args, quiet=False, end='\r\n'):
-    global ai
+def cmd_ls():
+    global ai, ais
+    info = 'STATUS\tID\tTYPE\r\n'
+    for id in ais.keys():
+        a = ais[id]
+        if ai == a:
+            info += f" [*]\t{id}\t{type(a).__name__}\r\n"
+        else:
+            info += f" [ ]\t{id}\t{type(a).__name__}\r\n"
+    read_line(info, max_chars=1, backspace='b')
+
+def cmd_create(id=None, type=None):
+    global ai, ais
+    if not id:
+        id = read_line('(create-ai) id: ', cancel='', include_last=False)
+        if not id:
+            return
+    if not type:
+        type = read_line('(create-ai) type: ', cancel='', include_last=False)
+        if not type:
+            return
+    if type in ['t','text']:
+        ai = TextCompletionAI()
+    elif type in ['c','ch','chat']:
+        ai = ChatAI()
+    else:
+        ai = TextCompletionAI()
+    ais[id] = ai
+    print(f"created new ai '{id}'")
+
+def cmd_mode(id, quiet=True, end='\r\n'):
+    global ai, ais
     info = ''
-    if args is None:
-        if isinstance(ai, ChatAI):
-            info = f"current mode: 'chat'"
-        elif isinstance(ai, TextCompletionAI):
-            info = f"current mode: 'text'"
-    elif args in ['c','ch','chat']:
-        if not isinstance(ai, ChatAI):
-            ai = ChatAI()
-            info = "change mode to 'chat'"
-    elif args in ['t','text']:
-        if not isinstance(ai, TextCompletionAI):
-            ai = TextCompletionAI()
-            info = "change mode to 'text'"
+    ids = '[' + ','.join(ais.keys()) + ']'
+    if not id:
+        for id in ais.keys():
+            if ais[id] == ai:
+                info = f"(select-ai) current ai is '{id}' {ids} "
+                break
+        id = read_line(info, cancel='', include_last=False)
+    if not id:
+        return
+    if id in ais:
+        ai = ais[id]
+        info = f"change ai to '{id}'"
+    else:
+        info = f"no such ai '{id}' {ids}"
     if info:
         if quiet:
             read_line(info, max_chars=1, backspace='b')
@@ -609,9 +641,13 @@ def cmd_set(args):
         err = traceback.format_exc()
 
 def prompt_mode():
-    global mode
+    global mode, err
     try:
         return cmd_generate(default='i')[0]
+    except Exception as e:
+        print('error:', e, end='\r\n')
+        err = traceback.format_exc()
+        return ''
     finally:
         print_context()
         mode = 'char'
@@ -715,6 +751,10 @@ def line_mode():
                     cmd_get(args)
                 elif cmd in ['m','mode']:
                     cmd_mode(args)
+                elif cmd in ['create']:
+                    cmd_create()
+                elif cmd in ['l','ls']:
+                    cmd_ls()
                 else:
                     read_line(f"{cmd}: command not found", max_chars=1)
             except Exception as e:
@@ -724,17 +764,22 @@ def line_mode():
         mode = 'char'
 
 def char_mode():
-    global mode
-    output = ''
-    chars = os.read(sys.stdin.fileno(), 10240).decode()
-    for c in chars:
-        if c in ['\005']:
-            mode = 'line'
-        elif c in ['\007']:
-            mode = 'prompt'
-        else:
-            output += c
-    return output
+    global mode, err
+    try:
+        output = ''
+        chars = os.read(sys.stdin.fileno(), 10240).decode()
+        for c in chars:
+            if c in ['\005']:
+                mode = 'line'
+            elif c in ['\007']:
+                mode = 'prompt'
+            else:
+                output += c
+        return output
+    except Exception as e:
+        print('error:', e, end='\r\n')
+        err = traceback.format_exc()
+        return ''
 
 def read_command():
     if mode == 'char':
@@ -745,7 +790,16 @@ def read_command():
         cmd = prompt_mode()
     return cmd
 
+def load_ai():
+    global ai, ais
+    cmd_create('text', 'text')
+    cmd_create('chat', 'chat')
+
+def save_ai():
+    pass
+
 load_bufs()
+load_ai()
 
 try:
     os.write(sys.stdout.fileno(), b'\033c')
@@ -759,6 +813,7 @@ try:
             mode = 'char'
 finally:
     save_bufs()
+    save_ai()
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
     running = False
     print('exited, if not exit, please input ctrl-c again')
