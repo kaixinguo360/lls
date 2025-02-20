@@ -373,17 +373,17 @@ def cancelable(generator):
     finally:
         is_exit = True
 
-def read_instrct(prompt, value=''):
+def read_instruct(prompt, value=''):
     global ai
-    instrct = None
-    while instrct is None:
-        instrct = read_line(f'({prompt}-instrct): ', cancel='', include_last=False, value=value, id='instrct')
-        value = instrct
-        instrct = instrct.strip()
-        if instrct[:1] == '/':
-            cmd = instrct[1:]
+    instruct = None
+    while instruct is None:
+        instruct = read_line(f'({prompt}-instruct): ', cancel='', include_last=False, value=value, id='instruct')
+        value = instruct
+        instruct = instruct.strip()
+        if instruct[:1] == '/':
+            cmd = instruct[1:]
             args = None
-            instrct = None
+            instruct = None
             value = ''
             if ' ' in cmd and cmd[:1] != ' ':
                 index = cmd.find(' ')
@@ -398,12 +398,12 @@ def read_instrct(prompt, value=''):
             elif cmd in ['m','mode']:
                 cmd_mode(args)
             elif cmd in ['c','ch','chat']:
-                instrct = args
+                instruct = args
                 cmd_mode('chat')
             elif cmd in ['t', 'text']:
-                instrct = args
+                instruct = args
                 cmd_mode('text')
-    return instrct
+    return instruct
 
 def cmd_ls():
     global ai
@@ -459,22 +459,22 @@ def cmd_mode(id, quiet=True, end='\r\n'):
         else:
             print(info, end=end)
 
-def cmd_generate(instrct=None, prompt='gen', default='u'):
-    if instrct is None:
-        instrct = read_instrct(prompt)
+def cmd_generate(instruct=None, prompt='gen', default='u'):
+    if instruct is None:
+        instruct = read_instruct(prompt)
     else:
-        record_line(instrct, id='instrct')
-    if instrct == '':
+        record_line(instruct, id='instruct')
+    if instruct == '':
         return '', ''
     context = screen.text()
     cmd, think = '', ''
-    if '#' in instrct:
-        args = instrct.split('#')
-        instrct = args[0].strip()
+    if '#' in instruct:
+        args = instruct.split('#')
+        instruct = args[0].strip()
         cmd = args[-1].strip()
         output = None
     else:
-        output = ai.generate(instrct, context)
+        output = ai.generate(instruct, context)
     confirm_info = ', confirm?'
     flags = '[y/u/i/n/e/s/r/k/t]'
     save = False
@@ -532,13 +532,13 @@ def cmd_generate(instrct=None, prompt='gen', default='u'):
         elif confirm in ['k','think']:
             show_think = True
         elif confirm in ['r','re','retry']:
-            output = ai.generate(instrct, context)
+            output = ai.generate(instruct, context)
         elif confirm in ['e','edit']:
-            instrct = read_instrct(prompt, value=instrct)
-            if instrct == '':
+            instruct = read_instruct(prompt, value=instruct)
+            if instruct == '':
                 cmd = ''
                 break
-            output = ai.generate(instrct, context)
+            output = ai.generate(instruct, context)
         elif confirm in ['t','teach']:
             default = 'y'
             cmd = read_line(f'({prompt}-cmd): ', include_last=False, id='cmd')
@@ -554,25 +554,25 @@ def cmd_generate(instrct=None, prompt='gen', default='u'):
         else:
             confirm_info = ", please input 'y' or 'n':"
     if save:
-        save_history(instrct, context, cmd)
+        save_history(instruct, context, cmd)
     if cmd:
-        ai.save(instrct, context, cmd)
+        ai.save(instruct, context, cmd)
         if enter:
             cmd += '\n'
-    return cmd, instrct
+    return cmd, instruct
 
 def cmd_exec(prompt='cmd', cmd=None, id='cmd'):
     if cmd is None:
         cmd = read_line(f'({prompt}): ', cancel='', include_last=False, id=id)
     else:
         record_line(cmd, id=id)
-    instrct = None
+    instruct = None
     if '#' in cmd:
         args = cmd.split('#')
         cmd = args[0].strip()
-        instrct = args[-1].strip()
+        instruct = args[-1].strip()
     print('\033[2K\r', end='')
-    return cmd, instrct
+    return cmd, instruct
 
 def cmd_watch():
     global total_chars
@@ -599,14 +599,14 @@ def cmd_watch():
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['e']:
-            cmd, instrct = cmd_exec()
+            cmd, instruct = cmd_exec()
             if cmd:
-                ai.save(instrct, screen.text(), cmd)
+                ai.save(instruct, screen.text(), cmd)
                 cmd += '\n'
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['i']:
-            cmd, instrct = cmd_exec('input', id='cmd_input')
+            cmd, instruct = cmd_exec('input', id='cmd_input')
             if cmd:
                 os.write(master_fd, cmd.encode())
                 time.sleep(0.1)
@@ -662,15 +662,15 @@ def cmd_tty():
     os.write(sys.stdout.fileno(), b'\033[?25h')
     print_context()
 
-def cmd_auto(instrct):
-    if instrct is None:
-        instrct = read_instrct('auto')
+def cmd_auto(instruct):
+    if instruct is None:
+        instruct = read_instruct('auto')
     else:
-        record_line(instrct, id='auto-instrct')
-    if instrct == '':
+        record_line(instruct, id='auto-instruct')
+    if instruct == '':
         return ''
     while True:
-        cmd, instrct = cmd_generate(instrct, prompt='auto')
+        cmd, instruct = cmd_generate(instruct, prompt='auto')
         if cmd == '':
             break
         cmd += '\n'
@@ -776,15 +776,15 @@ def line_mode():
                     time.sleep(0.1)
                     cmd_show()
                 elif cmd in ['e','exec']:
-                    cmd, instrct = cmd_exec(cmd=args)
+                    cmd, instruct = cmd_exec(cmd=args)
                     if cmd:
-                        ai.save(instrct, screen.text(), cmd)
+                        ai.save(instruct, screen.text(), cmd)
                         cmd += '\n'
                         os.write(master_fd, cmd.encode())
                         time.sleep(0.1)
                         cmd_show()
                 elif cmd in ['i','input']:
-                    cmd, instrct = cmd_exec('input', cmd=args, id='cmd_input')
+                    cmd, instruct = cmd_exec('input', cmd=args, id='cmd_input')
                     if cmd:
                         os.write(master_fd, cmd.encode())
                         time.sleep(0.1)

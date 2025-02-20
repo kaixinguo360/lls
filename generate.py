@@ -50,17 +50,17 @@ ls -a
 {console}
 
 以下是当前user的指令:
-{instrct}
+{instruct}
 
 以下是满足user指令的shell命令:
 '''
 
 class AI():
 
-    def generate(s, instrct, console):
+    def generate(s, instruct, console):
         pass
 
-    def save(s, instrct, console, output):
+    def save(s, instruct, console, output):
         pass
 
     def print(s, **kwargs):
@@ -120,17 +120,17 @@ class MixedAI(AI):
         else:
             raise ValueError(f"No such ai '{id}'")
 
-    def generate(s, instrct, console):
+    def generate(s, instruct, console):
         if s.ai:
-            return s.ai.generate(instrct, console)
+            return s.ai.generate(instruct, console)
         else:
             def fun():
                 yield '', 'no selected ai'
             return fun()
 
-    def save(s, instrct, console, output):
+    def save(s, instruct, console, output):
         if s.ai:
-            s.ai.save(instrct, console, output)
+            s.ai.save(instruct, console, output)
         else:
             pass
 
@@ -207,11 +207,11 @@ class TextCompletionAI(AI):
         s.model = model
         s.prompt_template = prompt_template
 
-    def generate(s, instrct, console):
+    def generate(s, instruct, console):
         yield '', ''
         try:
             client = get_openai_client()
-            prompt = s.prompt_template.format(instrct=instrct, console=console)
+            prompt = s.prompt_template.format(instruct=instruct, console=console)
             stream = client.completions.create(
                 model=s.model,
                 prompt=prompt,
