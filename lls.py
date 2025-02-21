@@ -361,7 +361,7 @@ def cancelable(generator):
     try:
         while True:
             if check_cancel():
-                break
+                raise KeyboardInterrupt
             if not q.empty():
                 i = q.get_nowait()
                 if i == generator: # End of generator
@@ -488,19 +488,27 @@ def cmd_generate(instruct=None, prompt='gen', default='u'):
             os.write(sys.stdout.fileno(), f'\033[2K\r({prompt}-cmd): waiting...'.encode())
             cancelled = False
             gen_cmd, gen_think = '', ''
-            for chunk in cancelable(output):
-                clear_lines(lines_all, lines_cur)
-                gen_cmd, gen_think = chunk[0], chunk[1]
-                if gen_cmd:
-                    text = f'({prompt}-cmd): ' + gen_cmd
-                elif gen_think:
-                    text = f'({prompt}-think): ' + gen_think
-                else:
-                    text = f'({prompt}-cmd): waiting...'
-                lines_all, lines_cur = print_lines(text)
+            try:
+                for chunk in cancelable(output):
+                    clear_lines(lines_all, lines_cur)
+                    gen_cmd, gen_think = chunk[0], chunk[1]
+                    if gen_cmd:
+                        text = f'({prompt}-cmd): ' + gen_cmd
+                    elif gen_think:
+                        text = f'({prompt}-think): ' + gen_think
+                    else:
+                        text = f'({prompt}-cmd): waiting...'
+                    lines_all, lines_cur = print_lines(text)
+            except KeyboardInterrupt as e:
+                cancelled = True
             lines_all, lines_cur = clear_lines(lines_all, lines_cur)
             if not cancelled:
                 cmd, think = gen_cmd, gen_think
+            else:
+                if gen_cmd == '' and gen_think != '':
+                    cmd, think = gen_think, ''
+                else:
+                    cmd, think = gen_cmd, gen_think
             gen_time = time.time()
             output = None
         if cmd:
