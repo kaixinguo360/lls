@@ -436,6 +436,19 @@ def cmd_create(id=None, type=None):
     ai.switch(id)
     print(f"created new ai '{id}'")
 
+def cmd_remove(id=None):
+    global ai
+    if not id:
+        ids = '[' + ','.join(ai.ais.keys()) + ']'
+        for id in ai.ais.keys():
+            if ai.ais[id] == ai.ai:
+                break
+        id = read_line(f"(remove-ai) current ai is '{id}' {ids} ", cancel='', include_last=False)
+        if not id:
+            return
+    ai.remove(id)
+    print(f"removed ai '{id}'")
+
 def cmd_mode(id, quiet=True, end='\r\n'):
     global ai
     info = ''
@@ -840,6 +853,8 @@ def line_mode():
                     cmd_mode(args)
                 elif cmd in ['create']:
                     cmd_create()
+                elif cmd in ['remove','delete']:
+                    cmd_remove(args)
                 elif cmd in ['l','ls']:
                     cmd_ls()
                 else:

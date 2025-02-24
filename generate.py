@@ -113,6 +113,16 @@ class MixedAI(AI):
     def add(s, id, ai):
         s.ais[id] = ai
 
+    def remove(s, id):
+        if id in s.ais.keys():
+            a = s.ais[id]
+            del s.ais[id]
+            if a == s.ai:
+                if len(s.ais) == 0:
+                    s.ai = None
+                else:
+                    s.ai = s.ais[s.ais.keys()[0]]
+
     def switch(s, id):
         if id in s.ais.keys():
             s.ai = s.ais[id]
