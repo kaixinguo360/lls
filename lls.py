@@ -185,6 +185,9 @@ def save_bufs():
 def record_line(value, id):
     read_line(value=value, id=id, skip_input=True)
 
+def show_line(msg):
+    read_line(msg, max_chars=1, backspace='b')
+
 def read_lines(prompt='> ', include_last=False, value='', begin=None, cancel='', exit=None, backspace=None):
     buf = Screen()
     buf.insert_mode = True
@@ -414,7 +417,7 @@ def cmd_ls():
             info += f" [*]\t{id}\t{type(a).__name__}\r\n"
         else:
             info += f" [ ]\t{id}\t{type(a).__name__}\r\n"
-    read_line(info, max_chars=1, backspace='b')
+    show_line(info)
 
 def cmd_create(id=None, type=None):
     global ai
@@ -434,7 +437,7 @@ def cmd_create(id=None, type=None):
         return
     ai.add(id, a)
     ai.switch(id)
-    print(f"created new ai '{id}'")
+    show_line(f"created new ai '{id}'")
 
 def cmd_remove(id=None):
     global ai
@@ -447,7 +450,24 @@ def cmd_remove(id=None):
         if not id:
             return
     ai.remove(id)
-    print(f"removed ai '{id}'")
+    show_line(f"removed ai '{id}'")
+
+def cmd_rename(id=None, new_id=None):
+    global ai
+    if not id:
+        ids = '[' + ','.join(ai.ais.keys()) + ']'
+        for id in ai.ais.keys():
+            if ai.ais[id] == ai.ai:
+                break
+        id = read_line(f"(rename-ai) current ai is '{id}' {ids} ", cancel='', include_last=False)
+        if not id:
+            return
+    if not new_id:
+        new_id = read_line(f"(rename-ai) selected ai '{id}', new id: ", cancel='', include_last=False)
+        if not new_id:
+            return
+    ai.rename(id, new_id)
+    show_line(f"renamed ai '{id}' to '{new_id}'")
 
 def cmd_mode(id, quiet=True, end='\r\n'):
     global ai
@@ -468,7 +488,7 @@ def cmd_mode(id, quiet=True, end='\r\n'):
         info = f"no such ai '{id}' {ids}"
     if info:
         if quiet:
-            read_line(info, max_chars=1, backspace='b')
+            show_line(info)
         else:
             print(info, end=end)
 
@@ -853,12 +873,14 @@ def line_mode():
                     cmd_mode(args)
                 elif cmd in ['create']:
                     cmd_create()
-                elif cmd in ['remove','delete']:
+                elif cmd in ['remove','del','delete']:
                     cmd_remove(args)
+                elif cmd in ['rename']:
+                    cmd_rename()
                 elif cmd in ['l','ls']:
                     cmd_ls()
                 else:
-                    read_line(f"{cmd}: command not found", max_chars=1)
+                    show_line(f"{cmd}: command not found")
             except Exception as e:
                 print('error:', e, end='\r\n')
                 err = traceback.format_exc()

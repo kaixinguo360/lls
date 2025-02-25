@@ -130,6 +130,11 @@ class MixedAI(AI):
         else:
             raise ValueError(f"No such ai '{id}'")
 
+    def rename(s, id, new_id):
+        if id in s.ais.keys():
+            s.ais[new_id] = s.ais[id]
+            del s.ais[id]
+
     def generate(s, instruct, console):
         if s.ai:
             return s.ai.generate(instruct, console)
