@@ -221,6 +221,7 @@ class TextCompletionAI(AI):
     def __init__(s, model=default_model, prompt_template=default_prompt_template):
         s.model = model
         s.prompt_template = prompt_template
+        s.post_processor = None
 
     def generate(s, instruct, console):
         yield '', ''
@@ -235,7 +236,13 @@ class TextCompletionAI(AI):
             output = ''
             for chunk in stream:
                 output += chunk.choices[0].text or ''
-                yield convert_output(output)
+                cmd, think = convert_output(output)
+                yield cmd, think
+            if s.post_processor:
+                local_vars = { 'cmd': cmd }
+                exec(s.post_processor, local_vars)
+                cmd = local_vars['cmd']
+                yield cmd, think
         except Exception as e:
             yield f'error: {e}', ''
 
@@ -250,12 +257,14 @@ class TextCompletionAI(AI):
                 config = json.load(f)
         s.model = config.get('model', s.model)
         s.prompt_template = config.get('prompt_template', s.prompt_template)
+        s.post_processor = config.get('post_processor', s.post_processor)
         return s
 
     def save_config(s, path=None):
         config = {
             'model': s.model,
             'prompt_template': s.prompt_template,
+            'post_processor': s.post_processor,
         }
         if path:
             with open(path, 'w') as f:
