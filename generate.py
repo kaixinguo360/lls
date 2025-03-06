@@ -239,9 +239,10 @@ class TextCompletionAI(AI):
                 cmd, think = convert_output(output)
                 yield cmd, think
             if s.post_processor:
-                local_vars = { 'cmd': cmd }
+                local_vars = { 'cmd': cmd, 'think': think }
                 exec(s.post_processor, local_vars)
                 cmd = local_vars['cmd']
+                think = local_vars['think']
                 yield cmd, think
         except Exception as e:
             yield f'error: {e}', ''
