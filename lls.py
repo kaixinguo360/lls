@@ -122,13 +122,17 @@ def print_context():
     else:
         os.write(sys.stdout.fileno(), ('\033[2K\r' + screen._raw).encode())
 
-def clear_lines(lines_all, lines_cur):
+def clear_lines(lines_all, lines_cur, clear=True):
     if lines_all != lines_cur:
         for _ in range(lines_all - lines_cur):
             os.write(sys.stdout.fileno(), b'\r\033[1B')
     for _ in range(lines_all - 1):
-        os.write(sys.stdout.fileno(), b'\033[2K\r\033[1A')
-    os.write(sys.stdout.fileno(), b'\033[2K\r')
+        if clear:
+            os.write(sys.stdout.fileno(), b'\033[2K')
+        os.write(sys.stdout.fileno(), b'\r\033[1A')
+    if clear:
+        os.write(sys.stdout.fileno(), b'\033[2K')
+    os.write(sys.stdout.fileno(), b'\r')
     return 1, 1
 
 def print_lines(text, cursor=None):
@@ -522,16 +526,22 @@ def cmd_generate(instruct=None, prompt='gen', default='u'):
             cancelled = False
             gen_cmd, gen_think = '', ''
             try:
+                curr_mode, prev_mode = None, None
                 for chunk in cancelable(output):
-                    clear_lines(lines_all, lines_cur)
                     gen_cmd, gen_think = chunk[0], chunk[1]
                     if gen_cmd:
+                        curr_mode = 'cmd'
                         text = f'({prompt}-cmd): ' + gen_cmd
                     elif gen_think:
+                        curr_mode = 'think'
                         text = f'({prompt}-think): ' + gen_think
                     else:
+                        curr_mode = None
                         text = f'({prompt}-cmd): waiting...'
+                    clear_lines(lines_all, lines_cur, clear=prev_mode!=curr_mode)
                     lines_all, lines_cur = print_lines(text)
+                    prev_mode = curr_mode
+                del curr_mode, prev_mode
             except KeyboardInterrupt as e:
                 cancelled = True
             lines_all, lines_cur = clear_lines(lines_all, lines_cur)
