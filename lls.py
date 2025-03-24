@@ -526,22 +526,19 @@ def cmd_generate(instruct=None, prompt='gen', default='u'):
             cancelled = False
             gen_cmd, gen_think = '', ''
             try:
-                curr_mode, prev_mode = None, None
+                prev_len = 0
                 for chunk in cancelable(output):
                     gen_cmd, gen_think = chunk[0], chunk[1]
                     if gen_cmd:
-                        curr_mode = 'cmd'
                         text = f'({prompt}-cmd): ' + gen_cmd
                     elif gen_think:
-                        curr_mode = 'think'
                         text = f'({prompt}-think): ' + gen_think
                     else:
-                        curr_mode = None
                         text = f'({prompt}-cmd): waiting...'
-                    clear_lines(lines_all, lines_cur, clear=prev_mode!=curr_mode)
+                    clear_lines(lines_all, lines_cur, clear=len(text)<prev_len)
                     lines_all, lines_cur = print_lines(text)
-                    prev_mode = curr_mode
-                del curr_mode, prev_mode
+                    prev_len = len(text)
+                del prev_len
             except KeyboardInterrupt as e:
                 cancelled = True
             lines_all, lines_cur = clear_lines(lines_all, lines_cur)
