@@ -10,7 +10,7 @@ import traceback
 import sys
 import signal
 from terminal import print_screen_perfect
-from generate import to_ai_type
+from ai.registry import to_ai_type
 from display import show_line, read_line, read_lines, clear_lines, print_lines, record_line
 from common import *
 

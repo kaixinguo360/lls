@@ -1,8 +1,3 @@
-"""
-common.py
-通用工具与辅助函数模块。
-"""
-
 import os
 import traceback
 import sys

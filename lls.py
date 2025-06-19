@@ -75,9 +75,11 @@ import signal
 import struct
 import fcntl
 
-from chat import ChatAI
-from generate import MixedAI, TextCompletionAI, to_ai_type
-from terminal import Screen, print_screen_perfect
+from ai.mixed import MixedAI
+from ai.text import TextCompletionAI
+from ai.chat import ChatAI
+from ai.registry import to_ai_type
+from terminal import Screen
 from display import *
 from commands import *
 
