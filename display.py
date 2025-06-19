@@ -88,6 +88,10 @@ def get_bufs():
     global bufs
     return bufs
 
+def record_line(value, id):
+    """记录一行内容到缓冲区。"""
+    read_line(value=value, id=id, skip_input=True)
+
 def show_line(msg):
     """以只读方式显示一行消息。"""
     read_line(msg, max_chars=1, backspace='b')
