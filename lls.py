@@ -34,7 +34,6 @@ if not sys.stdin.isatty():
     result_code = subprocess.call(command)
     exit(result_code)
 
-import unicodedata
 import threading
 import termios
 import string
@@ -52,7 +51,7 @@ import fcntl
 from chat import ChatAI
 from generate import MixedAI, TextCompletionAI, to_ai_type
 from terminal import Screen, print_screen_perfect
-from display import wrap_multi_lines
+from display import *
 
 old_tty = termios.tcgetattr(sys.stdin)
 tty.setraw(sys.stdin.fileno())
@@ -122,34 +121,7 @@ def print_context():
     else:
         os.write(sys.stdout.fileno(), ('\033[2K\r' + screen._raw).encode())
 
-def clear_lines(lines_all, lines_cur, clear=True):
-    if lines_all != lines_cur:
-        for _ in range(lines_all - lines_cur):
-            os.write(sys.stdout.fileno(), b'\r\033[1B')
-    for _ in range(lines_all - 1):
-        if clear:
-            os.write(sys.stdout.fileno(), b'\033[2K')
-        os.write(sys.stdout.fileno(), b'\r\033[1A')
-    if clear:
-        os.write(sys.stdout.fileno(), b'\033[2K')
-    os.write(sys.stdout.fileno(), b'\r')
-    return 1, 1
-
-def print_lines(text, cursor=None):
-    line, lines_all = wrap_multi_lines(text)
-    os.write(sys.stdout.fileno(), b'\033[2K\r')
-    os.write(sys.stdout.fileno(), line.encode())
-    if cursor is not None and cursor != len(text):
-        for _ in range(lines_all - 1):
-            os.write(sys.stdout.fileno(), b'\r\033[1A')
-        line_prev, lines_cur = wrap_multi_lines(text[:cursor])
-        os.write(sys.stdout.fileno(), b'\r')
-        os.write(sys.stdout.fileno(), line_prev.encode())
-    else:
-        lines_cur = lines_all
-    return lines_all, lines_cur
-
-bufs = {}
+bufs = get_bufs()
 
 def load_bufs():
     global bufs, err
@@ -188,149 +160,6 @@ def save_bufs():
 
 def record_line(value, id):
     read_line(value=value, id=id, skip_input=True)
-
-def show_line(msg):
-    read_line(msg, max_chars=1, backspace='b')
-
-def read_lines(prompt='> ', include_last=False, value='', begin=None, cancel='', exit=None, backspace=None):
-    buf = Screen()
-    buf.insert_mode = True
-    buf.limit_move = True
-    buf.max_height = 1
-    buf.auto_remove_line = True
-    buf.auto_move_between_line = True
-    buf.write_chars(value)
-    cmd = None
-    cancelled = False
-    if begin:
-        os.write(sys.stdout.fileno(), begin.encode())
-    cursor = 0
-    for line in buf.lines[:buf.y]:
-        cursor += len(prompt) + len(line) + 1
-    cursor += len(prompt) + buf.x
-    lines_all, lines_cur = print_lines(buf.text(begin=prompt), cursor)
-    while True:
-        chars = os.read(sys.stdin.fileno(), 10240).decode()
-        for c in chars:
-            if c in ['\x03']:
-                if cancel is not None:
-                    cancelled = True
-                    cmd = cancel
-                    break
-            if c in ['\x04']:
-                if exit is not None:
-                    cancelled = True
-                    cmd = exit
-                    break
-            if c in ['\x03','\x04']:
-                lines = buf.text()
-                if include_last:
-                    lines += c
-                cmd = lines
-                break
-            if c in ['\r','\n']:
-                buf.write_chars('\n')
-            elif c in ['\x7f']:
-                if backspace is not None:
-                    buf.write_chars(backspace)
-                else:
-                    buf.write_chars('\b')
-            elif c in ['\033']:
-                buf.write_char(c)
-            elif unicodedata.category(c)[0] == "C":
-                pass
-            else:
-                buf.write_char(c)
-        if cmd is not None:
-            break
-        clear_lines(lines_all, lines_cur)
-        cursor = 0
-        for line in buf.lines[:buf.y]:
-            cursor += len(prompt) + len(line) + 1
-        cursor += len(prompt) + buf.x
-        lines_all, lines_cur = print_lines(buf.text(begin=prompt), cursor)
-    clear_lines(lines_all, lines_cur)
-    return cmd
-
-def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None, cancel=None, exit=None, backspace=None, id=None, no_save=None, skip_input=False):
-    if id is not None:
-        buf = bufs.get(id)
-        if buf is None:
-            buf = Screen()
-            buf.insert_mode = True
-            buf.limit_move = True
-            buf.max_height = 1
-            buf.auto_move_to_end = True
-            bufs[id] = buf
-    else:
-        buf = Screen()
-        buf.insert_mode = True
-        buf.limit_move = True
-        buf.max_height = 1
-        buf.auto_move_to_end = True
-    if len(buf.lines) > 1 and buf.lines[-2] == value:
-        buf.lines = buf.lines[:-1]
-        buf.y = len(buf.lines) - 1
-        buf.x = len(buf.lines[-1])
-    else:
-        buf.write_chars(value)
-    cmd = None
-    cancelled = False
-    if skip_input:
-        cmd = buf.lines[buf.y]
-    else:
-        if begin:
-            os.write(sys.stdout.fileno(), begin.encode())
-        lines_all, lines_cur = print_lines(prompt + buf.current_line(), len(prompt) + buf.x)
-        while True:
-            chars = os.read(sys.stdin.fileno(), 10240).decode()
-            for c in chars:
-                if c in ['\x03']:
-                    if cancel is not None:
-                        cancelled = True
-                        cmd = cancel
-                        break
-                if c in ['\x04']:
-                    if exit is not None or cancel is not None:
-                        cancelled = True
-                        cmd = exit if exit is not None else cancel
-                        break
-                if c in ['\x03','\x04','\r','\n']:
-                    line = buf.current_line()
-                    if include_last:
-                        line += c
-                    cmd = line
-                    break
-                elif c in ['\x7f']:
-                    if backspace is not None:
-                        buf.write_chars(backspace)
-                    else:
-                        buf.write_chars('\b')
-                elif c in ['\033']:
-                    buf.write_char(c)
-                elif unicodedata.category(c)[0] == "C":
-                    pass
-                else:
-                    buf.write_char(c)
-                if max_chars != -1 and len(buf.current_line()) >= max_chars:
-                    cmd = buf.current_line()
-                    break
-            if cmd is not None:
-                break
-            clear_lines(lines_all, lines_cur)
-            lines_all, lines_cur = print_lines(prompt + buf.current_line(), len(prompt) + buf.x)
-        clear_lines(lines_all, lines_cur)
-    if id is not None:
-        buf.y = len(buf.lines) - 1
-        if cancelled or cmd == '' or (len(buf.lines) > 1 and buf.lines[buf.y - 1] == cmd
-                ) or (no_save is not None and cmd in no_save):
-            buf.lines[buf.y] = ''
-            buf.x = 0
-        else:
-            buf.lines[buf.y] = cmd
-            buf.x = len(buf.lines[buf.y])
-            buf.write_char('\n')
-    return cmd
 
 def save_history(prompt, context, cmd):
     global err
