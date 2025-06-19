@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""
+display.py
+终端显示、输入输出辅助、行宽处理等功能模块。
+"""
 
 import os
 import sys
@@ -17,7 +21,7 @@ _char_widths = [
 ]
  
 def get_width(c):
-    """(from urwid) Return the screen column width for unicode ordinal o."""
+    """返回字符c在终端的显示宽度。"""
     global _char_widths
     o = ord(c)
     if o == 0xe or o == 0xf:
@@ -27,6 +31,7 @@ def get_width(c):
             return wid
 
 def wrap_multi_lines(display, width=None, padding=0, end='\r\n'):
+    """将长字符串按终端宽度自动换行。"""
     if width is None:
         width = os.get_terminal_size().columns - padding
     output = ''
@@ -48,6 +53,7 @@ def wrap_multi_lines(display, width=None, padding=0, end='\r\n'):
     return output, lines
 
 def clear_lines(lines_all, lines_cur, clear=True):
+    """清除多行终端输出。"""
     if lines_all != lines_cur:
         for _ in range(lines_all - lines_cur):
             os.write(sys.stdout.fileno(), b'\r\033[1B')
@@ -61,6 +67,7 @@ def clear_lines(lines_all, lines_cur, clear=True):
     return 1, 1
 
 def print_lines(text, cursor=None):
+    """打印多行文本并高亮光标位置。"""
     line, lines_all = wrap_multi_lines(text)
     os.write(sys.stdout.fileno(), b'\033[2K\r')
     os.write(sys.stdout.fileno(), line.encode())
@@ -77,13 +84,16 @@ def print_lines(text, cursor=None):
 bufs = {}
 
 def get_bufs():
+    """获取全局输入缓冲区。"""
     global bufs
     return bufs
 
 def show_line(msg):
+    """以只读方式显示一行消息。"""
     read_line(msg, max_chars=1, backspace='b')
 
 def read_lines(prompt='> ', include_last=False, value='', begin=None, cancel='', exit=None, backspace=None, buf=None):
+    """多行输入，支持编辑和撤销。"""
     if buf is None:
         buf = Screen()
     buf.insert_mode = True
@@ -145,6 +155,7 @@ def read_lines(prompt='> ', include_last=False, value='', begin=None, cancel='',
     return cmd
 
 def read_line(prompt=':', include_last=True, max_chars=-1, value='', begin=None, cancel=None, exit=None, backspace=None, id=None, no_save=None, skip_input=False, buf=None):
+    """单行输入，支持历史、撤销、编辑等。"""
     global bufs
     if buf is not None:
         pass

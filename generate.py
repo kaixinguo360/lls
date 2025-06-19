@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""
+generate.py
+AI基类、多模型管理、OpenAI接口、AI配置管理。
+"""
 
 import traceback
 import json
@@ -13,6 +17,7 @@ client = None
 ai_types = {}
 
 def get_openai_client():
+    """获取OpenAI客户端实例。"""
     global client
     from openai import OpenAI
     client = OpenAI(
@@ -22,6 +27,7 @@ def get_openai_client():
     return client
 
 def convert_output(output):
+    """解析AI输出，分离<think>标签内容。"""
     think = ''
     if '<think>' in output:
         res = output.replace('<think>', '').split('</think>')
@@ -56,18 +62,20 @@ ls -a
 '''
 
 class AI():
-
-    def generate(s, instruct, console):
+    """
+    AI基类，定义通用接口。
+    """
+    def generate(self, instruct, console):
         pass
 
-    def save(s, instruct, console, output):
+    def save(self, instruct, console, output):
         pass
 
-    def print(s, **kwargs):
+    def print(self, **kwargs):
         pass
 
-    def set(s, key, value):
-        old = s.get(key)
+    def set(self, key, value):
+        old = self.get(key)
         if old is not None:
             if isinstance(old, int):
                 value = int(value)
@@ -77,17 +85,17 @@ class AI():
                 value = str(value)
             else:
                 raise ValueError(f"unsupport argument type '{type(old).__name__}'")
-        setattr(s, key, value)
+        setattr(self, key, value)
 
-    def get(s, key):
-        return getattr(s, key)
+    def get(self, key):
+        return getattr(self, key)
 
-    def configs(s):
-        c = [i for i in s.__dict__.items() if i[0][:1] != '_']
+    def configs(self):
+        c = [i for i in self.__dict__.items() if i[0][:1] != '_']
         return sorted(c, key=lambda x:x[0])
 
-    def printConfigs(s, end='\r\n'):
-        for c in s.configs():
+    def printConfigs(self, end='\r\n'):
+        for c in self.configs():
             key = c[0]
             value = str(c[1])
             _type = type(c[1]).__name__
@@ -101,75 +109,77 @@ class AI():
     def from_config(**kwargs):
         raise NotImplementedError
 
-    def save_config(s, **kwargs):
+    def save_config(self, **kwargs):
         raise NotImplementedError
 
 class MixedAI(AI):
-
+    """
+    多AI模型管理器，支持动态切换和配置。
+    """
     ais = {}
     ai = None
     current_ai_id = None
 
-    def add(s, id, ai):
-        s.ais[id] = ai
+    def add(self, id, ai):
+        self.ais[id] = ai
 
-    def remove(s, id):
-        if id in s.ais.keys():
-            a = s.ais[id]
-            del s.ais[id]
-            if a == s.ai:
-                if len(s.ais) == 0:
-                    s.ai = None
+    def remove(self, id):
+        if id in self.ais.keys():
+            a = self.ais[id]
+            del self.ais[id]
+            if a == self.ai:
+                if len(self.ais) == 0:
+                    self.ai = None
                 else:
-                    s.ai = s.ais[s.ais.keys()[0]]
+                    self.ai = self.ais[list(self.ais.keys())[0]]
 
-    def switch(s, id):
-        if id in s.ais.keys():
-            s.ai = s.ais[id]
-            s.current_ai_id = id
+    def switch(self, id):
+        if id in self.ais.keys():
+            self.ai = self.ais[id]
+            self.current_ai_id = id
         else:
             raise ValueError(f"No such ai '{id}'")
 
-    def rename(s, id, new_id):
-        if id in s.ais.keys():
-            s.ais[new_id] = s.ais[id]
-            del s.ais[id]
+    def rename(self, id, new_id):
+        if id in self.ais.keys():
+            self.ais[new_id] = self.ais[id]
+            del self.ais[id]
 
-    def generate(s, instruct, console):
-        if s.ai:
-            return s.ai.generate(instruct, console)
+    def generate(self, instruct, console):
+        if self.ai:
+            return self.ai.generate(instruct, console)
         else:
             def fun():
                 yield '', 'no selected ai'
             return fun()
 
-    def save(s, instruct, console, output):
-        if s.ai:
-            s.ai.save(instruct, console, output)
+    def save(self, instruct, console, output):
+        if self.ai:
+            self.ai.save(instruct, console, output)
         else:
             pass
 
-    def print(s, end='\r\n', **kwargs):
-        if s.ai:
-            s.ai.print(end=end, **kwargs)
+    def print(self, end='\r\n', **kwargs):
+        if self.ai:
+            self.ai.print(end=end, **kwargs)
         else:
             print("no selected ai", end=end)
 
-    def set(s, key, value):
-        if s.ai:
-            s.ai.set(key, value)
+    def set(self, key, value):
+        if self.ai:
+            self.ai.set(key, value)
         else:
             pass
 
-    def get(s, key):
-        if s.ai:
-            return s.ai.get(key)
+    def get(self, key):
+        if self.ai:
+            return self.ai.get(key)
         else:
             return None
 
-    def configs(s):
-        if s.ai:
-            return s.ai.configs()
+    def configs(self):
+        if self.ai:
+            return self.ai.configs()
 
     @staticmethod
     def from_config(path=None, config=None):
@@ -199,13 +209,13 @@ class MixedAI(AI):
             print(f"prase ai config failed:", err, end='\r\n')
         return s
 
-    def save_config(s, path=None):
+    def save_config(self, path=None):
         config = {
-            'current_ai_id': s.current_ai_id,
+            'current_ai_id': self.current_ai_id,
             'ai': {},
         }
-        for id in s.ais.keys():
-            ai = s.ais[id]
+        for id in self.ais.keys():
+            ai = self.ais[id]
             config['ai'][id] = {
                 'id': id,
                 'type': get_ai_type(ai),

@@ -1,39 +1,71 @@
 #!/usr/bin/env python3
+"""
+lls.py
+主入口模块，负责流程控制、命令分发、AI管理、终端交互。
+"""
 
+# ====== 标准库与自定义模块导入 ======
 import importlib.util
 import subprocess
 import traceback
 import sys
 import os
 
-err = None
+class LLSState:
+    def __init__(self):
+        self.err = None  # 错误信息缓存
+        self.old_tty = None  # 原始终端设置
+        self.master_fd = None
+        self.slave_fd = None
+        self.winsize = None
+        self.ai = None
+        self.screen_history_file_path = None
+        self.screen = None
+        self.running = True
+        self.mode = 'char'
+        self.slave_callback = None
+        self.slave_tty = None
+        self.bufs = None
+        self.proc = None
+        self.command = None
+        self.total_chars = 0
 
+# 初始化状态对象
+state = LLSState()
+
+# ====== 加载用户自定义配置（如有） ======
 config_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.llsrc.py')
 if os.path.exists(config_file_path):
     try:
+        # 动态加载配置模块
         spec = importlib.util.spec_from_file_location(name='lls_config', location=config_file_path)
         lls_config_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(lls_config_module)
     except Exception as e:
         print('error:', e, file=sys.stderr)
-        err = traceback.format_exc()
+        state.err = traceback.format_exc()
 
+# ====== 解析命令行参数，确定主命令 ======
 if len(sys.argv) > 2 and sys.argv[1] == '--':
+    # 形如 python lls.py -- bash ...
     main_cmd = sys.argv[2]
     argv = sys.argv[3:]
 else:
+    # 若 SHELL 环境变量存在且不是本程序，则用 SHELL，否则用默认 shell
     if 'SHELL' in os.environ and os.path.realpath(os.environ['SHELL']) != os.path.realpath(sys.argv[0]):
         main_cmd = os.environ['SHELL']
     else:
         main_cmd = os.environ.get('LLS_FALLBACK_SHELL', 'bash')
     argv = sys.argv[1:]
 
-command = [main_cmd, *argv]
+state.command = [main_cmd, *argv]  # 构造命令行
 
+# ====== 非交互模式直接执行命令并退出 ======
 if not sys.stdin.isatty():
-    result_code = subprocess.call(command)
+    result_code = subprocess.call(state.command)
     exit(result_code)
 
+# ====== 终端与AI环境初始化 ======
 import threading
 import termios
 import string
@@ -43,7 +75,6 @@ import time
 import json
 import tty
 import pty
-
 import signal
 import struct
 import fcntl
@@ -53,78 +84,88 @@ from generate import MixedAI, TextCompletionAI, to_ai_type
 from terminal import Screen, print_screen_perfect
 from display import *
 
-old_tty = termios.tcgetattr(sys.stdin)
+# 保存原始终端设置，便于恢复
+state.old_tty = termios.tcgetattr(sys.stdin)
+# 设置终端为原始模式，便于逐字符读取
 tty.setraw(sys.stdin.fileno())
-master_fd, slave_fd = pty.openpty()
-winsize = os.get_terminal_size()
-ai = MixedAI()
-screen_history_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_screen_history')
-screen = Screen(screen_history_file_path)
-screen.keep_logs_when_clean_screen = True
+# 创建伪终端对，主从fd
+state.master_fd, state.slave_fd = pty.openpty()
+# 获取终端窗口大小
+state.winsize = os.get_terminal_size()
+# 初始化AI对象（混合AI，支持多种模式）
+state.ai = MixedAI()
+# 屏幕历史文件路径
+state.screen_history_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_screen_history')
+# 屏幕对象，负责内容显示与缓冲
+state.screen = Screen(state.screen_history_file_path)
+state.screen.keep_logs_when_clean_screen = True  # 清屏时保留日志
 
+# 设置终端窗口大小
 def set_winsize(fd, row, col, xpix=0, ypix=0):
     winsize = struct.pack("HHHH", row, col, xpix, ypix)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
 
+# 同步窗口大小到伪终端
 def sync_winsize(*args, **kwargs):
-    global winsize
-    winsize = os.get_terminal_size()
-    screen.max_height = winsize.lines
-    set_winsize(slave_fd, winsize.lines, winsize.columns)
+    state.winsize = os.get_terminal_size()
+    state.screen.max_height = state.winsize.lines
+    set_winsize(state.slave_fd, state.winsize.lines, state.winsize.columns)
 
 sync_winsize()
-signal.signal(signal.SIGWINCH, sync_winsize)
+signal.signal(signal.SIGWINCH, sync_winsize)  # 监听窗口大小变化
 
+# ====== 启动主命令子进程 ======
 try:
-    proc = subprocess.Popen(
-        command,
+    state.proc = subprocess.Popen(
+        state.command,
         preexec_fn=os.setsid,
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
+        stdin=state.slave_fd,
+        stdout=state.slave_fd,
+        stderr=state.slave_fd,
         shell=False,
         text=False,
         bufsize=0,
     )
 except Exception as e:
-    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, state.old_tty)
     raise e
 
-mode = 'char'
-running = True
-slave_callback = None
-slave_tty = termios.tcgetattr(slave_fd)
+state.mode = 'char'  # 输入模式：char/line/prompt
+state.running = True  # 主循环运行标志
+state.slave_callback = None  # 从终端回调
+state.slave_tty = termios.tcgetattr(state.slave_fd)  # 保存从终端设置
 
-def read_stdout():
-    global mode, err
-    while running:
+# ====== 子线程异步读取子进程输出，写入主终端与屏幕缓冲 ======
+def read_stdout(state):
+    while state.running:
         try:
-            chars = os.read(master_fd, 10240)
+            chars = os.read(state.master_fd, 10240)
             if chars:
-                if mode != 'line':
+                if state.mode != 'line':
                     os.write(sys.stdout.fileno(), chars)
-                screen.write(chars)
-            if slave_callback is not None:
-                slave_callback()
+                state.screen.write(chars)
+            if state.slave_callback is not None:
+                state.slave_callback()
         except Exception as e:
             print('error:', e, end='\r\n')
-            err = traceback.format_exc()
+            state.err = traceback.format_exc()
 
-stdout_thread = threading.Thread(target=read_stdout)
+stdout_thread = threading.Thread(target=read_stdout, args=(state,))
 stdout_thread.daemon = True
 stdout_thread.start()
 
+# ====== 屏幕内容辅助显示 ======
 def print_context():
-    if screen.buffer == 'main' and screen.y == len(screen.lines) - 1:
-        line = screen._raw.split('\n')[-1]
+    if state.screen.buffer == 'main' and state.screen.y == len(state.screen.lines) - 1:
+        line = state.screen._raw.split('\n')[-1]
         os.write(sys.stdout.fileno(), ('\033[2K\r' + line).encode())
     else:
-        os.write(sys.stdout.fileno(), ('\033[2K\r' + screen._raw).encode())
+        os.write(sys.stdout.fileno(), ('\033[2K\r' + state.screen._raw).encode())
 
-bufs = get_bufs()
+# ====== 历史缓冲区管理 ======
+state.bufs = get_bufs()
 
-def load_bufs():
-    global bufs, err
+def load_bufs(state):
     try:
         history_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_history')
         with open(history_file_path, 'r') as f:
@@ -138,39 +179,40 @@ def load_bufs():
             buf.lines = history.get(id)
             buf.x = 0
             buf.y = len(buf.lines) - 1
-            bufs[id] = buf
+            state.bufs[id] = buf
     except Exception as e:
         print('error: load history failed', end='\r\n')
-        err = 'load history failed\n' + traceback.format_exc()
+        state.err = 'load history failed\n' + traceback.format_exc()
 
-def save_bufs():
-    global bufs, err
+def save_bufs(state):
     try:
         history_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_history')
         history = {}
-        for id in bufs.keys():
-            buf = bufs.get(id)
+        for id in state.bufs.keys():
+            buf = state.bufs.get(id)
             history[id] = buf.lines
         text = json.dumps(history)
         with open(history_file_path, 'w') as f:
             f.write(text)
     except Exception as e:
         print('error: save history failed', end='\r\n')
-        err = 'save history failed\n' + traceback.format_exc()
+        state.err = 'save history failed\n' + traceback.format_exc()
 
+# 记录一行内容到缓冲区
 def record_line(value, id):
     read_line(value=value, id=id, skip_input=True)
 
-def save_history(prompt, context, cmd):
-    global err
+# 保存AI生成历史到命令历史文件
+def save_history(state, prompt, context, cmd):
     try:
         with open(os.path.join(os.environ['HOME'], '.cmd_history'), 'a') as f:
             line = f"prompt: {prompt}\t{cmd}\n"
             f.write(line)
     except Exception as e:
         print('error:', e, end='\r\n')
-        err = traceback.format_exc()
+        state.err = traceback.format_exc()
 
+# 检查是否有取消输入（如Ctrl-C、Ctrl-D）
 def check_cancel(cancel_chars=['\x03','\x04']):
     f, _, _ = select.select([sys.stdin.fileno()], [], [], 0)
     if sys.stdin.fileno() in f:
@@ -180,6 +222,7 @@ def check_cancel(cancel_chars=['\x03','\x04']):
                 return True
     return False
 
+# 生成器包装，使其可被取消（如AI流式输出时可中断）
 def cancelable(generator):
     q = queue.Queue()
     is_exit = False
@@ -209,8 +252,8 @@ def cancelable(generator):
     finally:
         is_exit = True
 
+# 读取AI指令，支持/命令切换模式
 def read_instruct(prompt, value=''):
-    global ai
     instruct = None
     while instruct is None:
         instruct = read_line(f'({prompt}-instruct): ', cancel='', include_last=False, value=value, id='instruct')
@@ -226,34 +269,35 @@ def read_instruct(prompt, value=''):
                 args = cmd[index+1:].strip()
                 cmd = cmd[:index].strip()
             if cmd in ['s','show','status']:
-                cmd_show()
+                cmd_show(state)
             elif cmd in ['set']:
-                cmd_set(args)
+                cmd_set(state, args)
             elif cmd in ['get']:
-                cmd_get(args)
+                cmd_get(state, args)
             elif cmd in ['m','mode']:
-                cmd_mode(args)
+                cmd_mode(state, args)
             elif cmd in ['c','ch','chat']:
                 instruct = args
-                cmd_mode('chat')
+                cmd_mode(state, 'chat')
             elif cmd in ['t', 'text']:
                 instruct = args
-                cmd_mode('text')
+                cmd_mode(state, 'text')
     return instruct
 
-def cmd_ls():
-    global ai
+# ====== AI管理与命令分发 ======
+# cmd_ls: 列出所有AI实例及其状态
+def cmd_ls(state):
     info = 'STATUS\tID\tTYPE\r\n'
-    for id in ai.ais.keys():
-        a = ai.ais[id]
-        if ai.ai == a:
+    for id in state.ai.ais.keys():
+        a = state.ai.ais[id]
+        if state.ai.ai == a:
             info += f" [*]\t{id}\t{type(a).__name__}\r\n"
         else:
             info += f" [ ]\t{id}\t{type(a).__name__}\r\n"
     show_line(info)
 
-def cmd_create(id=None, type=None):
-    global ai
+# cmd_create: 创建新AI实例
+def cmd_create(state, id=None, type=None):
     if not id:
         id = read_line('(create-ai) id: ', cancel='', include_last=False)
         if not id:
@@ -268,29 +312,29 @@ def cmd_create(id=None, type=None):
     except:
         print(f"no such ai type '{type}'")
         return
-    ai.add(id, a)
-    ai.switch(id)
+    state.ai.add(id, a)
+    state.ai.switch(id)
     show_line(f"created new ai '{id}'")
 
-def cmd_remove(id=None):
-    global ai
+# cmd_remove: 删除AI实例
+def cmd_remove(state, id=None):
     if not id:
-        ids = '[' + ','.join(ai.ais.keys()) + ']'
-        for id in ai.ais.keys():
-            if ai.ais[id] == ai.ai:
+        ids = '[' + ','.join(state.ai.ais.keys()) + ']'
+        for id in state.ai.ais.keys():
+            if state.ai.ais[id] == state.ai.ai:
                 break
         id = read_line(f"(remove-ai) current ai is '{id}' {ids} ", cancel='', include_last=False)
         if not id:
             return
-    ai.remove(id)
+    state.ai.remove(id)
     show_line(f"removed ai '{id}'")
 
-def cmd_rename(id=None, new_id=None):
-    global ai
+# cmd_rename: 重命名AI实例
+def cmd_rename(state, id=None, new_id=None):
     if not id:
-        ids = '[' + ','.join(ai.ais.keys()) + ']'
-        for id in ai.ais.keys():
-            if ai.ais[id] == ai.ai:
+        ids = '[' + ','.join(state.ai.ais.keys()) + ']'
+        for id in state.ai.ais.keys():
+            if state.ai.ais[id] == state.ai.ai:
                 break
         id = read_line(f"(rename-ai) current ai is '{id}' {ids} ", cancel='', include_last=False)
         if not id:
@@ -299,23 +343,23 @@ def cmd_rename(id=None, new_id=None):
         new_id = read_line(f"(rename-ai) selected ai '{id}', new id: ", cancel='', include_last=False)
         if not new_id:
             return
-    ai.rename(id, new_id)
+    state.ai.rename(id, new_id)
     show_line(f"renamed ai '{id}' to '{new_id}'")
 
-def cmd_mode(id, quiet=True, end='\r\n'):
-    global ai
+# cmd_mode: 切换当前AI实例
+def cmd_mode(state, id, quiet=True, end='\r\n'):
     info = ''
-    ids = '[' + ','.join(ai.ais.keys()) + ']'
+    ids = '[' + ','.join(state.ai.ais.keys()) + ']'
     if not id:
-        for id in ai.ais.keys():
-            if ai.ais[id] == ai.ai:
+        for id in state.ai.ais.keys():
+            if state.ai.ais[id] == state.ai.ai:
                 info = f"(select-ai) current ai is '{id}' {ids} "
                 break
         id = read_line(info, cancel='', include_last=False)
     if not id:
         return
-    if id in ai.ais:
-        ai.switch(id)
+    if id in state.ai.ais:
+        state.ai.switch(id)
         info = f"change ai to '{id}'"
     else:
         info = f"no such ai '{id}' {ids}"
@@ -325,14 +369,15 @@ def cmd_mode(id, quiet=True, end='\r\n'):
         else:
             print(info, end=end)
 
-def cmd_generate(instruct=None, prompt='gen', default='u'):
+# cmd_generate: AI生成命令主流程，支持多轮确认、编辑、重试等
+def cmd_generate(state, instruct=None, prompt='gen', default='u'):
     if instruct is None:
         instruct = read_instruct(prompt)
     else:
         record_line(instruct, id='instruct')
     if instruct == '':
         return '', ''
-    context = screen.text()
+    context = state.screen.text()
     cmd, think = '', ''
     if '#' in instruct:
         args = instruct.split('#')
@@ -340,7 +385,7 @@ def cmd_generate(instruct=None, prompt='gen', default='u'):
         cmd = args[-1].strip()
         output = None
     else:
-        output = ai.generate(instruct, context)
+        output = state.ai.generate(instruct, context)
     confirm_info = ', confirm?'
     flags = '[y/u/i/n/e/s/r/k/t]'
     save = False
@@ -409,20 +454,20 @@ def cmd_generate(instruct=None, prompt='gen', default='u'):
         elif confirm in ['k','think']:
             show_think = True
         elif confirm in ['r','re','retry']:
-            output = ai.generate(instruct, context)
+            output = state.ai.generate(instruct, context)
         elif confirm in ['e','edit']:
             instruct = read_instruct(prompt, value=instruct)
             if instruct == '':
                 cmd = ''
                 break
-            output = ai.generate(instruct, context)
+            output = state.ai.generate(instruct, context)
         elif confirm in ['t','teach']:
             default = 'y'
             cmd = read_line(f'({prompt}-cmd): ', include_last=False, id='cmd')
             if cmd == '':
                 break
         elif confirm in ['s','show','status']:
-            cmd_show()
+            cmd_show(state)
         elif confirm in ['cancel']:
             if time.time() - gen_time > 0.6:
                 cmd = ''
@@ -431,14 +476,15 @@ def cmd_generate(instruct=None, prompt='gen', default='u'):
         else:
             confirm_info = ", please input 'y' or 'n':"
     if save:
-        save_history(instruct, context, cmd)
+        save_history(state, instruct, context, cmd)
     if cmd:
-        ai.save(instruct, context, cmd)
+        state.ai.save(instruct, context, cmd)
         if enter:
             cmd += '\n'
     return cmd, instruct
 
-def cmd_exec(prompt='cmd', cmd=None, id='cmd'):
+# cmd_exec: 读取并执行命令，支持#分割指令与注释
+def cmd_exec(state, prompt='cmd', cmd=None, id='cmd'):
     if cmd is None:
         cmd = read_line(f'({prompt}): ', cancel='', include_last=False, id=id)
     else:
@@ -451,14 +497,13 @@ def cmd_exec(prompt='cmd', cmd=None, id='cmd'):
     print('\033[2K\r', end='')
     return cmd, instruct
 
-def cmd_watch():
-    global total_chars
-    total_chars = 0
+# cmd_watch: 监控屏幕内容变化，定时刷新显示
+def cmd_watch(state):
+    state.total_chars = 0
     def show_screen(*args):
-        global total_chars
-        if total_chars != screen.total_chars:
-            total_chars = screen.total_chars
-            cmd_show()
+        if state.total_chars != state.screen.total_chars:
+            state.total_chars = state.screen.total_chars
+            cmd_show(state)
             print('\r\n')
         time_text = time.asctime(time.localtime(time.time()))
         print(f'\033[1A\033[2K\rEvery 2.0s: show\t{time_text}', end='\r\n')
@@ -471,60 +516,60 @@ def cmd_watch():
         if c in ['\x03','\x04','q']:
             break
         elif c in ['g']:
-            cmd = cmd_generate()[0]
+            cmd = cmd_generate(state)[0]
             if cmd:
-                os.write(master_fd, cmd.encode())
+                os.write(state.master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['e']:
-            cmd, instruct = cmd_exec()
+            cmd, instruct = cmd_exec(state)
             if cmd:
-                ai.save(instruct, screen.text(), cmd)
+                state.ai.save(instruct, state.screen.text(), cmd)
                 cmd += '\n'
-                os.write(master_fd, cmd.encode())
+                os.write(state.master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['i']:
-            cmd, instruct = cmd_exec('input', id='cmd_input')
+            cmd, instruct = cmd_exec(state, 'input', id='cmd_input')
             if cmd:
-                os.write(master_fd, cmd.encode())
+                os.write(state.master_fd, cmd.encode())
                 time.sleep(0.1)
         elif c in ['b']:
-            os.write(master_fd, '\b'.encode())
+            os.write(state.master_fd, '\b'.encode())
             time.sleep(0.1)
         elif c in ['n']:
-            os.write(master_fd, '\n'.encode())
+            os.write(state.master_fd, '\n'.encode())
             time.sleep(0.1)
         elif c in ['c']:
-            os.write(master_fd, '\x03'.encode())
+            os.write(state.master_fd, '\x03'.encode())
             time.sleep(0.1)
         elif c in ['d']:
-            os.write(master_fd, '\x04'.encode())
+            os.write(state.master_fd, '\x04'.encode())
             time.sleep(0.1)
         show_screen()
-    #print('\033[2K\r^C')
     signal.setitimer(signal.ITIMER_REAL, 0)
     signal.signal(signal.SIGALRM, signal.SIG_DFL)
-    del total_chars
+    del state.total_chars
 
-def cmd_show(**kwargs):
+# cmd_show: 清屏并完美显示当前屏幕内容
+def cmd_show(state, **kwargs):
     print('\033[2J\033[H\r', end='')
-    print_screen_perfect(screen, end='\r\n', **kwargs)
+    print_screen_perfect(state.screen, end='\r\n', **kwargs)
 
-def cmd_err():
-    global err
+# cmd_err: 显示最近捕获的错误信息
+def cmd_err(state):
     print('\033[2J\033[H\r', end='')
-    if err is None:
+    if state.err is None:
         print('no catched error', end='\r\n')
     else:
         print('catched error:', end='\r\n')
-        os.write(sys.stdout.fileno(), err.replace('\n', '\r\n').encode())
+        os.write(sys.stdout.fileno(), state.err.replace('\n', '\r\n').encode())
 
-def cmd_tty():
-    global slave_callback
+# cmd_tty: 进入原始终端显示模式，支持回调实时刷新
+def cmd_tty(state):
     def callback_fun():
-        cmd_show(raw=True)
+        cmd_show(state, raw=True)
     os.write(sys.stdout.fileno(), b'\033[?25l')
     callback_fun()
-    slave_callback = callback_fun
+    state.slave_callback = callback_fun
     run = True
     while True:
         chars = os.read(sys.stdin.fileno(), 10240).decode()
@@ -532,14 +577,15 @@ def cmd_tty():
             if c in ['\005']:
                 run = False
                 break
-            os.write(master_fd, c.encode())
+            os.write(state.master_fd, c.encode())
         if not run:
             break
-    slave_callback = None
+    state.slave_callback = None
     os.write(sys.stdout.fileno(), b'\033[?25h')
     print_context()
 
-def cmd_auto(instruct):
+# cmd_auto: 自动AI生成并执行命令，适合批量/自动化场景
+def cmd_auto(state, instruct):
     if instruct is None:
         instruct = read_instruct('auto')
     else:
@@ -547,30 +593,27 @@ def cmd_auto(instruct):
     if instruct == '':
         return ''
     while True:
-        cmd, instruct = cmd_generate(instruct, prompt='auto')
+        cmd, instruct = cmd_generate(state, instruct, prompt='auto')
         if cmd == '':
             break
         cmd += '\n'
-        os.write(master_fd, cmd.encode())
+        os.write(state.master_fd, cmd.encode())
         time.sleep(0.1)
-        cmd_show()
-    #print('\033[2K\r^C')
+        cmd_show(state)
 
-def cmd_get(args):
-    global err
+def cmd_get(state, args):
     try:
         if not args:
-            ai.printConfigs()
+            state.ai.printConfigs()
         else:
             key = args
-            value = str(ai.get(key)).replace('\n', '\r\n')
+            value = str(state.ai.get(key)).replace('\n', '\r\n')
             print(f'{key} = {value}')
     except Exception as e:
         print('error:', e, end='\r\n')
-        err = traceback.format_exc()
+        state.err = traceback.format_exc()
 
-def cmd_set(args):
-    global err
+def cmd_set(state, args):
     try:
         i = args.index(' ')
         key = args[:i].strip()
@@ -582,7 +625,7 @@ def cmd_set(args):
         print('usage: set [key] [value]', end='\r\n')
         return
     if not value:
-        value = str(ai.get(key))
+        value = str(state.ai.get(key))
         value = read_lines(f"{key}> ", cancel='__cancel__', value=value)
         if value == '__cancel__':
             return
@@ -591,25 +634,26 @@ def cmd_set(args):
         if len(display) > 30:
             display = display[:30] + '...'
         print(f'set {key} = {display}', end='\r\n')
-        ai.set(key, value)
+        state.ai.set(key, value)
     except Exception as e:
         print('error:', e, end='\r\n')
-        err = traceback.format_exc()
+        state.err = traceback.format_exc()
 
-def prompt_mode():
-    global mode, err
+# ====== 主输入模式与主循环 ======
+# prompt_mode: 进入AI生成模式，返回生成命令
+def prompt_mode(state):
     try:
-        return cmd_generate(default='i')[0]
+        return cmd_generate(state, default='i')[0]
     except Exception as e:
         print('error:', e, end='\r\n')
-        err = traceback.format_exc()
+        state.err = traceback.format_exc()
         return ''
     finally:
         print_context()
-        mode = 'char'
+        state.mode = 'char'
 
-def line_mode():
-    global mode, err
+# line_mode: 行模式，支持丰富命令分发与AI交互
+def line_mode(state):
     try:
         cmd = ''
         args = ''
@@ -628,159 +672,161 @@ def line_mode():
                     print_context()
                     return ''
                 elif cmd in ['s','show','status']:
-                    cmd_show()
+                    cmd_show(state)
                 elif cmd in ['r','raw']:
                     print('\033[2J\033[H\r', end='')
-                    print(screen.raw(), end='\r\n')
+                    print(state.screen.raw(), end='\r\n')
                 elif cmd in ['ch','chat']:
                     print('\033[2J\033[H\r', end='')
-                    ai.print()
+                    state.ai.print()
                 elif cmd in ['reset']:
                     print_context()
-                    termios.tcsetattr(slave_fd, termios.TCSADRAIN, slave_tty)
-                    screen.mode = 'normal'
-                    screen.esc = ''
+                    termios.tcsetattr(state.slave_fd, termios.TCSADRAIN, state.slave_tty)
+                    state.screen.mode = 'normal'
+                    state.screen.esc = ''
                     return ''
                 elif cmd in ['c','clear']:
                     print('\033[2J\033[H\r', end='')
                 elif cmd in ['w','watch']:
-                    cmd_watch()
+                    cmd_watch(state)
                 elif cmd in ['g','gen','generate']:
-                    cmd = cmd_generate(args)[0]
+                    cmd = cmd_generate(state, args)[0]
                     if cmd == '':
                         continue
-                    os.write(master_fd, cmd.encode())
+                    os.write(state.master_fd, cmd.encode())
                     time.sleep(0.1)
-                    cmd_show()
+                    cmd_show(state)
                 elif cmd in ['e','exec']:
-                    cmd, instruct = cmd_exec(cmd=args)
+                    cmd, instruct = cmd_exec(state, cmd=args)
                     if cmd:
-                        ai.save(instruct, screen.text(), cmd)
+                        state.ai.save(instruct, state.screen.text(), cmd)
                         cmd += '\n'
-                        os.write(master_fd, cmd.encode())
+                        os.write(state.master_fd, cmd.encode())
                         time.sleep(0.1)
-                        cmd_show()
+                        cmd_show(state)
                 elif cmd in ['i','input']:
-                    cmd, instruct = cmd_exec('input', cmd=args, id='cmd_input')
+                    cmd, instruct = cmd_exec(state, 'input', cmd=args, id='cmd_input')
                     if cmd:
-                        os.write(master_fd, cmd.encode())
+                        os.write(state.master_fd, cmd.encode())
                         time.sleep(0.1)
-                        cmd_show()
+                        cmd_show(state)
                 elif cmd in ['esc']:
                     if args is None:
                         args = 'show'
                     if args in ['e','err','error']:
                         print('\033[2J\033[H\r', end='')
-                        if len(screen.esc_err) == 0:
+                        if len(state.screen.esc_err) == 0:
                             print('no catched unknown escape sequences', end='\r\n')
                         else:
                             print('catched unknown escape sequences:', end='\r\n')
-                        for esc in screen.esc_err:
+                        for esc in state.screen.esc_err:
                             print('esc:', esc.encode(), end='\r\n')
                     elif args in ['s','save','saved']:
                         print('\033[2J\033[H\r', end='')
-                        if len(screen.esc_record) == 0:
+                        if len(state.screen.esc_record) == 0:
                             print('no saved escape sequences', end='\r\n')
                         else:
                             print('saved escape sequences:', end='\r\n')
-                        for esc in screen.esc_record:
+                        for esc in state.screen.esc_record:
                             print('esc:', esc, end='\r\n')
                     elif args in ['d','debug']:
-                        screen.esc_debug = not screen.esc_debug
-                        print(f'debug mode: {screen.esc_debug}', end='\r\n')
+                        state.screen.esc_debug = not state.screen.esc_debug
+                        print(f'debug mode: {state.screen.esc_debug}', end='\r\n')
                     elif args in ['show','status']:
-                        print(f'debug mode: {screen.esc_debug}', end='\r\n')
+                        print(f'debug mode: {state.screen.esc_debug}', end='\r\n')
                     else:
                         print('usage: esc [err|saved|status|debug]', end='\r\n')
                 elif cmd in ['t','tty']:
-                    cmd_tty()
+                    cmd_tty(state)
                     return ''
                 elif cmd in ['a','auto']:
-                    cmd_auto(args)
+                    cmd_auto(state, args)
                 elif cmd in ['err']:
-                    cmd_err()
+                    cmd_err(state)
                 elif cmd in ['conf','config','configs']:
-                    ai.printConfigs(end='\r\n')
+                    state.ai.printConfigs(end='\r\n')
                 elif cmd in ['set']:
-                    cmd_set(args)
+                    cmd_set(state, args)
                 elif cmd in ['get']:
-                    cmd_get(args)
+                    cmd_get(state, args)
                 elif cmd in ['m','mode']:
-                    cmd_mode(args)
+                    cmd_mode(state, args)
                 elif cmd in ['create']:
-                    cmd_create()
+                    cmd_create(state)
                 elif cmd in ['remove','del','delete']:
-                    cmd_remove(args)
+                    cmd_remove(state, args)
                 elif cmd in ['rename']:
-                    cmd_rename()
+                    cmd_rename(state)
                 elif cmd in ['l','ls']:
-                    cmd_ls()
+                    cmd_ls(state)
                 else:
                     show_line(f"{cmd}: command not found")
             except Exception as e:
                 print('error:', e, end='\r\n')
-                err = traceback.format_exc()
+                state.err = traceback.format_exc()
     finally:
-        mode = 'char'
+        state.mode = 'char'
 
-def char_mode():
-    global mode, err
+# char_mode: 字符模式，逐字符读取，支持模式切换
+def char_mode(state):
     try:
         output = ''
         chars = os.read(sys.stdin.fileno(), 10240).decode()
         for c in chars:
             if c in ['\005']:
-                mode = 'line'
+                state.mode = 'line'
             elif c in ['\007']:
-                mode = 'prompt'
+                state.mode = 'prompt'
             else:
                 output += c
         return output
     except Exception as e:
         print('error:', e, end='\r\n')
-        err = traceback.format_exc()
+        state.err = traceback.format_exc()
         return ''
 
 def read_command():
-    if mode == 'char':
-        cmd = char_mode()
-    elif mode == 'line':
-        cmd = line_mode()
-    elif mode == 'prompt':
-        cmd = prompt_mode()
+    if state.mode == 'char':
+        cmd = char_mode(state)
+    elif state.mode == 'line':
+        cmd = line_mode(state)
+    elif state.mode == 'prompt':
+        cmd = prompt_mode(state)
     return cmd
 
-def load_ai():
-    global ai
+# ====== AI配置与历史加载/保存 ======
+# 加载AI配置与实例
+def load_ai(state):
     config_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_ai_config')
-    ai = MixedAI.from_config(config_file_path)
-    if len(ai.ais) == 0:
-        cmd_create('text', 'text')
-        cmd_create('chat', 'chat')
+    state.ai = MixedAI.from_config(config_file_path)
+    if len(state.ai.ais) == 0:
+        cmd_create(state, 'text', 'text')
+        cmd_create(state, 'chat', 'chat')
 
-def save_ai():
-    global ai
+def save_ai(state):
     config_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_ai_config')
-    ai.save_config(config_file_path)
+    state.ai.save_config(config_file_path)
 
-load_bufs()
-load_ai()
+# ====== 启动主循环 ======
+load_bufs(state)
+load_ai(state)
 
 try:
-    os.write(sys.stdout.fileno(), b'\033c')
-    while proc.poll() is None:
+    os.write(sys.stdout.fileno(), b'\033c')  # 复位终端
+    while state.proc.poll() is None:
         try:
-            cmd = read_command()
-            os.write(master_fd, cmd.encode())
+            cmd = read_command()  # 读取用户输入
+            os.write(state.master_fd, cmd.encode())  # 发送到子进程
         except Exception as e:
             print('error:', e, end='\r\n')
-            err = traceback.format_exc()
-            mode = 'char'
+            state.err = traceback.format_exc()
+            state.mode = 'char'
 finally:
-    screen.close()
-    save_bufs()
-    save_ai()
-    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty)
-    running = False
+    # 退出时清理资源，保存历史，恢复终端
+    state.screen.close()
+    save_bufs(state)
+    save_ai(state)
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, state.old_tty)
+    state.running = False
     print('exited, if not exit, please input ctrl-c again')
 

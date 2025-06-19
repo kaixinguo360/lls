@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
+"""
+terminal.py
+终端屏幕模拟与ANSI转义序列处理模块。
+负责屏幕缓冲、光标移动、行列管理、转义序列解析等。
+"""
 
 import types
 import sys
 import re
 
 def to_int(i):
+    """将输入转换为整数，支持str/bytes/int。"""
     try:
         if isinstance(i, str):
             return i.encode()[0]
@@ -16,18 +22,19 @@ def to_int(i):
         print(e)
     return 0
 
-def esc_delete(s):
-    line = s.lines[s.y]
-    if s.insert_mode:
-        if s.x < len(line):
-            line = line[:s.x] + line[s.x+1:]
+def esc_delete(screen):
+    """处理删除键的行为。"""
+    line = screen.lines[screen.y]
+    if screen.insert_mode:
+        if screen.x < len(line):
+            line = line[:screen.x] + line[screen.x+1:]
         else:
-            if s.y < len(s.lines) - 1 and s.auto_remove_line:
-                line += s.lines[s.y+1]
-                s.lines = s.lines[:s.y] + s.lines[s.y+1:]
+            if screen.y < len(screen.lines) - 1 and screen.auto_remove_line:
+                line += screen.lines[screen.y+1]
+                screen.lines = screen.lines[:screen.y] + screen.lines[screen.y+1:]
     else:
-        line = line[:s.x] + ' ' + line[s.x+1:]
-    s.lines[s.y] = line
+        line = line[:screen.x] + ' ' + line[screen.x+1:]
+    screen.lines[screen.y] = line
 
 def esc_arrow_and_keypad(s, c):
     s.move_cursor(1, c)
@@ -176,14 +183,17 @@ esc_patterns = {
 }
 
 class Screen:
-
+    """
+    终端屏幕缓冲区模拟。
+    支持多行文本、光标移动、插入/删除、历史记录等。
+    """
     def __init__(self, history_file=None):
         self.lines = ['']
         self._raw = ''
         self.saved_lines = None
         self.saved_cursor_pos = (0, 0)
-        self.x = 0
-        self.y = 0
+        self.x = 0  # 光标x
+        self.y = 0  # 光标y
         self._start_y = 0
         self.mode = 'normal'
         self.esc = ''
@@ -198,7 +208,7 @@ class Screen:
         self.max_height = 30
         self.total_chars = 0
         self.keep_logs_when_clean_screen = False
-        self.insert_mode = False
+        self.insert_mode = False  # 插入模式
         self.limit_move = False
         self.auto_move_to_end = False
         self.auto_move_between_line = False
@@ -212,24 +222,27 @@ class Screen:
         else:
             self.history = None
 
-    def write_history(s, line):
-        if s.history:
-            s.history.write(line + '\n')
+    def write_history(self, line):
+        """写入历史文件。"""
+        if self.history:
+            self.history.write(line + '\n')
 
-    def dump_history(s, left=0):
-        while len(s.lines) > left:
-            line = s.lines[0]
-            s.lines = s.lines[1:]
-            s.write_history(line)
-            s.y -= 1
-            s._start_y -= 1
-            s.dropped_lines += 1
+    def dump_history(self, left=0):
+        """将多余行写入历史文件。"""
+        while len(self.lines) > left:
+            line = self.lines[0]
+            self.lines = self.lines[1:]
+            self.write_history(line)
+            self.y -= 1
+            self._start_y -= 1
+            self.dropped_lines += 1
 
-    def close(s):
-        s.dump_history()
-        if s.history:
-            s.history.write(s.history_end)
-            s.history.close()
+    def close(self):
+        """关闭历史文件。"""
+        self.dump_history()
+        if self.history:
+            self.history.write(self.history_end)
+            self.history.close()
 
     def start_y(self):
         start = 0
@@ -304,16 +317,19 @@ class Screen:
         s.nor(limit)
 
     def write(self, b):
+        """写入字节流。"""
         try:
             self.write_chars(b.decode())
         except Exception as e:
             print(e)
 
     def write_chars(self, chars):
+        """写入字符串。"""
         for char in chars:
             self.write_char(char)
 
     def write_char(self, c):
+        """写入单个字符。"""
         self.total_chars += 1
         self._raw += c
         if len(self._raw) > self.max_chars:
@@ -447,15 +463,21 @@ class Screen:
                 return
 
     def text(self, end='\n', begin=''):
+        """获取当前屏幕所有文本。"""
         return begin + (end + begin).join(self.lines)
 
     def raw(self):
+        """获取原始输入流。"""
         return self._raw
 
     def current_line(self):
+        """获取当前行内容。"""
         return self.lines[self.y]
 
-def print_screen_perfect(s, end='\n', tail='', width=None, height=None, frame=False, raw=False):
+def print_screen_perfect(screen, end='\n', tail='', width=None, height=None, frame=False, raw=False):
+    """
+    以美观方式打印屏幕内容，支持高亮光标、边框、宽高自适应。
+    """
     import os
     if width is None:
         winsize = os.get_terminal_size()
@@ -465,15 +487,15 @@ def print_screen_perfect(s, end='\n', tail='', width=None, height=None, frame=Fa
             width = winsize.columns - 2
     if height is None:
         if frame:
-            height = s.max_height
+            height = screen.max_height
         else:
-            height = len(s.lines)
-    y_begin = len(s.lines) - y_end if len(s.lines) > height else 0
-    y_end = len(s.lines) if len(s.lines) > height else height
+            height = len(screen.lines)
+    y_begin = len(screen.lines) - y_end if len(screen.lines) > height else 0
+    y_end = len(screen.lines) if len(screen.lines) > height else height
     if not raw:
         print('+' + '-'*width + '+', end=end)
     for i in range(y_begin, y_end):
-        line = s.lines[i] if i < len(s.lines) else ''
+        line = screen.lines[i] if i < len(screen.lines) else ''
         line += tail
         x_begin = 0
         if frame:
@@ -481,15 +503,15 @@ def print_screen_perfect(s, end='\n', tail='', width=None, height=None, frame=Fa
         else:
             x_end = len(line)
         display = line[x_begin:x_end] + ' ' * (width - (x_end - x_begin))
-        if s.y == i:
+        if screen.y == i:
             if frame:
-                if s.x >= x_begin and s.x < x_end:
-                    cursor = s.x + x_begin
+                if screen.x >= x_begin and screen.x < x_end:
+                    cursor = screen.x + x_begin
                     display = display[:cursor] + '\033[7m' + display[cursor:cursor+1] + '\033[0m' + display[cursor+1:]
             else:
-                while s.x > len(display) - 1:
+                while screen.x > len(display) - 1:
                     display += ' '
-                display = display[:s.x] + '\033[7m' + display[s.x:s.x+1] + '\033[0m' + display[s.x+1:]
+                display = display[:screen.x] + '\033[7m' + display[screen.x:screen.x+1] + '\033[0m' + display[screen.x+1:]
         if frame:
             print('|' + display + '|', end='')
         else:
@@ -499,27 +521,28 @@ def print_screen_perfect(s, end='\n', tail='', width=None, height=None, frame=Fa
         print('\r', end='')
     if not raw:
         print('+' + '-'*width + '+', end=end)
-        print(f"cursor: {{x={s.x+1},y={s.y-s.start_y()+1}}}", end='')
-        print(f", lines: {len(s.lines)}", end='')
-        print(f", offset: {s._start_y}", end='')
-        print(f", height: {s.max_height}", end='')
-        print(f", buffer: {s.buffer}", end='')
-        print(f", mode: {s.mode}", end='')
-        if s.mode == 'esc':
-            print(', esc=', s.esc.encode(), end='')
+        print(f"cursor: {{x={screen.x+1},y={screen.y-screen.start_y()+1}}}", end='')
+        print(f", lines: {len(screen.lines)}", end='')
+        print(f", offset: {screen._start_y}", end='')
+        print(f", height: {screen.max_height}", end='')
+        print(f", buffer: {screen.buffer}", end='')
+        print(f", mode: {screen.mode}", end='')
+        if screen.mode == 'esc':
+            print(', esc=', screen.esc.encode(), end='')
         print('', end=end)
 
 print_wait = False
 
-def write_and_print(s, chars, msg='', delay=0.05, sleep=0.5):
+def write_and_print(screen, chars, msg='', delay=0.05, sleep=0.5):
+    """逐字符写入并打印屏幕，支持延时和调试。"""
     import time
     if isinstance(chars, bytes):
         chars = chars.decode()
     for c in chars:
         print('\033[H\033[2J', end='')
-        s.write_char(c)
+        screen.write_char(c)
         print('>>> ', chars.encode(), msg)
-        print_screen_perfect(s, end='\n', tail='<')
+        print_screen_perfect(screen, end='\n', tail='<')
         if not print_wait and delay:
             time.sleep(delay)
     if print_wait:

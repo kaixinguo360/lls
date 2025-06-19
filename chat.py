@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""
+chat.py
+对话式AI实现，负责消息管理、对话生成、与OpenAI接口对接。
+"""
 
 import os
 import json
@@ -29,61 +33,68 @@ default_user_template = '''生成一条满足user指令的shell命令
 '''
 
 class ChatAI(AI):
-
-    def __init__(s, model=default_model, system_instruct=default_system_instruct, user_template=default_user_template):
-        s.model = model
-        s.user = 'user'
-        s.user_template = default_user_template
-        s.assistant = 'assistant'
-        s.system = 'system'
-        s.system_instruct = None
-        s.default_instruct = '继续'
-        s.console_max_height = 30
-        s.messages = []
+    """
+    对话式AI，支持多轮消息管理与生成。
+    """
+    def __init__(self, model=default_model, system_instruct=default_system_instruct, user_template=default_user_template):
+        self.model = model
+        self.user = 'user'
+        self.user_template = default_user_template
+        self.assistant = 'assistant'
+        self.system = 'system'
+        self.system_instruct = None
+        self.default_instruct = '继续'
+        self.console_max_height = 30
+        self.messages = []
 
         if system_instruct is not None:
-            s.system_instruct = system_instruct
-            s.add(s.system, s.system_instruct)
+            self.system_instruct = system_instruct
+            self.add(self.system, self.system_instruct)
 
-    def add_messages(s, *args):
+    def add_messages(self, *args):
+        """批量添加消息。"""
         for m in args:
-            s.messages.append(m)
+            self.messages.append(m)
 
-    def add(s, role, content, **kwargs):
+    def add(self, role, content, **kwargs):
+        """添加单条消息。"""
         m = dict(role=role, content=content, **kwargs)
-        s.add_messages(m)
+        self.add_messages(m)
         return m
 
-    def create_user_message(s, instruct, console):
+    def create_user_message(self, instruct, console):
+        """根据指令和控制台内容生成user消息。"""
         lines = console.split('\n')
-        if len(lines) > s.console_max_height:
-            lines = lines[-s.console_max_height:]
+        if len(lines) > self.console_max_height:
+            lines = lines[-self.console_max_height:]
         console = '\n'.join(lines)
-        c = s.user_template.format(instruct=instruct, console=console)
-        m = dict(role=s.user, content=c, instruct=instruct, console=console)
+        c = self.user_template.format(instruct=instruct, console=console)
+        m = dict(role=self.user, content=c, instruct=instruct, console=console)
         return m
 
-    def add_user(s, instruct, console):
-        m = s.create_user_message(instruct, console)
-        return s.add_messages(m)
+    def add_user(self, instruct, console):
+        m = self.create_user_message(instruct, console)
+        return self.add_messages(m)
 
-    def pop(s):
-        if len(s.messages) > 0:
-            m = s.messages[-1]
-            s.messages = s.messages[:-1]
+    def pop(self):
+        """弹出最后一条消息。"""
+        if len(self.messages) > 0:
+            m = self.messages[-1]
+            self.messages = self.messages[:-1]
             return m
 
-    def _generate(s, callback=None, append_messages=None):
+    def _generate(self, callback=None, append_messages=None):
+        """底层生成器，支持流式输出。"""
         yield '', ''
         client = get_openai_client()
         messages = []
-        for m in s.messages:
+        for m in self.messages:
             messages.append(dict(role=m['role'], content=m['content']))
         if append_messages is not None:
             for m in append_messages:
                 messages.append(dict(role=m['role'], content=m['content']))
         stream = client.chat.completions.create(
-            model=s.model,
+            model=self.model,
             messages=messages,
             stream=True,
         )
@@ -98,21 +109,24 @@ class ChatAI(AI):
             if callback:
                 callback(cmd, think)
 
-    def generate(s, instruct, console):
-        m_user = s.create_user_message(instruct, console)
-        return s._generate(append_messages=[m_user])
+    def generate(self, instruct, console):
+        """生成对话回复。"""
+        m_user = self.create_user_message(instruct, console)
+        return self._generate(append_messages=[m_user])
 
-    def save(s, instruct, console, output):
+    def save(self, instruct, console, output):
+        """保存一轮对话。"""
         if instruct is None:
-            instruct = s.default_instruct
-        m_user = s.create_user_message(instruct, console)
-        m_ass = dict(role=s.assistant, content=output)
-        s.add_messages(m_user)
-        s.add_messages(m_ass)
+            instruct = self.default_instruct
+        m_user = self.create_user_message(instruct, console)
+        m_ass = dict(role=self.assistant, content=output)
+        self.add_messages(m_user)
+        self.add_messages(m_ass)
 
-    def print(s, end='\r\n', simple=False):
+    def print(self, end='\r\n', simple=False):
+        """打印历史消息。"""
         winsize = os.get_terminal_size()
-        for m in s.messages:
+        for m in self.messages:
             role = m['role']
             if simple and role == 'user':
                 content = m['instruct']
@@ -140,16 +154,16 @@ class ChatAI(AI):
             s.add(s.system, s.system_instruct)
         return s
 
-    def save_config(s, path=None):
+    def save_config(self, path=None):
         config = {
-            'model': s.model,
-            'user': s.user,
-            'user_template': s.user_template,
-            'assistant': s.assistant,
-            'system': s.system,
-            'system_instruct': s.system_instruct,
-            'default_instruct': s.default_instruct,
-            'console_max_height': s.console_max_height,
+            'model': self.model,
+            'user': self.user,
+            'user_template': self.user_template,
+            'assistant': self.assistant,
+            'system': self.system,
+            'system_instruct': self.system_instruct,
+            'default_instruct': self.default_instruct,
+            'console_max_height': self.console_max_height,
         }
         if path:
             with open(path, 'w') as f:
