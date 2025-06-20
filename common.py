@@ -1,9 +1,34 @@
 import os
 import traceback
 import sys
+import json
 import select
 import queue
 import threading
+from terminal import Screen
+from ai.mixed import MixedAI
+
+class TerminalState:
+    def __init__(self):
+        self.command = None
+        self.old_tty = None  # 原始终端设置
+        self.master_fd = None
+        self.slave_fd = None
+        self.slave_callback = None
+        self.slave_tty = None
+        self.winsize = None
+        self.proc = None
+
+class LLSState(TerminalState):
+    def __init__(self):
+        self.err = None  # 错误信息缓存
+        self.ai = None
+        self.screen_history_file_path = None
+        self.screen = None
+        self.running = True
+        self.mode = 'char'
+        self.bufs = None
+        self.total_chars = 0
 
 def print_context(state):
     """
@@ -70,3 +95,70 @@ def cancelable(generator):
         generator.close()
     finally:
         is_exit = True
+
+# ====== AI配置与历史加载/保存 ======
+
+# 加载AI配置与实例
+def load_ai(state):
+    config_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_ai_config')
+    state.ai = MixedAI.from_config(config_file_path)
+    #if len(state.ai.ais) == 0:
+    #    cmd_create(state, 'text', 'text')
+    #    cmd_create(state, 'chat', 'chat')
+
+# 保存AI配置与实例
+def save_ai(state):
+    config_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_ai_config')
+    state.ai.save_config(config_file_path)
+
+# ====== 历史缓冲区管理 ======
+
+def load_bufs(state):
+    try:
+        history_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_history')
+        with open(history_file_path, 'r') as f:
+            history = json.load(f)
+        for id in history.keys():
+            buf = Screen()
+            buf.insert_mode = True
+            buf.limit_move = True
+            buf.max_height = 1
+            buf.auto_move_to_end = True
+            buf.lines = history.get(id)
+            buf.x = 0
+            buf.y = len(buf.lines) - 1
+            state.bufs[id] = buf
+    except Exception as e:
+        print('error: load history failed', end='\r\n')
+        state.err = 'load history failed\n' + traceback.format_exc()
+
+def save_bufs(state):
+    try:
+        history_file_path = os.path.join(os.environ.get('HOME', os.getcwd()), '.lls_history')
+        history = {}
+        for id in state.bufs.keys():
+            buf = state.bufs.get(id)
+            history[id] = buf.lines
+        text = json.dumps(history)
+        with open(history_file_path, 'w') as f:
+            f.write(text)
+    except Exception as e:
+        print('error: save history failed', end='\r\n')
+        state.err = 'save history failed\n' + traceback.format_exc()
+
+# ====== 终端窗口大小管理 ======
+
+import struct
+import fcntl
+import termios
+
+# 同步窗口大小到伪终端
+def sync_winsize(state):
+    state.winsize = os.get_terminal_size()
+    state.screen.max_height = state.winsize.lines
+    set_winsize(state.slave_fd, state.winsize.lines, state.winsize.columns)
+
+# 设置终端窗口大小
+def set_winsize(fd, row, col, xpix=0, ypix=0):
+    winsize = struct.pack("HHHH", row, col, xpix, ypix)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)

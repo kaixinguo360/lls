@@ -1,6 +1,5 @@
 """
 commands.py
-包含命令行模式（line_mode）下的所有命令，供lls.py文件内的line_mode函数调用。
 """
 
 import os
@@ -14,12 +13,133 @@ from ai.registry import to_ai_type
 from display import show_line, read_line, read_lines, clear_lines, print_lines, record_line
 from common import *
 
-# 读取AI指令，支持/命令切换模式
-# prompt: 提示符字符串
-# value: 默认输入内容
-# state: 全局状态对象
-# 返回用户输入的指令字符串，支持以/开头的内置命令（如/show、/set等）
+# ====== 输入模式控制 ======
+
+def read_command(state):
+    if state.mode == 'char':
+        cmd = char_mode(state)
+    elif state.mode == 'line':
+        cmd = line_mode(state)
+    elif state.mode == 'prompt':
+        cmd = prompt_mode(state)
+    return cmd
+
+def prompt_mode(state):
+    """
+    进入AI生成模式，返回生成命令
+    """
+    try:
+        return cmd_generate(state, default='i')[0]
+    except Exception as e:
+        print('error:', e, end='\r\n')
+        state.err = traceback.format_exc()
+        return ''
+    finally:
+        print_context(state)
+        state.mode = 'char'
+
+def line_mode(state):
+    """
+    命令行模式，支持丰富命令分发与AI交互
+    """
+    try:
+        cmd = ''
+        args = ''
+        while True:
+            try:
+                cmd = read_line(cancel='q', include_last=False, id='line_mode', no_save=['q'])
+                cmd = cmd.strip()
+                args = None
+                if ' ' in cmd and cmd[:1] != ' ':
+                    index = cmd.find(' ')
+                    args = cmd[index+1:].strip()
+                    cmd = cmd[:index].strip()
+                if cmd == '':
+                    pass
+                elif cmd in ['q','quit','exit']:
+                    return cmd_quit(state)
+                elif cmd in ['s','show','status']:
+                    cmd_show_status(state)
+                elif cmd in ['r','raw']:
+                    cmd_raw(state)
+                elif cmd in ['ch','chat']:
+                    cmd_chat(state)
+                elif cmd in ['reset']:
+                    return cmd_reset(state)
+                elif cmd in ['c','clear']:
+                    cmd_clear(state)
+                elif cmd in ['w','watch']:
+                    cmd_watch(state)
+                elif cmd in ['g','gen','generate']:
+                    result = cmd_generate_wrap(state, args)
+                    if result is None:
+                        continue
+                elif cmd in ['e','exec']:
+                    cmd_exec_wrap(state, args)
+                elif cmd in ['i','input']:
+                    cmd_input(state, args)
+                elif cmd in ['esc']:
+                    cmd_esc(state, args)
+                elif cmd in ['t','tty']:
+                    return cmd_tty(state)
+                elif cmd in ['a','auto']:
+                    cmd_auto(state, args)
+                elif cmd in ['err']:
+                    cmd_err(state)
+                elif cmd in ['conf','config','configs']:
+                    cmd_conf(state)
+                elif cmd in ['set']:
+                    cmd_set(state, args)
+                elif cmd in ['get']:
+                    cmd_get(state, args)
+                elif cmd in ['m','mode']:
+                    cmd_mode(state, args)
+                elif cmd in ['create']:
+                    cmd_create(state)
+                elif cmd in ['remove','del','delete']:
+                    cmd_remove(state, args)
+                elif cmd in ['rename']:
+                    cmd_rename(state)
+                elif cmd in ['l','ls']:
+                    cmd_ls(state)
+                else:
+                    cmd_not_found(cmd)
+            except Exception as e:
+                print('error:', e, end='\r\n')
+                state.err = traceback.format_exc()
+    finally:
+        state.mode = 'char'
+
+def char_mode(state):
+    """
+    字符模式，逐字符读取，支持模式切换
+    """
+    try:
+        output = ''
+        chars = os.read(sys.stdin.fileno(), 10240).decode()
+        for c in chars:
+            if c in ['\005']:
+                state.mode = 'line'
+            elif c in ['\007']:
+                state.mode = 'prompt'
+            else:
+                output += c
+        return output
+    except Exception as e:
+        print('error:', e, end='\r\n')
+        state.err = traceback.format_exc()
+        return ''
+
+# ====== 命令行模式（line_mode）下的所有命令，供line_mode函数调用。 ======
+
 def read_instruct(prompt, value='', state=None):
+    """
+    读取AI指令，支持/命令切换模式
+    prompt: 提示符字符串
+    value: 默认输入内容
+    state: 全局状态对象
+    返回用户输入的指令字符串，支持以/开头的内置命令（如/show、/set等）
+    """
     instruct = None
     while instruct is None:
         instruct = read_line(f'({prompt}-instruct): ', cancel='', include_last=False, value=value, id='instruct')

@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
 """
 generate.py
 OpenAI接口、AI配置管理底层。
 """
 
 import os
-import traceback
-import json
 
 default_model = os.environ.get('LLS_OPENAI_MODEL', 'gpt-4o-mini')
 base_url = os.environ.get('LLS_OPENAI_BASE_URL', 'https://api.openai.com')
@@ -38,7 +35,4 @@ def convert_output(output):
     output = output.strip()
     think = think.strip()
     return output, think
-
-if __name__ == '__main__':
-    pass
 
