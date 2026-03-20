@@ -17,10 +17,13 @@ from common import *
 
 def read_command(state):
     if state.mode == 'char':
+        # 进入字符模式（普通模式）
         cmd = char_mode(state)
     elif state.mode == 'line':
+        # 进入行模式（命令模式）
         cmd = line_mode(state)
     elif state.mode == 'prompt':
+        # 进入提示模式（快捷生成模式）
         cmd = prompt_mode(state)
     return cmd
 
@@ -40,13 +43,14 @@ def prompt_mode(state):
 
 def line_mode(state):
     """
-    命令行模式，支持丰富命令分发与AI交互
+    命令模式，根据输入命令分发给对应函数
     """
     try:
         cmd = ''
         args = ''
         while True:
             try:
+                # 读取行模式下的用户输入
                 cmd = read_line(cancel='q', include_last=False, id='line_mode', no_save=['q'])
                 cmd = cmd.strip()
                 args = None
@@ -57,50 +61,73 @@ def line_mode(state):
                 if cmd == '':
                     pass
                 elif cmd in ['q','quit','exit']:
+                    # 退出
                     return cmd_quit(state)
                 elif cmd in ['s','show','status']:
+                    # 打印当前状态
                     cmd_show_status(state)
                 elif cmd in ['r','raw']:
+                    # 打印内部原始状态
                     cmd_raw(state)
                 elif cmd in ['ch','chat']:
+                    # 打印对话状态信息
                     cmd_chat(state)
                 elif cmd in ['reset']:
+                    # 重置终端和屏幕状态（用于从异常状态恢复，类似于bash的reset命令）
                     return cmd_reset(state)
                 elif cmd in ['c','clear']:
+                    # 清屏
                     cmd_clear(state)
                 elif cmd in ['w','watch']:
+                    # 进入监控模式，此模式下可以实时监控终端输出，并通过按键快捷执行命令生成、输入等操作
                     cmd_watch(state)
                 elif cmd in ['g','gen','generate']:
+                    # 进入生成模式，输入提示词生成命令，对于生成结果，可以进行接收、拒绝、重新生成、人工指定正常结果（用于记录并优化训练集）等多种选择
+                    # 生成模式是本项目最主要的功能之一
                     result = cmd_generate_wrap(state, args)
                     if result is None:
                         continue
                 elif cmd in ['e','exec']:
+                    # 执行单条命令，将输入字符串传递给实际终端，末尾自动附加回车
                     cmd_exec_wrap(state, args)
                 elif cmd in ['i','input']:
+                    # 执行单挑命令，将输入字符串传递给实际终端，末尾后不自动附加回车
                     cmd_input(state, args)
                 elif cmd in ['esc']:
+                    # 打印终端转义序列，用于调试
                     cmd_esc(state, args)
                 elif cmd in ['t','tty']:
+                    # 进入原始终端显示模式，支持回调实时刷新。
                     return cmd_tty(state)
                 elif cmd in ['a','auto']:
+                    # 进入自动生成模式，根据给定提示词和终端输出，持续生成命令以完成特定的任务（待完善，目前上下文机制并不科学）
                     cmd_auto(state, args)
                 elif cmd in ['err']:
+                    # 打印错误信息，为了避免错误信息扰乱终端字符布局，错误信息均被捕获并隐藏，需要通过该命令进行查看
                     cmd_err(state)
                 elif cmd in ['conf','config','configs']:
+                    # 打印当前AI实例的参数配置
                     cmd_conf(state)
                 elif cmd in ['set']:
+                    # 设置当前AI实例的指定参数配置
                     cmd_set(state, args)
                 elif cmd in ['get']:
+                    # 打印当前AI实例的指定参数配置
                     cmd_get(state, args)
                 elif cmd in ['m','mode']:
+                    # 更换当前使用的AI实例，名为mode是因为以前只有对话、命令生成两个模式（AI实例），后来才优化为可自由创建任意多AI实例
                     cmd_mode(state, args)
                 elif cmd in ['create']:
+                    # 创建新的AI实例
                     cmd_create(state)
                 elif cmd in ['remove','del','delete']:
+                    # 删除指定AI实例
                     cmd_remove(state, args)
                 elif cmd in ['rename']:
+                    # 重命名指定AI实例
                     cmd_rename(state)
                 elif cmd in ['l','ls']:
+                    # 展示所有AI实例
                     cmd_ls(state)
                 else:
                     cmd_not_found(cmd)
@@ -191,9 +218,6 @@ def cmd_raw(state):
     print(state.screen.raw(), end='\r\n')
 
 def cmd_chat(state):
-    """
-    清屏并显示AI对话内容。
-    """
     print('\033[2J\033[H\r', end='')
     state.ai.print()
 
@@ -405,7 +429,7 @@ def cmd_exec(state, prompt='cmd', cmd=None, id='cmd'):
 
 def cmd_generate(state, instruct=None, prompt='gen', default='u'):
     """
-    AI生成命令主流程，支持多轮确认、编辑、重试等。
+    AI生成命令主流程，支持多轮确认、编辑、重试等，为本项目最主要的功能之一。
     返回(cmd, instruct)。
     """
     if instruct is None:
@@ -476,21 +500,25 @@ def cmd_generate(state, instruct=None, prompt='gen', default='u'):
         if confirm == '':
             confirm = default
         if confirm in ['y','yes']:
+            # 确认并接受生成的命令，末尾会附加回车进行命令执行，并记录历史记录
             save = True
             break
         elif confirm in ['u','use']:
+            # 确认并接受生成的命令，末尾会附加回车进行命令执行，但不记录历史记录
             break
         elif confirm in ['i','input']:
+            # 确认并接受生成的命令，末尾不会附加回车，不进行命令执行，也不记录历史记录
             enter = False
             break
-        elif confirm in ['u','use']:
-            break
         elif confirm in ['n','no','q','quit','exit']:
+            # 退出
             cmd = ''
             break
         elif confirm in ['k','think']:
+            # 展示深度思考过程（如果有）
             show_think = True
         elif confirm in ['r','re','retry']:
+            # 重新生成
             output = state.ai.generate(instruct, context)
         elif confirm in ['e','edit']:
             instruct = read_instruct(prompt, value=instruct, state=state)
@@ -499,13 +527,16 @@ def cmd_generate(state, instruct=None, prompt='gen', default='u'):
                 break
             output = state.ai.generate(instruct, context)
         elif confirm in ['t','teach']:
+            # 人工指定应生成的正确命令，用于优化训练数据集
             default = 'y'
             cmd = read_line(f'({prompt}-cmd): ', include_last=False, id='cmd')
             if cmd == '':
                 break
         elif confirm in ['s','show','status']:
+            # 打印当前状态
             cmd_show(state)
         elif confirm in ['cancel']:
+            # 避免使用Ctrl-C终止命令生成时点击过快，意外退出命令生成状态，因此附加一段延迟
             if time.time() - gen_time > 0.6:
                 cmd = ''
                 break
