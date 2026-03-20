@@ -60,6 +60,7 @@ from ai.chat import ChatAI
 from terminal import Screen
 from display import *
 from commands import *
+from common import *
 
 # 保存原始终端设置，便于恢复
 state.old_tty = termios.tcgetattr(sys.stdin)
