@@ -436,6 +436,18 @@ def test_painter_previews_the_latest_reasoning() -> None:
     assert "START" not in shown
 
 
+# ---- 提示词与显示预算一致 ----
+
+
+def test_system_prompt_matches_the_display_budget() -> None:
+    prompt = agent_cmd.SYSTEM_PROMPT
+
+    assert ("最多 %d 行" % agent_cmd.REPLY_LINES) in prompt
+    assert ("最近 %d 轮" % agent_cmd.LOG_ENTRIES) in prompt
+    assert "不要空行" in prompt
+    assert "终端画面就是细节所在" in prompt
+
+
 # ---- 工具 ----
 
 
