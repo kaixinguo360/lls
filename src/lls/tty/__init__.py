@@ -5,15 +5,19 @@ from __future__ import annotations
 import sys
 
 from .backend import Console, Key, PtySession, TerminalBackend, Winsize
-from .keys import KeyParser
+from .keys import KEY_NAMES, KeyNameError, KeyParser, encode_key, encode_keys
 
 __all__ = [
     "Console",
+    "KEY_NAMES",
     "Key",
+    "KeyNameError",
     "KeyParser",
     "PtySession",
     "TerminalBackend",
     "Winsize",
+    "encode_key",
+    "encode_keys",
     "make_backend",
 ]
 

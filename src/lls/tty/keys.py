@@ -1,4 +1,11 @@
-"""按键字节流 → Key 事件解析。
+r"""按键编解码：字节流 ↔ Key 事件。
+
+* :class:`KeyParser` 把子进程/终端方向来的字节流解析成 :class:`Key`（解码）；
+* :func:`encode_key` / :func:`encode_keys` 把具名按键翻译成字节序列（编码），
+  供 agent 之类的命令把「按下 Ctrl-C / 上方向键」变成真正的终端输入。
+
+编码只描述 xterm 约定成俗的按键序列，不判断子进程当前处于哪种光标键模式：
+需要应用光标键（DECCKM）序列时由调用方用原始字节发送。
 
 命令模式下使用。字节流里混着三类东西，必须分开：
 
@@ -23,10 +30,11 @@
 from __future__ import annotations
 
 import codecs
+from typing import Dict, Sequence
 
 from .backend import Key
 
-__all__ = ["KeyParser"]
+__all__ = ["KEY_NAMES", "KeyNameError", "KeyParser", "encode_key", "encode_keys"]
 
 # C0 控制字符 → 名称。
 _CONTROL_NAMES = {
@@ -230,3 +238,115 @@ class KeyParser:
         if tail:
             return Key(char=tail, raw=b"")
         return None
+
+
+# ---- 编码：具名按键 → 字节 ----
+#
+# 与解析器对称：这里把「意图」翻译成 xterm 默认的按键序列。只做编码，不碰
+# 终端状态；应用光标键（DECCKM）等模式差异由调用方用原始字节处理。
+
+_SYMBOL_KEYS = {
+    "enter": b"\r",
+    "return": b"\r",
+    "tab": b"\t",
+    "backtab": b"\x1b[Z",
+    "shift-tab": b"\x1b[Z",
+    "backspace": b"\x7f",
+    "bs": b"\x7f",
+    "esc": b"\x1b",
+    "escape": b"\x1b",
+    "space": b" ",
+    "up": b"\x1b[A",
+    "down": b"\x1b[B",
+    "right": b"\x1b[C",
+    "left": b"\x1b[D",
+    "home": b"\x1b[H",
+    "end": b"\x1b[F",
+    "insert": b"\x1b[2~",
+    "ins": b"\x1b[2~",
+    "delete": b"\x1b[3~",
+    "del": b"\x1b[3~",
+    "pageup": b"\x1b[5~",
+    "pgup": b"\x1b[5~",
+    "pagedown": b"\x1b[6~",
+    "pgdn": b"\x1b[6~",
+}
+
+# F5 起的 CSI 参数（xterm 惯例）
+_FUNCTION_CODES = {
+    5: 15,
+    6: 17,
+    7: 18,
+    8: 19,
+    9: 20,
+    10: 21,
+    11: 23,
+    12: 24,
+}
+
+# 不落在 a-z 的 Ctrl 组合
+_CONTROL_SYMBOLS = {
+    "ctrl-space": b"\x00",
+    "ctrl-@": b"\x00",
+    "ctrl-[": b"\x1b",
+    "ctrl-\\": b"\x1c",
+    "ctrl-]": b"\x1d",
+    "ctrl-^": b"\x1e",
+    "ctrl-_": b"\x1f",
+}
+
+
+def _build_key_names() -> Dict[str, bytes]:
+    """构造「名字 → 字节」表（含 c- 简写）。"""
+    keys = dict(_SYMBOL_KEYS)
+    keys.update({"f1": b"\x1bOP", "f2": b"\x1bOQ", "f3": b"\x1bOR", "f4": b"\x1bOS"})
+    for number, code in _FUNCTION_CODES.items():
+        keys["f%d" % number] = ("\x1b[%d~" % code).encode()
+    for index in range(26):
+        letter = chr(ord("a") + index)
+        keys["ctrl-" + letter] = bytes([index + 1])
+        keys["c-" + letter] = bytes([index + 1])
+    for name, byte in _CONTROL_SYMBOLS.items():
+        keys[name] = byte
+        if name.startswith("ctrl-"):
+            keys["c-" + name[5:]] = byte
+    return keys
+
+
+KEY_NAMES = _build_key_names()
+"""具名按键 → 字节序列。只读；调用方不要修改。"""
+
+
+class KeyNameError(ValueError):
+    """未知的按键名。"""
+
+
+def encode_key(name: str) -> bytes:
+    """把一个按键名编码成字节序列。
+
+    名字大小写不敏感，``ctrl-`` 可简写为 ``c-``，``alt-`` 可简写为 ``m-``。
+    ``alt-<单字符>`` 动态处理，因此 ``alt-x``、``alt-中`` 都可编码。
+
+    :raises KeyNameError: 名字为空或不在支持列表里。
+    """
+    raw = name.strip()
+    key = raw.lower()
+    if not key:
+        raise KeyNameError("empty key name")
+    found = KEY_NAMES.get(key)
+    if found is not None:
+        return found
+    if key.startswith("alt-") or key.startswith("m-"):
+        rest = raw[4:] if key.startswith("alt-") else raw[2:]
+        if rest.lower() == "enter":
+            return b"\x1b\r"
+        if len(rest) == 1:
+            return b"\x1b" + rest.encode("utf-8")
+    raise KeyNameError(
+        "unknown key %r (try enter, tab, esc, up, ctrl-c, alt-x, f5)" % name
+    )
+
+
+def encode_keys(names: Sequence[str]) -> bytes:
+    """按顺序拼接多个按键名。全部合法才返回字节，否则抛 KeyNameError。"""
+    return b"".join(encode_key(name) for name in names)

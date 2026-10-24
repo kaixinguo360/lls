@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
-from .config import AIConfig, ConfigError
+from .config import AIConfig, ConfigError, load, resolve_config_path
 from .provider import Provider
 from .registry import create_provider
 
-__all__ = ["Catalog", "parse_model_spec"]
+__all__ = ["Catalog", "default_catalog", "parse_model_spec"]
 
 
 def parse_model_spec(spec: str) -> Tuple[str, str]:
@@ -33,7 +34,7 @@ class Catalog:
 
     def __init__(self, config: AIConfig) -> None:
         self._config = config
-        self._instances = {}  # type: Dict[str, Provider]
+        self._instances: Dict[str, Provider] = {}
 
     def provider_ids(self) -> List[str]:
         return sorted(self._config.providers)
@@ -66,3 +67,16 @@ class Catalog:
             )
         provider_id, model_id = parse_model_spec(chosen)
         return self.get(provider_id), model_id
+
+
+@lru_cache(maxsize=4)
+def _catalog_for(path: str) -> Catalog:
+    return Catalog(load(path))
+
+
+def default_catalog() -> Catalog:
+    """按配置路径缓存的默认 :class:`Catalog`。
+
+    同一个配置路径只读一次配置；provider 实例仍由 ``Catalog`` 按 id 懒创建。
+    """
+    return _catalog_for(str(resolve_config_path()))

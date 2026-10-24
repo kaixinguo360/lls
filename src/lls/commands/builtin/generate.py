@@ -9,18 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-from functools import lru_cache
 from typing import List, NamedTuple, Optional, Sequence, Tuple
 
 from lls.ai import (
-    Catalog,
     ChunkKind,
     Conversation,
     Message,
     Tool,
     ToolCall,
-    load,
-    resolve_config_path,
+    default_catalog,
 )
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
@@ -113,18 +110,6 @@ def tail_lines(text: str, limit: int) -> str:
     if len(lines) <= limit:
         return text
     return "\n".join(lines[-limit:])
-
-
-# ---- 目录（进程内按配置路径缓存） ----
-
-
-@lru_cache(maxsize=4)
-def _catalog_for(path: str) -> Catalog:
-    return Catalog(load(path))
-
-
-def _catalog() -> Catalog:
-    return _catalog_for(str(resolve_config_path()))
 
 
 # ---- 显示辅助 ----
@@ -250,7 +235,7 @@ async def _stream_payload(
 
     返回 ``(payload, call)`` —— 调用本身也要留下，它是这一轮的 assistant 消息。
     """
-    provider, model = _catalog().resolve()
+    provider, model = default_catalog().resolve()
     messages = build_messages(request, screen, history)
     box = {}  # type: dict
     think = []  # type: List[str]
