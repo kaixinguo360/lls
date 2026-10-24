@@ -19,6 +19,9 @@ pyte 的行为约定（本适配器依赖这些事实，版本 0.8.x）：
 * ``dirty`` 是可消费的 ``set``，``clear()`` 即清空。
 * ``HistoryScreen`` 在 ``__getattribute__`` 里包裹每个事件，而 ``draw()`` 每写一个
   字符都要访问多个属性，开销接近翻倍。回滚区因此由 ``_Screen`` 自行记录。
+* 私有 CSI（``ESC [ ? … <final>``）一律以 ``private=True`` 派发，而多数处理函数
+  并没有这个参数 —— pyte 自身的不一致，``_tolerant`` 负责把这类序列挡在引擎
+  之外，避免一个读不懂的转义序列中断整个 ``feed()``。
 """
 
 from __future__ import annotations
@@ -70,6 +73,45 @@ class _Screen(pyte.Screen):
 
     def history_lines(self) -> list[str]:
         return list(self._history)
+
+
+def _tolerant(name: str):
+    """给 CSI 处理函数加一层容错。
+
+    pyte 对 ``CSI ? … <final>``（私有序列）一律以 ``private=True`` 调用处理
+    函数，但 ``Stream.csi`` 里二十多个处理函数根本没有这个参数 —— 于是
+    ``ESC [ ? 1 m``、``ESC [ ? 6 n``、``ESC [ ? 1 ; 2 c`` 这类终端真会发出的
+    序列会让 ``feed()`` 直接抛 ``TypeError``，整个会话就此中断。
+
+    这里退一步：先按原样调用；失败就去掉 ``private`` 再试；仍失败说明这个
+    私有变体 pyte 不认识，按未知序列处理 —— 终端模拟器遇到读不懂的序列应该
+    忽略，而不是把引擎带崩。
+    """
+
+    original = getattr(pyte.Screen, name)
+
+    def handler(self, *args, **kwargs):
+        try:
+            return original(self, *args, **kwargs)
+        except TypeError:
+            pass
+        kwargs.pop("private", None)
+        try:
+            return original(self, *args, **kwargs)
+        except TypeError:
+            return None
+
+    handler.__name__ = name
+    handler.__doc__ = "见 :func:`_tolerant`。"
+    return handler
+
+
+# 只为 pyte 真正会派发、且它自己没写对签名的那些处理函数包一层。
+for _attr in sorted(set(pyte.streams.Stream.csi.values())):
+    if getattr(_Screen, _attr, None) is getattr(pyte.Screen, _attr, None):
+        setattr(_Screen, _attr, _tolerant(_attr))
+del _attr
+
 
 
 def _to_cell(char: Any) -> Cell:
