@@ -46,6 +46,13 @@ __all__ = ["Controller"]
 
 _RAW_MAX = 8000
 
+# 收到 ESC 后等待后续字节的时间。方向键等序列几乎立刻到达，
+# 超过这个时间仍未收全就判定为独立 Esc 键（readline / tmux 的做法）。
+ESC_PENDING_TIMEOUT = 0.05
+
+# _read_line 的哨兵返回值：用户按下 Esc（用于退出 line 模式等场景）。
+ESCAPE = object()
+
 
 class _Services:
     """命令可用的能力实现：同时满足 UIService 与 ShellService 协议。
@@ -452,10 +459,25 @@ class Controller:
             # id='line_mode', no_save=['q'])；提示符是 read_line 默认 ':'；
             # Ctrl-C 返回 'q'（cancel 值），进而走 cmd_quit 退出。
             line = await self._read_line(
-                prompt=":", include_last=False, cancel="q", history_id="line_mode"
+                prompt=":",
+                include_last=False,
+                cancel="q",
+                history_id="line_mode",
+                escape=ESCAPE,
             )
             if line is None:  # 子进程退出
                 self._mode = "char"
+                break
+            if line is ESCAPE:
+                # Esc：退出 line 模式回到 char（与 Ctrl-E 进入相对），
+                # 恢复被提示符覆盖的画面。
+                #
+                # 同批到达的后续按键（用户按 Esc 后立刻敲的字）还在 _key_buf 里，
+                # 退出后它们属于 char 模式（应交给子进程），这里回填到 stdin 队列，
+                # 否则会被丢弃。
+                self._requeue_pending_keys()
+                self._mode = "char"
+                self._print_context()
                 break
             if line == "":
                 continue
@@ -669,10 +691,12 @@ class Controller:
         cancel: str | None = None,
         exit: str | None = None,
         history_id: str = "_default",
-    ) -> str | None:
+        escape: Any = None,
+    ) -> Any:
         """精确还原 legacy display.read_line 的交互与返回值语义。
 
-        返回：输入内容；Ctrl-C → cancel 值（或 None）；Ctrl-D → exit 值。
+        返回：输入内容；Ctrl-C → cancel 值（或 None）；Ctrl-D → exit 值；
+        按下 Esc 且 ``escape`` 非 None 时返回 ``escape`` 值。
         """
         editor = self._editors.get(history_id)
         if editor is None:
@@ -715,6 +739,10 @@ class Controller:
                 if key.control == "enter":
                     self._printer.clear_lines(lines_all, lines_cur)
                     return editor.submit()
+                if key.control == "escape" and escape is not None:
+                    # Esc：清除当前行并返回调用方指定的值（用于退出 line 模式）。
+                    self._printer.clear_lines(lines_all, lines_cur)
+                    return escape
                 if key.control == "backspace":
                     editor.backspace()
                 elif key.control == "delete":
@@ -778,6 +806,20 @@ class Controller:
             self._editors[history_id] = editor
         editor.record(value)
 
+    def _requeue_pending_keys(self) -> None:
+        """把尚在键缓冲里的按键回填到 stdin 队列。
+
+        用于退出覆盖模式时：用户可能在同一个字节块里先按了 Esc（退出）又敲了
+        别的字；这些字节属于新的模式（char 模式下应交给子进程），
+        直接丢弃会表现为「按键失灵」。
+        """
+        if not self._key_buf:
+            return
+        data = b"".join(k.raw for k in self._key_buf)
+        self._key_buf.clear()
+        if data:
+            self._stdin_q.put_nowait(data)
+
     # ---- 键读取 ----
 
     async def _next_key(self) -> Key | None:
@@ -791,21 +833,39 @@ class Controller:
             if data is None:
                 return None
             self._key_buf.extend(self._key_parser.feed(data))
+            if not self._key_buf and self._key_parser.pending_escape:
+                # 收到 ESC 但还没决定它是独立按键还是序列前缀：
+                # 等一个短超时，看后续字节是否到来（方向键的 "[A" 等几乎立刻到达）。
+                more = await self._wait_stdin(ESC_PENDING_TIMEOUT)
+                if more:
+                    self._key_buf.extend(self._key_parser.feed(more))
+                # 仍未收全则判定为独立 Esc（readline / tmux 的做法）
+                if not self._key_buf and self._key_parser.pending_escape:
+                    flushed = self._key_parser.flush_escape()
+                    if flushed is not None:
+                        self._key_buf.append(flushed)
             if self._key_buf:
                 return self._key_buf.pop(0)
 
-    async def _wait_stdin(self) -> bytes | None:
-        """等一段 stdin 输入；若子进程先退出则返回 None。"""
+    async def _wait_stdin(self, timeout: float | None = None) -> bytes | None:
+        """等一段 stdin 输入；若子进程先退出则返回 None。
+
+        ``timeout`` 到期仍无输入时返回 ``None``（与子进程退出同一返回值，
+        调用方需通过 ``self._exit_event`` 区分）。
+        """
         get_task = asyncio.ensure_future(self._stdin_q.get())
         exit_task = asyncio.ensure_future(self._exit_event.wait())
+        tasks: set[asyncio.Future[Any]] = {get_task, exit_task}
         done, pending = await asyncio.wait(
-            {get_task, exit_task}, return_when=asyncio.FIRST_COMPLETED
+            tasks,
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
         )
         for t in pending:
             t.cancel()
-        if exit_task in done or get_task not in done:
-            return None
-        return get_task.result()
+        if get_task in done:
+            return get_task.result()
+        return None
 
     # ---- 辅助 ----
 

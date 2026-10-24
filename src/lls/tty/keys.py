@@ -51,50 +51,78 @@ class KeyParser:
     """增量解析按键字节流，产出 Key 事件。
 
     与屏幕解析器一样，``feed`` 接受任意切分的字节块（用户一次读入的字节）。
+
+    **ESC 歧义**：``ESC`` 既可以是独立按键，也可以是方向键等序列的前缀
+    （``ESC [ A``）。收到 ``ESC`` 时无法立即判断，因此先挂起；调用方在看到
+    :attr:`pending_escape` 非空且暂时没有更多字节时，等一个短超时后调用
+    :meth:`flush_escape`，把挂起的前缀判定为独立的 ``escape`` 键。
+    这与 readline / tmux 的处理方式一致。
     """
 
     def __init__(self) -> None:
         self._decoder = codecs.getincrementaldecoder("utf-8")("strict")
         self._pending_escape: bytes = b""
 
+    @property
+    def pending_escape(self) -> bytes:
+        """尚未判定完的 ESC 前缀（空表示没有挂起）。"""
+        return self._pending_escape
+
     def feed(self, data: bytes) -> list[Key]:
         keys: list[Key] = []
         for byte in data:
-            key = self._feed_byte(byte)
-            if key is not None:
-                keys.append(key)
+            keys.extend(self._feed_byte(byte))
         return keys
 
-    def _feed_byte(self, byte: int) -> Key | None:
+    def _feed_byte(self, byte: int) -> list[Key]:
         raw = bytes([byte])
 
         # 正在累积 ESC 序列
         if self._pending_escape:
-            self._pending_escape += raw
-            seq = self._pending_escape
+            seq = self._pending_escape + raw
             name = _ESCAPE_SEQUENCES.get(seq)
             if name is not None:
                 self._pending_escape = b""
-                return Key(control=name, raw=seq)
+                return [Key(control=name, raw=seq)]
+            # 第二个字节不是序列起始符（'[' 或 'O'）时，ESC 就是独立按键，
+            # 当前字节另行解析 —— 否则 ESC 后紧跟的字符会被一起吞掉。
+            if len(seq) == 2 and byte not in (0x5B, 0x4F):
+                self._pending_escape = b""
+                return [Key(control="escape", raw=b"\x1b")] + self._feed_byte(byte)
             if len(seq) >= 3:
                 # 未知序列：当作已结束的 ESC 处理，丢弃累积
                 self._pending_escape = b""
-                return Key(control="unknown", raw=seq)
-            return None
+                return [Key(control="unknown", raw=seq)]
+            self._pending_escape = seq
+            return []
 
-        if byte == 0x1b:
+        if byte == 0x1B:
             self._pending_escape = raw
-            return None
+            return []
 
         name = _CONTROL_NAMES.get(byte)
         if name is not None:
-            return Key(control=name, raw=raw)
+            return [Key(control=name, raw=raw)]
 
         # 可见字符：走增量解码
         ch = self._decoder.decode(raw)
         if ch:
-            return Key(char=ch, raw=raw)
-        return None
+            return [Key(char=ch, raw=raw)]
+        return []
+
+    def flush_escape(self) -> Key | None:
+        """把挂起的 ESC 前缀判定为独立按键。
+
+        仅当前缀是**单独的 ESC** 时才产出 ``escape``；若是 ``ESC [`` 这类
+        尚未收全的序列前缀，则作为 ``unknown`` 丢弃（后续字节不会再来）。
+        """
+        if not self._pending_escape:
+            return None
+        seq = self._pending_escape
+        self._pending_escape = b""
+        if seq == b"\x1b":
+            return Key(control="escape", raw=seq)
+        return Key(control="unknown", raw=seq)
 
     def flush(self) -> Key | None:
         """强制产出残留（如未闭合的 ESC、未完成的多字节）。"""
