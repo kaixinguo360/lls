@@ -170,6 +170,10 @@ class Controller:
         self._raw = bytearray()
         self._mode = "char"
         self._exit_event = asyncio.Event()
+        # 子进程的 wait 状态（raw status）。None 表示还没回收。
+        # 有了它，LLS 的退出码才能反映子进程（否则 shell 里 `lls foo; echo $?`
+        # 永远是 0，脚本无法据此判断成败）。
+        self._exit_status: int | None = None
         self._editors: dict[str, LineEditor] = {}
         # 当前正在显示的提示符状态：(prompt, 文本, 光标, lines_all, lines_cur)。
         # line 模式下若子进程有输出，据此把提示符临时移开、写输出、再画回来，
@@ -215,6 +219,7 @@ class Controller:
             pass
 
         code = 0
+        quit_requested = False
         try:
             while not self._exit_event.is_set():
                 try:
@@ -240,10 +245,48 @@ class Controller:
                         pass
                     self._mode = "char"
         except _QuitException as e:
+            # 用户主动 quit：退出码由 quit 命令决定，与子进程无关
+            # （此时子进程可能还在跑，也可能根本没跑过）。
             code = e.code
+            quit_requested = True
         finally:
             await self._cleanup()
-        return code
+
+        if quit_requested:
+            return code
+        # 子进程自己结束（shell 退出 / 单条命令跑完）：用它的退出码，
+        # 这样 `lls sh -c 'exit 3'; echo $?` 才能拿到 3。
+        return self._child_exit_code()
+
+    def _child_exit_code(self) -> int:
+        """把子进程的结束方式翻译成退出码，规则与 shell 一致。
+
+        正常退出取它的退出码；被信号终止取 ``128 + 信号值``。
+        拿不到状态（子进程还在跑、或从未启动）时返回 0。
+        """
+        if self._exit_status is None:
+            self._await_child_status()
+        status = self._exit_status
+        if status is None:
+            return 0
+        if os.WIFEXITED(status):
+            return os.WEXITSTATUS(status)
+        if os.WIFSIGNALED(status):
+            return 128 + os.WTERMSIG(status)
+        return 0
+
+    def _await_child_status(self, timeout: float = 0.2) -> None:
+        """极短暂地等子进程被回收，用于退出时拿到准确的退出码。
+
+        PTY 的 EIO 可能先于 SIGCHLD 到达，此时主循环已结束、子进程却还没被
+        ``waitpid`` 回收（``_reap`` 会拿到 ``(0, 0)``）。这里自己轮询几次即可，
+        不依赖 SIGCHLD 处理器 —— 反正退出在即，阻塞这一下无所谓。
+        """
+        deadline = time.monotonic() + timeout
+        while self._exit_status is None and time.monotonic() < deadline:
+            self._reap()
+            if self._exit_status is None:
+                time.sleep(0.005)
 
     def _align_model_to_cursor(self) -> None:
         """把模型光标对齐到宿主终端当前光标所在行（用 CUP，不用换行）。
@@ -372,6 +415,12 @@ class Controller:
                 continue
             except OSError as e:
                 if e.errno == errno.EIO:
+                    # EIO 表示 PTY 已无更多数据（子进程退出后的正常结束）。
+                    # 若本轮已经读到东西，**必须先交出去**再谈退出：直接走退出
+                    # 路径会把 chunks 丢掉，表现为子进程最后几行输出凭空消失
+                    # （实测 ``sh -c 'echo OK'`` 的输出全部丢失）。
+                    if chunks:
+                        break
                     self._on_child_exit()
                     return None
                 break
@@ -544,12 +593,19 @@ class Controller:
         self._reap()
 
     def _reap(self) -> None:
+        """回收子进程并记下它的 wait 状态。
+
+        ``waitpid(WNOHANG)`` 在子进程还没结束时返回 ``(0, 0)``，必须按 pid
+        判断，否则会把「还没退出」当成状态存起来。
+        """
         if self._pty is None:
             return
         try:
-            os.waitpid(self._pty.pid, os.WNOHANG)
+            wpid, status = os.waitpid(self._pty.pid, os.WNOHANG)
         except (ChildProcessError, OSError):
-            pass
+            return
+        if wpid == self._pty.pid and self._exit_status is None:
+            self._exit_status = status
 
     def _record_raw(self, data: bytes) -> None:
         self._raw.extend(data)
