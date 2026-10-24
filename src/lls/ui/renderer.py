@@ -144,13 +144,21 @@ class LinePrinter:
 
         ``anchor_row`` 给定时先绝对定位到该行行首再绘制（覆盖层用），
         否则沿用相对移动（从当前光标处向上回退）。
+
+        **每一行都先清空再写**：文本变短（退格、重折行）时若只清首行，
+        后面几行的旧字符会留在屏上。
         """
         w = self._console
         line, lines_all = wrap_multi_lines(text, width)
         if anchor_row is not None:
-            w.write(f"\x1b[{anchor_row + 1};1H".encode())
-        w.write(b"\x1b[2K\r")
-        w.write(line.encode())
+            rows = line.split("\r\n")
+            for index, row in enumerate(rows):
+                w.write(f"\x1b[{anchor_row + 1 + index};1H".encode())
+                w.write(b"\x1b[2K")
+                w.write(row.encode())
+        else:
+            w.write(b"\x1b[2K\r")
+            w.write(line.encode())
         if cursor is not None and cursor != len(text):
             for _ in range(lines_all - 1):
                 w.write(b"\r\x1b[1A")

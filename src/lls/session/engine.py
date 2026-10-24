@@ -707,10 +707,13 @@ class Engine:
         width = self.screen.columns
         _, lines_needed = wrap_multi_lines(text, width)
         anchor = overlay_anchor(self.screen.cursor.y, lines_needed, self.screen.rows)
-        # 「让出旧位置」只在真的换位置时才做：
-        # 若新锚点与旧锚点完全相同，先恢复模型内容再立刻被覆盖是纯粹的重复写。
-        # 位置没变时直接覆盖即可。
-        if self._overlay_anchor_row != anchor:
+        # 「让出旧位置」只在真的换位置或变矮时做：
+        # 若新锚点与旧锚点完全相同、高度也没减，直接覆盖即可（每一行都会先清空）。
+        # 变矮时多出来的旧行必须按模型恢复，否则会一直留着上一帧的内容。
+        if (
+            self._overlay_anchor_row != anchor
+            or self._overlay_lines > lines_needed
+        ):
             # 让出旧位置（并入 dirty 一次写回），不重画覆盖层、不动光标
             # —— 紧接着 print_lines 会画到新锚点
             self.render_from_model(keep_overlay=False, leave_cursor=False)
