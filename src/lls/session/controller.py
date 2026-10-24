@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import select
 import signal
 import sys
 import time
@@ -61,6 +62,14 @@ ESC_PENDING_TIMEOUT = 0.05
 # 目的是让程序（尤其全屏程序）的整屏重绘完整落地，避免覆盖层插在中间。
 OVERLAY_REDRAW_DELAY = 0.05
 
+# line 模式下把接连到达的输出合并成一次重绘（期间有新输出就重新计时）。
+#
+# 全屏程序启动时会连发好几批：切换备用屏、清屏、再逐行绘制。若每批都立刻重绘，
+# 屏幕上会依次闪过「空屏」「半成品」「完整」，观感就是画面被清掉又重画。
+# 实测 vim 启动在 line 模式下触发了 3 次整屏重绘，其中一次全是空白。
+# 合并后与直接运行 vim 一致：先一小笔、再一整屏。
+RENDER_COALESCE_DELAY = 0.016
+
 # char 模式下模型追赶子进程的调度参数。
 #
 # 为什么要分批：解析是纯 Python，一整屏重绘约 10ms。一次 read 可能拿到 10KB
@@ -74,6 +83,16 @@ OVERLAY_REDRAW_DELAY = 0.05
 _FEED_SLICE = 2048          # 单次喂给模型的最大字节数
 _FEED_BUDGET = 0.004        # 单轮解析的时间预算（秒）
 _BACKLOG_LIMIT = 256 * 1024  # 积压上限：超过就一次喂完，避免无限增长
+
+# 每次 master 可读时，一口气读走全部可用数据（合并成一笔写出）。
+#
+# 分笔写会让全屏程序的中间态上屏：vim 启动的一帧含「切备用屏 → 清屏 → 逐行
+# 绘制」，分三次写就会闪三次。上限防止连续高速输出饿死事件循环。
+_READ_CHUNK = 65536
+_READ_ROUNDS = 64
+_READ_LIMIT = 512 * 1024
+_READ_WINDOW = 0.002        # 合并窗口：把这段时间内陆续到达的数据攒成一笔
+_READ_COALESCE_MIN = 16     # 首笔至少这么大才值得等待合并（按键回显仅 1-3 字节）
 
 # _read_line 的哨兵返回值：用户按下 Esc（用于退出 line 模式等场景）。
 ESCAPE = object()
@@ -163,6 +182,8 @@ class Controller:
         self._overlay_lines = 0
         # char 模式下等待喂给模型的字节（显示已先透传出去，模型在后面追赶）。
         self._backlog = bytearray()
+        # line 模式下挂起的重绘（把接连到达的输出合并成一次，见 _schedule_render）。
+        self._render_timer: asyncio.TimerHandle | None = None
         # 覆盖层的延迟重绘定时器。
         # 子进程（如 vim）重绘整屏时会连续发出多块输出；若在每块之间插入
         # 覆盖层的绘制，就会打断它的绘制序列（实测第 1 行内容被 ':' 覆盖）。
@@ -279,11 +300,8 @@ class Controller:
     def _on_master_readable(self) -> None:
         if self._exit_event.is_set():
             return
-        try:
-            data = os.read(self._pty_fd, 10240)
-        except OSError as e:
-            if e.errno == errno.EIO:
-                self._on_child_exit()
+        data = self._read_all_available()
+        if data is None:
             return
         if not data:
             self._on_child_exit()
@@ -314,6 +332,58 @@ class Controller:
                 self._output_during_message = True
             else:
                 self._render_from_model()
+
+    def _read_all_available(self) -> bytes | None:
+        """在很短的窗口内读走子进程所有输出，**合并成一块**。
+
+        子进程画一帧会分多次 write：vim 启动依次发「切换备用屏」「设置滚动区」
+        「清屏」「逐行绘制」。逐笔转发时终端每笔刷新一次，于是画面先空、再半成品、
+        最后完整——用户看到的就是「已经画出完整界面，随后又被清掉重画一遍」。
+        直接运行 vim 时内核的转发粒度更粗，这种中间态不易察觉。
+
+        因此在 :data:`_READ_WINDOW` 内把陆续到达的数据攒在一起再交出，
+        让终端按帧刷新而不是按系统调用刷新。
+
+        窗口是上限而非固定等待：数据连续到达时会一直读到 ``_READ_LIMIT``。
+        只有**首笔够大**（全屏程序的一帧）才值得等后续；首笔很小（键盘回显、
+        零星日志）时不等待，立刻交出，交互因此不受影响。
+        读失败且已处理时返回 ``None``。
+        """
+        chunks: list[bytes] = []
+        total = 0
+        deadline = time.perf_counter() + _READ_WINDOW
+        for _ in range(_READ_ROUNDS):
+            try:
+                chunk = os.read(self._pty_fd, _READ_CHUNK)
+            except BlockingIOError:
+                # 暂时读完。只有已经攒到「够一帧」的量，才值得等同一帧的其余部分；
+                # 否则立即返回（否则每次按键都要白等一个窗口）。
+                if total < _READ_COALESCE_MIN or self._mode == "line":
+                    break
+                remain = deadline - time.perf_counter()
+                if remain <= 0:
+                    break
+                try:
+                    ready, _, _ = select.select([self._pty_fd], [], [], remain)
+                except (OSError, ValueError):
+                    break
+                if not ready:
+                    break
+                continue
+            except OSError as e:
+                if e.errno == errno.EIO:
+                    self._on_child_exit()
+                    return None
+                break
+            if not chunk:
+                if not chunks:
+                    return b""
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= _READ_LIMIT:
+                break
+        return b"".join(chunks)
 
     def _pump_backlog(self) -> None:
         """解析一小片积压。
@@ -352,7 +422,15 @@ class Controller:
         self._screen.clear_dirty()
 
     def _flush_backlog(self) -> None:
-        """把积压全部喂完（切回 line 模式前必须做，渲染依赖完整模型）。"""
+        """把积压全部喂完，使模型与子进程一致。
+
+        char 模式下显示优先、模型在后追赶（见 ``_pump_backlog``），所以**任何**
+        要用模型的地方都必须先排空：渲染、取光标定位覆盖层、切进 line 模式。
+        漏掉一处就会用上过时的光标 —— 实测表现为进 line 后提示符落在随机的
+        旧行（子进程早已把光标移到别处，而那次 CUP 还压在 backlog 里）。
+
+        已排空时是空操作，可以随手调用。
+        """
         if self._backlog:
             self._screen.feed(bytes(self._backlog))
             self._backlog.clear()
@@ -378,6 +456,8 @@ class Controller:
         """
         if self._console is None:
             return
+        # 渲染与光标定位都基于模型，因此模型必须已经完整（char 模式下它会落后）。
+        self._flush_backlog()
         dirty = set(self._screen.dirty)
         if self._overlay_anchor_row is not None and self._overlay_lines:
             top = self._overlay_anchor_row
@@ -566,11 +646,17 @@ class Controller:
             if b == 0x05:  # Ctrl-E → line
                 if i:
                     self._pty_write(data[:i])
+                # 切换前必须让模型追上：char 模式下显示优先、模型在后追赶，
+                # 此刻模型可能还缺最后几屏输出（含子进程的光标定位）。
+                # 不排空就用模型去定位覆盖层和物理光标，位置就是旧的 ——
+                # 表现为「一进 line，光标/提示符落在过时的行上」。
+                self._flush_backlog()
                 self._mode = "line"
                 return
             if b == 0x07:  # Ctrl-G → prompt
                 if i:
                     self._pty_write(data[:i])
+                self._flush_backlog()
                 self._mode = "prompt"
                 return
         self._pty_write(data)
@@ -841,6 +927,9 @@ class Controller:
         返回 ``(anchor, lines_all)``。
         """
         assert self._printer is not None
+        # 位置取自模型光标，因此模型必须已经完整。char 模式下模型是跟在后面
+        # 追赶的（见 _pump_backlog），这里先排空再取光标；已排空时是空操作。
+        self._flush_backlog()
         if self._overlay_timer is not None:
             # 即将重绘，取消挂起的延迟重绘，避免同一帧画两次
             self._overlay_timer.cancel()
