@@ -3,9 +3,10 @@
 交互模型（对照 legacy legacy/lls.py + legacy/commands/*）：
 
 * **char 模式透传**：子进程输出直接写宿主终端（光标由子进程管理），同时旁路
-  喂屏幕模型；``line``/``prompt`` 模式**不透传**，避免干扰 ``read_line`` 的显示；
-* ``read_line`` 在当前光标位置用 ``\\033[2K\\r`` 清行显示，光标靠「上移 + 写前缀」
-  定位（见 ``ui.renderer.LinePrinter``）；
+  喂屏幕模型供 line 模式使用；``line`` / ``prompt`` 模式**不透传**，终端内容一律
+  由屏幕模型投影而来（见 ``_render_from_model``）；
+* 覆盖层（命令行、消息、生成预览）浮在画面上，位置取自模型实时光标，自己约束
+  几何以免撑滚终端；它不写模型，模型光标始终代表子进程的真实位置；
 * 提示符：行模式 ``:``、指令 ``(gen-instruct): ``、生成 ``(gen-cmd): ``、
   think ``(gen-think): ``、确认 ``(gen-cmd): {cmd}, confirm? [y/U/i/n/e/s/r/k/t] ``。
 
@@ -21,7 +22,9 @@ s/show/status 看屏，cancel 心跳防误触（0.6s 内连续 cancel 才真取�
 
 * master 读 EIO（Linux PTY 挂断）或 EOF 会调用 ``_on_child_exit``，其中
   ``remove_reader`` 并置 ``_exit_event``；所有等输入的协程同时等 ``_exit_event``；
-* SIGCHLD 兜底，主动 ``waitpid`` 回收子进程。
+* SIGCHLD 兜底，主动 ``waitpid`` 回收子进程并记下 wait 状态；
+* 退出码反映子进程：正常结束取它的退出码，被信号终止取 ``128 + 信号值``；
+  只有用户主动 quit 才用命令自己给的码。
 """
 
 from __future__ import annotations
@@ -62,26 +65,17 @@ ESC_PENDING_TIMEOUT = 0.05
 # 目的是让程序（尤其全屏程序）的整屏重绘完整落地，避免覆盖层插在中间。
 OVERLAY_REDRAW_DELAY = 0.05
 
-# line 模式下把接连到达的输出合并成一次重绘（期间有新输出就重新计时）。
-#
-# 全屏程序启动时会连发好几批：切换备用屏、清屏、再逐行绘制。若每批都立刻重绘，
-# 屏幕上会依次闪过「空屏」「半成品」「完整」，观感就是画面被清掉又重画。
-# 实测 vim 启动在 line 模式下触发了 3 次整屏重绘，其中一次全是空白。
-# 合并后与直接运行 vim 一致：先一小笔、再一整屏。
-RENDER_COALESCE_DELAY = 0.016
-
 # char 模式下模型追赶子进程的调度参数。
 #
-# 为什么要分批：解析是纯 Python，一整屏重绘约 10ms。一次 read 可能拿到 10KB
-# （约十几帧），若同步解析完再返回，事件循环就被独占上百毫秒，期间读不到新的
-# 输出 —— 显示只能一顿一顿地刷新。分批后每轮只解析一小片，读和写都及时。
+# 解析是纯 Python，一整屏重绘约 10ms。一次 read 可能拿到 10KB（十几帧），
+# 同步解析完再返回会让事件循环被独占上百毫秒，期间读不到新输出，显示只能
+# 一顿一顿地刷新。分批后每轮只解析一小片，读写都及时。
 #
-# 实测（30 帧整屏重绘，帧间隔越小越流畅）：
-#   同步喂完          202ms
-#   2048 字节 / 4ms   119ms   <- 采用
-#    512 字节 / 2ms   174ms   （切片太小，追赶轮次变多反而更慢）
-_FEED_SLICE = 2048          # 单次喂给模型的最大字节数
-_FEED_BUDGET = 0.004        # 单轮解析的时间预算（秒）
+# 切片与预算的取值来自「30 帧整屏重绘下的帧间隔」测量：不分批约 200ms，
+# 2048 字节配 4ms 预算约 120ms；切片缩到 512 字节反而更差（约 170ms），
+# 因为追赶轮次增多，每轮固定开销占了上风。
+_FEED_SLICE = 2048           # 单次喂给模型的最大字节数
+_FEED_BUDGET = 0.004         # 单轮解析的时间预算（秒）
 _BACKLOG_LIMIT = 256 * 1024  # 积压上限：超过就一次喂完，避免无限增长
 
 # 每次 master 可读时，一口气读走全部可用数据（合并成一笔写出）。
@@ -186,12 +180,10 @@ class Controller:
         self._overlay_lines = 0
         # char 模式下等待喂给模型的字节（显示已先透传出去，模型在后面追赶）。
         self._backlog = bytearray()
-        # line 模式下挂起的重绘（把接连到达的输出合并成一次，见 _schedule_render）。
-        self._render_timer: asyncio.TimerHandle | None = None
         # 覆盖层的延迟重绘定时器。
-        # 子进程（如 vim）重绘整屏时会连续发出多块输出；若在每块之间插入
-        # 覆盖层的绘制，就会打断它的绘制序列（实测第 1 行内容被 ':' 覆盖）。
-        # 因此输出期间只擦除、不重绘，等输出静默后再画一次。
+        # 全屏程序（如 vim）重绘整屏时会连续发出多块输出；若在每块之间插入
+        # 覆盖层的绘制，就会打断它的绘制序列，把内容覆盖成提示符本身。
+        # 因此输出期间只让出画面、不重画，等输出静默后再画一次。
         self._overlay_timer: asyncio.TimerHandle | None = None
         # 消息展示期间暂停透传：否则后台输出会把消息冲乱。
         # 期间收到的输出仍进屏幕模型，展示结束后按需重绘补齐。
@@ -218,8 +210,6 @@ class Controller:
         except (NotImplementedError, RuntimeError):
             pass
 
-        code = 0
-        quit_requested = False
         try:
             while not self._exit_event.is_set():
                 try:
@@ -231,8 +221,6 @@ class Controller:
                         await self._prompt_step()
                     else:
                         self._mode = "char"
-                except _QuitException:
-                    raise
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:  # noqa: BLE001
@@ -244,17 +232,10 @@ class Controller:
                     except Exception:  # noqa: BLE001
                         pass
                     self._mode = "char"
-        except _QuitException as e:
-            # 用户主动 quit：退出码由 quit 命令决定，与子进程无关
-            # （此时子进程可能还在跑，也可能根本没跑过）。
-            code = e.code
-            quit_requested = True
         finally:
             await self._cleanup()
 
-        if quit_requested:
-            return code
-        # 子进程自己结束（shell 退出 / 单条命令跑完）：用它的退出码，
+        # 循环结束只因为子进程退出，因此 LLS 的退出码反映子进程，
         # 这样 `lls sh -c 'exit 3'; echo $?` 才能拿到 3。
         return self._child_exit_code()
 
@@ -298,7 +279,7 @@ class Controller:
         **必须用 CUP 定位，不能喂换行**：喂换行会让模型把这些行标成 dirty
         （"内容变了"），随后按模型重绘时就会用空白覆盖它们 —— 而物理上那几行
         是 LLS 启动前留下的真实内容，模型根本没收到过，属于**未知区域**，
-        绝不能碰（实测会把 PRE1..PRE5 之类的历史输出擦成空白）。
+        绝不能碰（否则历史输出会被擦成空白）。
 
         CUP 只移动光标，不标记任何行，未知区域因此保持原样。
         """
@@ -359,7 +340,7 @@ class Controller:
             # **显示优先**：立刻写终端，模型排队追赶（见 _pump_backlog）。
             # 解析是纯 Python，一次整屏重绘约 10ms；若在写终端前同步解析，
             # 事件循环就被占住、读不到下一批输出，画面只能一顿一顿地刷新
-            # （实测整屏重绘密集的程序，帧间隔从 23ms 恶化到 200ms）。
+            # （整屏重绘密集的程序尤其明显，帧间隔会差一个数量级）。
             # 模型只是影子，晚几百毫秒无妨 —— 需要它时（切回 line）先排空积压。
             self._console.write(data)
             self._backlog += data
@@ -417,8 +398,7 @@ class Controller:
                 if e.errno == errno.EIO:
                     # EIO 表示 PTY 已无更多数据（子进程退出后的正常结束）。
                     # 若本轮已经读到东西，**必须先交出去**再谈退出：直接走退出
-                    # 路径会把 chunks 丢掉，表现为子进程最后几行输出凭空消失
-                    # （实测 ``sh -c 'echo OK'`` 的输出全部丢失）。
+                    # 路径会丢掉 chunks，表现为子进程最后几行输出凭空消失。
                     if chunks:
                         break
                     self._on_child_exit()
@@ -437,9 +417,9 @@ class Controller:
     def _pump_backlog(self) -> None:
         """解析一小片积压。
 
+        每收到一批输出顺带解析一片，解析速度因此与产出速度挂钩。
         不做 `call_soon` 式的连续追赶：那会让事件循环排满解析回调，反而挤占
-        读 pty 的时机（实测比同步喂完还慢）。改成「每次收到输出顺带解析一片」，
-        解析速度自然与产出速度挂钩；落后太多时由 :data:`_BACKLOG_LIMIT`
+        读 pty 的时机，比同步解析还慢。落后太多时由 :data:`_BACKLOG_LIMIT`
         兜底一次喂完，保证模型不会无限期落后于子进程。
         """
         self._feed_backlog_slice()
@@ -475,8 +455,8 @@ class Controller:
 
         char 模式下显示优先、模型在后追赶（见 ``_pump_backlog``），所以**任何**
         要用模型的地方都必须先排空：渲染、取光标定位覆盖层、切进 line 模式。
-        漏掉一处就会用上过时的光标 —— 实测表现为进 line 后提示符落在随机的
-        旧行（子进程早已把光标移到别处，而那次 CUP 还压在 backlog 里）。
+        漏掉一处就会用上过时的光标：子进程早已把光标移到别处，而那次 CUP
+        还压在 backlog 里，提示符因此会落在随机的旧行上。
 
         已排空时是空操作，可以随手调用。
         """
@@ -492,7 +472,7 @@ class Controller:
 
         不写子进程的原始字节，只写「模型算出来的画面」：
 
-        1. 覆盖层占用的行并入 dirty —— 它们现在既要腾出来，又要按模型显示，
+        1. 覆盖层占用的行并入 dirty —— 它们既要腾出来，又要按模型显示，
            所以「让出覆盖层」和「重绘内容」是同一次写，不是两次；
         2. 重绘所有 dirty 行（pyte 精确标记变化的行）；
         3. 把物理光标放到模型光标处。
@@ -547,7 +527,7 @@ class Controller:
         """输出静默后重画覆盖层，让它浮在最新画面上。
 
         基准直接取模型光标 —— 那就是子进程当前所在的位置，覆盖层贴着它显示。
-        不再需要另存子进程光标：覆盖层的绘制不写模型，模型光标始终是真的。
+        覆盖层的绘制不写模型，模型光标始终代表子进程的真实位置。
         """
         self._overlay_timer = None
         active = self._active_prompt
@@ -760,12 +740,10 @@ class Controller:
             if result is None:
                 await self._show_message(f"unknown command: {cmd}")
                 continue
-            if result.quit:
-                raise _QuitException(0)
             if result.mode is not None and result.mode != self._mode:
                 self._mode = result.mode
                 if result.mode == "char":
-                    # 退出 line 回 char：恢复被 read_line 覆盖的画面（legacy print_context）
+                    # 退回 char 模式：把提示符占用的行按模型还原
                     self._print_context()
 
     async def _prompt_step(self) -> None:
@@ -917,8 +895,8 @@ class Controller:
     # ---- 生成辅助 ----
 
     def _gen_messages(self, instruct: str, context: Any, role: Any) -> Any:
-        # 延迟导入：lls.ai 约 200ms，而纯 shell 会话（绝大多数时间）用不到它。
-        # 放在顶层会让每次启动都付这笔开销（实测启动因此从 ~1.0s 降到 ~0.8s）。
+        # 延迟导入：lls.ai 引入约 200ms，而纯 shell 会话（绝大多数时间）用不到
+        # 它。放在顶层会让每次启动都白付这笔开销。
         from lls.ai import stream_chat
 
         messages = self._session.replay(role, instruct, context)
@@ -995,10 +973,9 @@ class Controller:
         anchor = overlay_anchor(
             self._screen.cursor.y, lines_needed, self._screen.rows
         )
-        open('/tmp/m.log','a').write('DRAW anchor=%d model=(%d,%d) prev=%r\n' % (anchor, self._screen.cursor.y, self._screen.cursor.x, self._overlay_anchor_row))
         # 「让出旧位置」只在真的换位置时才做：
-        # 若新锚点与旧锚点完全相同，先恢复模型内容再立刻被覆盖是纯粹的重复写
-        # （实测每敲一个字符就白写一遍整行）。位置没变时直接覆盖即可。
+        # 若新锚点与旧锚点完全相同，先恢复模型内容再立刻被覆盖是纯粹的重复写。
+        # 位置没变时直接覆盖即可。
         if self._overlay_anchor_row != anchor:
             # 让出旧位置（并入 dirty 一次写回），不重画覆盖层、不动光标
             # —— 紧接着 print_lines 会画到新锚点
@@ -1050,8 +1027,7 @@ class Controller:
         lines_cur = lines_all
         # **立刻**登记活跃覆盖层，而不是等到第一次按键之后。
         # 否则「刚进入 line、用户在等、子进程此时输出」的窗口里
-        # _active_prompt 仍是 None，输出会直接透传并把覆盖层冲掉
-        # （实测 exec 启动 vim 时 ':' 就是这样消失、之后不再出现）。
+        # _active_prompt 仍是 None，输出会直接透传并把覆盖层冲掉。
         self._active_prompt = (
             prompt,
             editor.text,
@@ -1125,7 +1101,7 @@ class Controller:
                     lines_cur,
                 )
         finally:
-            # 覆盖层已不在显示，之后的输出不再需要绕过它。
+            # 覆盖层不再显示，后续输出无需再绕过它。
             self._active_prompt = None
 
     async def _print(
@@ -1238,12 +1214,6 @@ class Controller:
                 f.write(self._session.to_jsonl() + "\n")
         except OSError:
             pass
-
-
-class _QuitException(Exception):
-    def __init__(self, code: int) -> None:
-        super().__init__(code)
-        self.code = code
 
 
 def _split_command(line: str) -> tuple[str, str | None]:

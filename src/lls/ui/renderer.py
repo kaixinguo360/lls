@@ -1,14 +1,14 @@
-"""显示原语 —— 精确移植 legacy display.py 的显示逻辑。
+"""显示原语：文本换行、覆盖层定位、按模型渲染。
 
-legacy 的交互模型（必须精确还原）：
+分两类：
 
-* char 模式**透传**：子进程输出直接写宿主终端，光标由子进程（bash）自己管理；
-* ``read_line`` 在**当前光标位置**用 ``\\033[2K\\r`` 清行显示 prompt，光标靠
-  「上移 + 写前缀」精确定位——**不用反色高亮、不用 save/restore、不用底部覆盖行**；
-* 换行由 ``wrap_multi_lines`` 按终端宽度 + 字符宽度处理。
+* **纯计算**：``wrap_multi_lines`` / ``char_width`` / ``overlay_anchor`` ——
+  给定文本与终端宽度，算出该占几行、覆盖层该从哪一行开始，不碰终端；
+* **写终端**：``LinePrinter``（覆盖层绘制）、``render_row_cells``（把模型
+  单元格编码成带样式的字节）、``print_screen_perfect``（按模型整屏显示）。
 
-本模块把 legacy display.py 的四个函数（get_width / wrap_multi_lines /
-clear_lines / print_lines）原样移植，仅把 ``os.write(stdout)`` 换成 Console 抽象。
+覆盖层的几何约束由 ``overlay_anchor`` 统一负责：放不下就整体上移，绝不越过
+屏幕底部 —— 一旦越界终端会滚动，物理行与模型行随即错位。
 """
 
 from __future__ import annotations
@@ -18,14 +18,10 @@ from lls.tty import Console
 __all__ = [
     "LinePrinter",
     "char_width",
-    "clear_lines",
     "content_start",
-    "full_redraw",
     "overlay_anchor",
-    "print_lines",
     "print_screen_perfect",
     "render_row_cells",
-    "restore_line",
     "wrap_multi_lines",
 ]
 
@@ -115,21 +111,6 @@ class LinePrinter:
         w.write(b"\r")
         return 1, 1
 
-    def clear_region(self, top: int, bottom: int, *, leave_cursor: bool = True) -> None:
-        """清除 ``[top, bottom)`` 行（0-based）。
-
-        覆盖层可能因为折行而上移或下落，位置与上一帧不同，必须按**行区间**
-        擦除，而不是靠相对移动计数。
-
-        ``leave_cursor=False`` 时**不**把光标挪回 ``top`` 行首 —— 调用方紧接着
-        就要在别处定位（如覆盖层重绘到新的锚点），那次挪动纯属多余字节。
-        """
-        w = self._console
-        for row in range(top, bottom):
-            w.write(f"\x1b[{row + 1};1H\x1b[2K".encode())
-        if leave_cursor:
-            w.write(f"\x1b[{top + 1};1H".encode())
-
     def print_lines(
         self,
         text: str,
@@ -159,22 +140,12 @@ class LinePrinter:
         return lines_all, lines_cur
 
 
-# 兼容顶层函数（无状态，直接写 stdout 的等价物 —— 这里仅保留签名，实际用 LinePrinter）
-def clear_lines(*_args: object, **_kwargs: object) -> tuple[int, int]:
-    raise NotImplementedError("请使用 LinePrinter 实例")
-
-
-def print_lines(*_args: object, **_kwargs: object) -> tuple[int, int]:
-    raise NotImplementedError("请使用 LinePrinter 实例")
-
-
-# ---- 从屏幕模型重绘（用于覆盖模式退出后恢复画面，替代重放 raw 字节）----
+# ---- 按屏幕模型渲染（模型是画面的唯一来源）----
 #
-# 为什么不能重放 raw：
-#   * raw 被 _RAW_MAX 截断，截断点常落在转义序列中间 -> 输出半个序列 -> 乱码；
-#   * raw 是历史累积，含进入全屏应用之前的输出，重放等于重演整段历史。
-# 正确做法（tmux/screen 等真实终端多路复用器的做法）：维护屏幕状态，
-# 需要恢复时从状态重绘 —— 结果确定、无截断问题、可精确还原颜色。
+# 渲染一律从模型取内容，不重放原始字节：原始字节会被截断（可能断在转义序列
+# 中间）、且包含进入全屏应用之前的全部历史，重放等于重演一遍。
+# 从状态重绘则结果确定、无截断问题、可精确还原颜色 —— 与 tmux/screen 等
+# 终端多路复用器的做法一致。
 
 _FG_NAMED = {
     "black": "30", "red": "31", "green": "32", "brown": "33",
@@ -272,48 +243,7 @@ def content_start(screen) -> int:
     return min(screen.cursor.y, rows - 1)
 
 
-def restore_line(screen, console: Console) -> None:
-    """恢复被覆盖模式占用的**单行**（轻量恢复，不清屏）。
 
-    前提：物理终端上只有光标所在行被 ``read_line`` 覆盖过，其余画面未受影响。
-
-    必须**显式定位光标**，不能靠「写完文本光标自然落在末尾」：
-      * ``row_text`` 会去掉行尾空白（shell 提示符 ``"$ "`` 变成 ``"$"``），
-        写完光标会比原位少若干列 —— 这正是「光标少一位」的来源；
-      * 光标可能位于文本中间；
-      * 含宽字符时字符数与显示列数不等，无法用长度推算列坐标。
-    """
-    cur = screen.cursor
-    console.write(b"\x1b[2K\r" + screen.row_text(cur.y).encode())
-    console.write(f"\x1b[{cur.y + 1};{cur.x + 1}H".encode())
-
-
-def full_redraw(screen, console: Console) -> None:
-    """从屏幕模型重绘内容区（含颜色），并定位光标。
-
-    用于覆盖模式（line/prompt 的 read_line 占用了屏幕）退出后恢复画面。
-    与重放 raw 相比：结果确定、不受截断影响、能精确还原全屏应用（vim/less）的画面。
-
-    起点取**第一个非空行**而非屏幕顶行：模型顶部可能因启动对齐而留有空行，
-    若从顶行开始画，会把下方的内容整体上移到屏幕顶部（表现为光标跳到顶行），
-    用户原本位于底部的画面就被搬走了。从内容起始行画、只清到屏幕末尾，
-    则内容留在原处，上方未受影响的画面也不会被擦掉。
-    """
-    top = content_start(screen)
-    rows = screen.rows
-    # 定位到内容起始行并清除其下所有内容（不清上方，避免破坏未参与建模的画面）
-    out: list[str] = [f"\x1b[{top + 1};1H\x1b[0J"]
-    for row in range(top, rows):
-        out.append(render_row_cells(screen.row_cells(row)))
-        if row < rows - 1:
-            out.append("\r\n")
-    cur = screen.cursor
-    # 隐藏光标时保持隐藏，否则定位并显示
-    if cur.hidden:
-        out.append("\x1b[?25l")
-    else:
-        out.append(f"\x1b[{cur.y + 1};{cur.x + 1}H\x1b[?25h")
-    console.write("".join(out).encode())
 
 
 def print_screen_perfect(

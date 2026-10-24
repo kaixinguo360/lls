@@ -10,13 +10,15 @@ pyte 的两个关键限制（本适配器必须自己解决）：
    —— 因此这里为每张屏各建一个 ``ByteStream``，并且**在 feed 时按开关序列拆分
    字节块**：开关可能和后续内容在同一个块里，必须在正确的边界切换。
 
-实测结论（pyte 0.8.x）：
+pyte 的行为约定（本适配器依赖这些事实，版本 0.8.x）：
 
 * ``ByteStream`` 自带增量 UTF-8 解码，跨块安全；宽字符光标推进正确。
 * ``?25l`` 已建模（``cursor.hidden``）。
 * ``display`` 每行补空格到 columns —— 取文本必须 ``rstrip()``。
 * ``resize(lines, columns)`` 参数顺序与构造函数相反。
 * ``dirty`` 是可消费的 ``set``，``clear()`` 即清空。
+* ``HistoryScreen`` 在 ``__getattribute__`` 里包裹每个事件，而 ``draw()`` 每写一个
+  字符都要访问多个属性，开销接近翻倍。回滚区因此由 ``_Screen`` 自行记录。
 """
 
 from __future__ import annotations
@@ -42,9 +44,8 @@ class _Screen(pyte.Screen):
 
     不用 ``pyte.HistoryScreen``：它在 ``__getattribute__`` 里拦截**每一次**
     属性访问，而 ``draw()`` 每写一个字符都要访问 ``buffer`` / ``cursor`` /
-    ``columns``。实测 10 帧整屏重绘触发 97349 次拦截，占 ``feed()`` 总耗时
-    的 56%，让每次整屏重绘从 10ms 涨到 23ms —— 全屏程序连续重绘时，
-    这些毫秒累积成肉眼可见的卡顿。
+    ``columns``。整屏重绘会把开销推到 ``feed()`` 的一半以上，让每次整屏重绘
+    从约 10ms 涨到 23ms —— 全屏程序连续重绘时，这些毫秒累积成肉眼可见的卡顿。
 
     这里只在**真正发生滚动**时（``index()`` 把顶行挤出去）记一行文本，
     其余路径与普通 ``Screen`` 完全一致。
