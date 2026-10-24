@@ -290,15 +290,18 @@ def _reply_rows(text: str, columns: int) -> List[str]:
     """把标签和答复拼在一起后再按终端宽度折行。
 
     续行不再缩进：悬挂缩进会白占一大块列宽（答复一半以上都是缩进就太亏了）。
+    首尾换行与空行一律丢掉：模型常在答复末尾补一个换行，保留下来就会多出
+    一条空行；空行还会挤占只有几行的显示预算。
     """
     clean = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
+    clean = clean.strip("\n")
     wrapped, _ = wrap_multi_lines(
         REPLY_PREFIX + clean,
         max(1, columns),
         end="\n",
         measure=conservative_char_width,
     )
-    rows = wrapped.split("\n")
+    rows = [row for row in wrapped.split("\n") if row.strip()]
     if len(rows) > REPLY_LINES:
         rows = rows[:REPLY_LINES]
         # " …" 本身占 3 列（空格 + 保守宽度两列的省略号）
@@ -692,7 +695,7 @@ class _Session:
             rows = rows[-limit:]
         if not rows:
             return INPUT_PROMPT
-        return "\n".join(rows) + "\n\n" + INPUT_PROMPT
+        return "\n".join(rows) + "\n" + INPUT_PROMPT
 
 
 # ---- 命令 ----

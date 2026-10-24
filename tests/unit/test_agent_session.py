@@ -403,6 +403,23 @@ def test_reply_rows_wrap_with_the_prefix_and_without_hanging_indent() -> None:
     assert len(rows) <= agent_cmd.REPLY_LINES
 
 
+def test_reply_rows_drop_blank_lines() -> None:
+    """模型答复里的空行不显示，也不占那几行预算。"""
+    rows = agent_cmd._reply_rows("一\n\n二\n", 80)
+
+    assert rows == ["(agent-reply) 一", "二"]
+
+
+def test_prompt_has_no_blank_line_before_the_input() -> None:
+    services = FakeServices([])
+    session = agent_cmd._Session(services, ScriptedProvider([]), "m")
+    session._log = [("任务", "答复", "")]
+
+    assert session._prompt_text() == (
+        "(agent) 任务\n(agent-reply) 答复\n(agent): "
+    )
+
+
 # ---- 思考预览：始终显示最新一段 ----
 
 
