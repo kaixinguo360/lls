@@ -128,12 +128,16 @@ async def _exec_flow(
 ) -> CommandResult:
     """exec / input 的共同流程（对照 legacy cmd_exec_handler + cmd_exec/cmd_input）。
 
-    * exec ：``(cmd): ``，history_id='cmd'，无条件存历史（instruct 为 None 时用
-      '继续' 兜底），写 shell 时**加换行**，执行完用 show_screen 展示结果；
-    * input：``(input): ``，history_id='cmd_input'，**不存历史**，**不加换行**，
-      执行完用 restore_context 原地恢复画面。
+    两者的差异只在写入语义：
 
-    两者都保持 line 模式（回到 ':' 继续输入），且只写一次字节。
+    * exec ：``(cmd): ``，history_id='cmd'，无条件存历史（instruct 为 None 时用
+      '继续' 兜底），写 shell 时**加换行**；
+    * input：``(input): ``，history_id='cmd_input'，**不存历史**，**不加换行**。
+
+    恢复画面统一走 ``restore_context``：它按「模型是否已领先于物理终端」决定
+    单行恢复还是整屏重绘 —— 命令有输出就整屏重绘（结果自然呈现），无输出就
+    原地恢复（如 ``cd``，与真实终端一致）。不再对 exec 单独用 show_screen：
+    那是带边框与状态行的调试视图，会盖住命令输出本身。
     """
     prompt = "cmd" if enter else "input"
     history_id = "cmd" if enter else "cmd_input"
@@ -163,10 +167,7 @@ async def _exec_flow(
             ctx.session.append(instruct or "继续", ctx.make_context(), line)
         ctx.io.write(line.encode(), enter=enter)
         await asyncio.sleep(0.1)
-        if enter:
-            ctx.ui.show_screen()
-        else:
-            ctx.ui.restore_context()
+        ctx.ui.restore_context()
     return CommandResult()
 
 
