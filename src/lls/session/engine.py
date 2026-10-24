@@ -734,11 +734,14 @@ class Engine:
         exit: str | None = None,
         history_id: str = "_default",
         escape: Any = None,
+        keep_history: bool = True,
     ) -> Any:
         """读一行输入，完整行编辑。
 
         返回：输入内容；Ctrl-C → ``cancel``；Ctrl-D → ``exit``；
         Esc 且 ``escape`` 非 None → ``escape``；子进程退出 → None。
+
+        ``keep_history`` 为 False 时，这一行不进入该 ``history_id`` 的历史。
         """
         editor = self._editors.get(history_id)
         if editor is None:
@@ -791,7 +794,7 @@ class Engine:
                             line += "\x04"
                         return line
                     if key.control == "enter":
-                        return editor.submit()
+                        return editor.submit(keep=keep_history)
                     return escape  # Esc
                 if key.control == "backspace":
                     editor.backspace()
@@ -828,6 +831,18 @@ class Engine:
         finally:
             # 覆盖层不再显示，后续输出无需再绕过它。
             self._active_prompt = None
+
+    def record_history(self, value: str, history_id: str) -> None:
+        """把一条内容记入某 ``history_id`` 的历史，供之后用 ↑ 召回。
+
+        只写历史，不改变当前编辑状态。给那些不是经提示行输入、却需要事后
+        召回的内容使用。
+        """
+        editor = self._editors.get(history_id)
+        if editor is None:
+            editor = LineEditor()
+            self._editors[history_id] = editor
+        editor.record(value)
 
     def requeue_pending_keys(self) -> None:
         """把尚在键缓冲里的按键回填到输入队列。

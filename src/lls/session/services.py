@@ -94,11 +94,14 @@ class Services:
         exit: str | None = None,
         history_id: str = "_default",
         escape: Any = None,
+        keep_history: bool = True,
     ) -> Any:
         """读一行（完整行编辑）。
 
         返回：输入内容；Ctrl-C → ``cancel``；Ctrl-D → ``exit``；
         Esc 且 ``escape`` 非 None → ``escape``；子进程退出 → None。
+
+        ``keep_history`` 为 False 时该行不进入此 ``history_id`` 的历史。
         """
         return await self._engine.read_line(
             prompt,
@@ -108,6 +111,7 @@ class Services:
             exit=exit,
             history_id=history_id,
             escape=escape,
+            keep_history=keep_history,
         )
 
     def push_keys(self, data: bytes) -> None:
@@ -131,6 +135,16 @@ class Services:
         已同步时是空操作。
         """
         self._engine.flush_backlog()
+
+    # ---- 历史 ----
+
+    def record_history(self, value: str, history_id: str) -> None:
+        """把一条内容记入某 ``history_id`` 的历史，供之后用 ↑ 召回。
+
+        用于那些**不是用户敲进提示行**、但事后需要召回的内容（例如 generate
+        产出的命令）。不改变任何编辑状态。
+        """
+        self._engine.record_history(value, history_id)
 
     # ---- 处理器切换 ----
 

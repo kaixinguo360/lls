@@ -1,0 +1,140 @@
+"""OpenAI 兼容 provider。
+
+走标准 ``/v1/chat/completions``。只做协议转发：``Message`` 列表变请求，
+流式 delta 变 ``Chunk``；工具调用按 index 归并成完整的 ``ToolCall``。
+不做提示词拼接、不做输出清洗。
+"""
+
+from __future__ import annotations
+
+from typing import Any, AsyncIterator, Dict, Optional, Sequence
+
+from ..types import Chunk, ChunkKind, Message, ProviderConfig, Tool, ToolCall
+
+__all__ = ["OpenAIProvider", "ProviderError"]
+
+
+class ProviderError(Exception):
+    """调用后端失败。"""
+
+
+class OpenAIProvider:
+    """基于 openai SDK 的流式实现。"""
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self.id = config.id
+        self._config = config
+
+    # ---- 内部 ----
+
+    def _client(self) -> Any:
+        api_key = self._config.api_key
+        if not api_key:
+            raise ProviderError(
+                "provider %r has no api_key" % self.id
+            )
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as e:  # pragma: no cover - 依赖可选
+            raise ProviderError(
+                "openai package is required: pip install 'lls[ai]'"
+            ) from e
+        kwargs = {"api_key": api_key, "timeout": self._config.timeout}  # type: Dict[str, Any]
+        if self._config.base_url:
+            kwargs["base_url"] = self._config.base_url
+        if self._config.headers:
+            kwargs["default_headers"] = dict(self._config.headers)
+        return AsyncOpenAI(**kwargs)
+
+    # ---- 协议 ----
+
+    async def chat(
+        self,
+        model: str,
+        messages: Sequence[Message],
+        *,
+        tools: Optional[Sequence[Tool]] = None,
+        tool_choice: Optional[Any] = None,
+        parallel_tool_calls: Optional[bool] = None,
+        **params: Any,
+    ) -> AsyncIterator[Chunk]:
+        client = self._client()
+        payload = [m.to_payload() for m in messages]
+
+        merged = dict(self._config.params)  # type: Dict[str, Any]
+        merged.update(params)
+        merged["stream"] = True
+        if tools:
+            merged["tools"] = [tool.to_payload() for tool in tools]
+        if tool_choice is not None:
+            merged["tool_choice"] = tool_choice
+        if parallel_tool_calls is not None:
+            merged["parallel_tool_calls"] = parallel_tool_calls
+
+        # index -> 累积中的调用。id/name 通常只在首片出现，arguments 逐片拼接。
+        pending = {}  # type: Dict[int, Dict[str, str]]
+
+        try:
+            response = await client.chat.completions.create(
+                model=model, messages=payload, **merged
+            )
+            async for piece in response:
+                delta = self._delta(piece)
+                if delta is None:
+                    continue
+                text = getattr(delta, "content", None)
+                if text:
+                    yield Chunk(ChunkKind.TEXT, text)
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    yield Chunk(ChunkKind.REASONING, reasoning)
+                self._merge(pending, getattr(delta, "tool_calls", None))
+        except ProviderError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise ProviderError(str(e)) from e
+
+        for index in sorted(pending):
+            slot = pending[index]
+            if not slot["name"]:
+                continue
+            yield Chunk(
+                ChunkKind.TOOL_CALL,
+                call=ToolCall(
+                    id=slot["id"] or "call_%d" % index,
+                    name=slot["name"],
+                    arguments=slot["arguments"],
+                ),
+            )
+
+        yield Chunk(ChunkKind.DONE)
+
+    # ---- 辅助 ----
+
+    @staticmethod
+    def _delta(piece: Any) -> Any:
+        choices = getattr(piece, "choices", None)
+        if not choices:
+            return None
+        return getattr(choices[0], "delta", None)
+
+    @staticmethod
+    def _merge(pending: Dict[int, Dict[str, str]], fragments: Any) -> None:
+        """把分片工具调用按 index 归并。"""
+        for fragment in fragments or ():
+            index = getattr(fragment, "index", 0) or 0
+            slot = pending.setdefault(
+                index, {"id": "", "name": "", "arguments": ""}
+            )
+            call_id = getattr(fragment, "id", None)
+            if call_id:
+                slot["id"] = call_id
+            function = getattr(fragment, "function", None)
+            if function is None:
+                continue
+            name = getattr(function, "name", None)
+            if name:
+                slot["name"] += name
+            arguments = getattr(function, "arguments", None)
+            if arguments:
+                slot["arguments"] += arguments

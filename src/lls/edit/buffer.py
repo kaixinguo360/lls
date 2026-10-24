@@ -140,10 +140,14 @@ class LineEditor:
 
     # ---- 提交 ----
 
-    def submit(self) -> str:
-        """提交当前行：返回内容，加入历史（连续相同去重）。"""
+    def submit(self, *, keep: bool = True) -> str:
+        """提交当前行：返回内容，默认加入历史（连续相同去重）。
+
+        ``keep`` 为 False 时不进历史 —— 供「只是选一个键」的提示使用，
+        这类输入事后没有召回价值，留在历史里只会污染 ↑。
+        """
         text = self._text
-        if text and (not self._history or self._history[-1] != text):
+        if keep and text and (not self._history or self._history[-1] != text):
             self._history.append(text)
         return text
 
