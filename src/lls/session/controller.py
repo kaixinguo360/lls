@@ -123,6 +123,14 @@ class Controller:
         # 覆盖模式（line）期间子进程是否有输出 —— 有输出即表示屏幕模型已领先于
         # 物理终端（因为 line 模式不透传），退出时必须整屏重绘而非单行恢复。
         self._model_changed_in_overlay = False
+        # 当前正在显示的提示符状态：(prompt, 文本, 光标, lines_all, lines_cur)。
+        # line 模式下若子进程有输出，据此把提示符临时移开、写输出、再画回来，
+        # 使输出能够实时可见（类似 tmux 里命令行固定在底部、上方内容持续更新）。
+        self._active_prompt: tuple[str, str, int, int, int] | None = None
+        # 消息展示期间暂停透传：否则后台输出会把消息冲乱。
+        # 期间收到的输出仍进屏幕模型，展示结束后按需重绘补齐。
+        self._suppress_passthrough = False
+        self._output_during_message = False
         self._services = _Services(self)
 
     # ---- 主入口 ----
@@ -224,12 +232,44 @@ class Controller:
             return
         self._record_raw(data)
         self._screen.feed(data)
-        if self._mode != "line" and self._console is not None:
-            # char / prompt 模式透传（legacy read_stdout: mode != 'line'）
+        if self._console is None:
+            return
+        if self._mode != "line":
+            # char / prompt 模式直接透传（legacy read_stdout: mode != 'line'）
             self._console.write(data)
-        elif self._mode == "line":
-            # line 模式不透传：模型已领先物理终端，标记脱节，退出时需整屏重绘。
+        else:
+            # line 模式：把提示符移开、写入输出、再把提示符画回来，
+            # 使子进程输出在编辑命令期间仍然实时可见。
+            if self._suppress_passthrough:
+                # 消息展示期间不写入，避免冲乱消息；内容已进模型，稍后重绘补齐。
+                self._output_during_message = True
+            else:
+                self._write_around_prompt(data)
+            # 输出改变了模型与终端的一致性，退出覆盖模式时以整屏重绘保证画面正确。
             self._model_changed_in_overlay = True
+
+    def _write_around_prompt(self, data: bytes) -> None:
+        """在提示符存在的情况下写子进程输出。
+
+        做法（与 tmux 底部命令行的效果一致）：先清除提示符占用的行，让光标回到
+        提示符起始位置；把子进程输出原样写入（由子进程决定光标最终位置）；再在
+        新位置重新绘制提示符。这样用户既能看见输出，也能继续编辑已输入的内容。
+
+        没有活跃提示符时（如 exec/input 正在写子进程、或消息展示中）直接透传。
+        """
+        assert self._console is not None and self._printer is not None
+        active = self._active_prompt
+        if active is None:
+            self._console.write(data)
+            return
+        prompt, text, cursor, lines_all, lines_cur = active
+        self._printer.clear_lines(lines_all, lines_cur)
+        self._console.write(data)
+        # 输出可能改变终端光标位置，重画后按新的行数重新记录
+        new_all, new_cur = self._printer.print_lines(
+            prompt + text, cursor, self._screen.columns
+        )
+        self._active_prompt = (prompt, text, cursor, new_all, new_cur)
 
     def _on_stdin_readable(self) -> None:
         if self._exit_event.is_set():
@@ -358,6 +398,9 @@ class Controller:
 
         精确还原 legacy show_line = read_line(msg, max_chars=1, backspace='b')：
         读任意一个键即返回（不等回车），清除显示，绝不改变 mode。
+
+        展示期间暂停透传子进程输出，否则后台输出会把消息冲乱；期间到达的输出
+        仍写入屏幕模型，展示结束后若确有输出则重绘一次补齐。
         """
         assert self._printer is not None
         # print_lines 返回的 lines_all 是多行文本的真实行数（如 ls 的 3 行），
@@ -365,8 +408,16 @@ class Controller:
         lines_all, lines_cur = self._printer.print_lines(
             text, None, self._screen.columns
         )
-        await self._next_key()
-        self._printer.clear_lines(lines_all, lines_cur)
+        self._suppress_passthrough = True
+        self._output_during_message = False
+        try:
+            await self._next_key()
+        finally:
+            self._suppress_passthrough = False
+            self._printer.clear_lines(lines_all, lines_cur)
+        if self._output_during_message:
+            self._output_during_message = False
+            self._print_context()
 
     # ---- 模式 ----
 
@@ -634,51 +685,71 @@ class Controller:
         lines_all, lines_cur = self._printer.print_lines(
             prompt + editor.text, len(prompt) + editor.cursor, width
         )
-        while True:
-            key = await self._next_key()
-            if key is None:
-                return None
-            if key.control == "ctrl_c":
-                if cancel is not None:
-                    return cancel
-                line = editor.text
-                if include_last:
-                    line += "\x03"
-                return line
-            if key.control == "ctrl_d":
-                if exit is not None or cancel is not None:
-                    return exit if exit is not None else cancel
-                line = editor.text
-                if include_last:
-                    line += "\x04"
-                return line
-            if key.control == "enter":
+        # 暴露当前提示符状态：line 模式下子进程输出到来时据此移开/重画提示符。
+        self._active_prompt = (
+            prompt,
+            editor.text,
+            len(prompt) + editor.cursor,
+            lines_all,
+            lines_cur,
+        )
+        try:
+            while True:
+                key = await self._next_key()
+                if key is None:
+                    return None
+                if key.control == "ctrl_c":
+                    if cancel is not None:
+                        return cancel
+                    line = editor.text
+                    if include_last:
+                        line += "\x03"
+                    return line
+                if key.control == "ctrl_d":
+                    if exit is not None or cancel is not None:
+                        return exit if exit is not None else cancel
+                    line = editor.text
+                    if include_last:
+                        line += "\x04"
+                    return line
+                if key.control == "enter":
+                    self._printer.clear_lines(lines_all, lines_cur)
+                    return editor.submit()
+                if key.control == "backspace":
+                    editor.backspace()
+                elif key.control == "delete":
+                    editor.delete()
+                elif key.control == "left":
+                    editor.left()
+                elif key.control == "right":
+                    editor.right()
+                elif key.control == "home":
+                    editor.home()
+                elif key.control == "end":
+                    editor.end()
+                elif key.control == "up":
+                    editor.history_up()
+                elif key.control == "down":
+                    editor.history_down()
+                elif key.control in ("escape", "tab", "unknown"):
+                    pass
+                elif key.char:
+                    editor.insert(key.char)
                 self._printer.clear_lines(lines_all, lines_cur)
-                return editor.submit()
-            if key.control == "backspace":
-                editor.backspace()
-            elif key.control == "delete":
-                editor.delete()
-            elif key.control == "left":
-                editor.left()
-            elif key.control == "right":
-                editor.right()
-            elif key.control == "home":
-                editor.home()
-            elif key.control == "end":
-                editor.end()
-            elif key.control == "up":
-                editor.history_up()
-            elif key.control == "down":
-                editor.history_down()
-            elif key.control in ("escape", "tab", "unknown"):
-                pass
-            elif key.char:
-                editor.insert(key.char)
-            self._printer.clear_lines(lines_all, lines_cur)
-            lines_all, lines_cur = self._printer.print_lines(
-                prompt + editor.text, len(prompt) + editor.cursor, width
-            )
+                lines_all, lines_cur = self._printer.print_lines(
+                    prompt + editor.text, len(prompt) + editor.cursor, width
+                )
+                self._active_prompt = (
+                    prompt,
+                    editor.text,
+                    len(prompt) + editor.cursor,
+                    lines_all,
+                    lines_cur,
+                )
+        finally:
+            # 提示符已不在显示（enter 已清除，其余路径由调用方处理），
+            # 之后的输出不再需要绕过它。
+            self._active_prompt = None
 
     async def _print(
         self,
