@@ -1,14 +1,14 @@
-"""命令分发。
+﻿"""命令分发。
 
 命令自己完成全部行为，返回值只承载「命令自己做不了」的事
-（模式切换 / 退出），见 :class:`~lls.session.result.CommandResult`。
+（模式切换 / 退出），见 :class:`~lls.commands.result.CommandResult`。
 """
 
 from __future__ import annotations
 
 from .context import CommandContext
 from .spec import all_commands, get_command
-from lls.session.result import CommandResult
+from lls.commands.result import CommandResult
 
 __all__ = ["command_help", "execute_command"]
 

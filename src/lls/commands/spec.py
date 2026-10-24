@@ -1,4 +1,4 @@
-"""命令规格与注册装饰器。"""
+﻿"""命令规格与注册装饰器。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from .context import CommandContext
-from lls.session.result import CommandResult
+from lls.commands.result import CommandResult
 
 __all__ = ["CommandSpec", "command"]
 

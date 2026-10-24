@@ -6,7 +6,7 @@
   取得自己的控制终端（作业控制、SIGWINCH、Ctrl-C 都依赖它）；
 * ``open_console`` 把宿主终端切成 raw 模式；
 * ``_PosixPtySession.resize`` 把宿主尺寸变化转给子进程的 PTY；
-  SIGWINCH 本身由 ``session.controller`` 监听，不在本模块。
+  SIGWINCH 本身由 ``session.engine`` 监听，不在本模块。
 
 绝不 import 任何 ui / commands / ai / term 模块，保持平台层纯净。
 """

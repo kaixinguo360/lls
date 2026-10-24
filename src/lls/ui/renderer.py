@@ -233,7 +233,7 @@ def render_row_cells(cells) -> str:
 def content_start(screen) -> int:
     """第一个非空行的下标；全空时返回光标所在行。
 
-    模型顶部可能有一段空行（见 ``Controller`` 启动时对物理光标位置的对齐），
+    模型顶部可能有一段空行（见 ``session.engine`` 启动时对物理光标位置的对齐），
     这些空行**不是**要显示的内容，重绘时不应把它们搬到屏幕顶部。
     """
     rows = screen.rows
@@ -279,7 +279,7 @@ def print_screen_perfect(
     y_end = content_lines if content_lines > height else height
     y_begin = content_lines - height if content_lines > height else 0
 
-    # 跳过开头的空行：模型顶部可能因启动对齐（见 Controller 的光标对齐）留空，
+    # 跳过开头的空行：模型顶部可能因启动对齐（见 session.engine 的光标对齐）留空，
     # 那些行代表「模型未建模的历史画面」，不是内容，显示视图里不应占位。
     first = 0
     while first < content_lines - 1 and lines[first].strip() == "":
