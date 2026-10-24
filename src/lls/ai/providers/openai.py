@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Dict, Optional, Sequence
+from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
 from ..types import Chunk, ChunkKind, Message, ProviderConfig, Tool, ToolCall
 
@@ -54,30 +54,18 @@ class OpenAIProvider:
         messages: Sequence[Message],
         *,
         tools: Optional[Sequence[Tool]] = None,
-        tool_choice: Optional[Any] = None,
         parallel_tool_calls: Optional[bool] = None,
         **params: Any,
     ) -> AsyncIterator[Chunk]:
         client = self._client()
         payload = [m.to_payload() for m in messages]
-
-        merged = dict(self._config.params)  # type: Dict[str, Any]
-        merged.update(params)
-        merged["stream"] = True
-        if tools:
-            merged["tools"] = [tool.to_payload() for tool in tools]
-        if tool_choice is not None:
-            merged["tool_choice"] = tool_choice
-        if parallel_tool_calls is not None:
-            merged["parallel_tool_calls"] = parallel_tool_calls
+        body = self._request_body(model, payload, tools, parallel_tool_calls, params)
 
         # index -> 累积中的调用。id/name 通常只在首片出现，arguments 逐片拼接。
         pending = {}  # type: Dict[int, Dict[str, str]]
 
         try:
-            response = await client.chat.completions.create(
-                model=model, messages=payload, **merged
-            )
+            response = await client.chat.completions.create(**body)
             async for piece in response:
                 delta = self._delta(piece)
                 if delta is None:
@@ -110,6 +98,27 @@ class OpenAIProvider:
         yield Chunk(ChunkKind.DONE)
 
     # ---- 辅助 ----
+
+    def _request_body(
+        self,
+        model: str,
+        payload: List[Dict[str, Any]],
+        tools: Optional[Sequence[Tool]],
+        parallel_tool_calls: Optional[bool],
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """拼出请求体。"""
+        body = dict(self._config.params)  # type: Dict[str, Any]
+        body.update(params)
+        body["model"] = model
+        body["messages"] = payload
+        body["stream"] = True
+
+        if tools:
+            body["tools"] = [tool.to_payload() for tool in tools]
+        if parallel_tool_calls is not None:
+            body["parallel_tool_calls"] = parallel_tool_calls
+        return body
 
     @staticmethod
     def _delta(piece: Any) -> Any:

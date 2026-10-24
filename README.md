@@ -63,6 +63,13 @@ ai:
 `default_model` 用 `provider_id/model_id` 寻址，模型名本身可含斜杠
 （只按第一个斜杠切分）。用 `pip install 'lls[ai]'` 装 `openai` 依赖。
 
+`params` 里的键会原样进请求体（`temperature` 之类）：
+
+```yaml
+      params:
+        temperature: 0.2
+```
+
 ## 开发
 
 ```bash

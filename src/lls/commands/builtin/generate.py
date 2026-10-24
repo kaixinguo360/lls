@@ -1,8 +1,8 @@
 """generate —— 由「终端状态 + 请求」产出一段待发送给子进程的输入。
 
-生成走标准 OpenAI function calling：强制模型调用 ``emit_input``，从其
-``arguments`` 取 payload。结构化的输出通道让 payload 与散文、代码围栏天然
-隔离，因此不需要任何输出后处理。
+生成走标准 OpenAI function calling：模型调用 ``emit_input``，从其 ``arguments``
+取 payload。结构化的输出通道让 payload 与散文、代码围栏天然隔离，因此不需要
+任何输出后处理。
 """
 
 from __future__ import annotations
@@ -60,8 +60,6 @@ EMIT_TOOL = Tool(
     },
     strict=True,
 )
-
-FORCE_EMIT = {"type": "function", "function": {"name": EMIT_TOOL.name}}
 
 
 # ---- 消息构造 ----
@@ -140,7 +138,6 @@ async def _stream_payload(s: Services, request: str, screen: str) -> str:
             model,
             messages,
             tools=[EMIT_TOOL],
-            tool_choice=FORCE_EMIT,
             parallel_tool_calls=False,
         ):
             if chunk.kind is ChunkKind.TOOL_CALL:

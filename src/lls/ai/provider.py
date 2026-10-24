@@ -27,7 +27,6 @@ class Provider(Protocol):
         messages: Sequence[Message],
         *,
         tools: Optional[Sequence[Tool]] = None,
-        tool_choice: Optional[Any] = None,
         parallel_tool_calls: Optional[bool] = None,
         **params: Any,
     ) -> AsyncIterator[Chunk]:

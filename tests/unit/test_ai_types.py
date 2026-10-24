@@ -10,8 +10,50 @@ from types import SimpleNamespace
 
 import pytest
 
-from lls.ai import Chunk, ChunkKind, Message, Tool, ToolCall
+from lls.ai import Chunk, ChunkKind, Message, ProviderConfig, Tool, ToolCall
 from lls.ai.providers.openai import OpenAIProvider
+
+
+# ---- 请求体 ----
+
+
+def _provider(**kwargs) -> OpenAIProvider:
+    config = ProviderConfig(id="p", type="openai", api_key="k", **kwargs)
+    return OpenAIProvider(config)
+
+
+def _body(provider: OpenAIProvider):
+    return provider._request_body(
+        "gpt-4o-mini",
+        [Message("user", "hi").to_payload()],
+        [Tool(name="emit_input", parameters={"type": "object"})],
+        False,
+        {},
+    )
+
+
+def test_request_body_streams_and_carries_tools() -> None:
+    body = _body(_provider())
+
+    assert body["stream"] is True
+    assert body["model"] == "gpt-4o-mini"
+    assert body["tools"][0]["function"]["name"] == "emit_input"
+    assert body["parallel_tool_calls"] is False
+
+
+def test_params_are_passed_through() -> None:
+    body = _body(_provider(params={"temperature": 0.1}))
+
+    assert body["temperature"] == 0.1
+
+
+def test_parallel_tool_calls_is_omitted_when_unset() -> None:
+    body = _provider()._request_body(
+        "m", [Message("user", "hi").to_payload()], None, None, {}
+    )
+
+    assert "parallel_tool_calls" not in body
+    assert "tools" not in body
 
 
 # ---- Tool ----
