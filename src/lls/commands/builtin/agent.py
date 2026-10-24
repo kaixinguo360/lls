@@ -60,8 +60,8 @@ READ_QUIET = 0.25         # 画面多久不变算静默
 MAX_WAIT = 60.0           # read_terminal 的 wait_seconds 上限
 PAINT_INTERVAL = 0.1      # 状态覆盖层刷新间隔
 LOG_ENTRIES = 2           # 会话提示里显示最近几条
-LOG_LINES = 12            # 会话提示里日志最多几行
-REPLY_LINES = 4           # 每条答复最多显示几行
+LOG_LINES = 16            # 会话提示里日志最多几行
+REPLY_LINES = 6           # 每条答复最多显示几行
 REPEAT_REMIND_AT = 3      # 连续相同调用第几次开始提醒
 
 INPUT_PROMPT = "(agent): "
@@ -304,11 +304,13 @@ def _reply_rows(text: str, columns: int) -> List[str]:
     rows = [row for row in wrapped.split("\n") if row.strip()]
     if len(rows) > REPLY_LINES:
         rows = rows[:REPLY_LINES]
-        # " …" 本身占 3 列（空格 + 保守宽度两列的省略号）
-        if columns >= 4:
-            rows[-1] = _clip(rows[-1], columns - 3) + " …"
-        else:
-            rows[-1] = _clip(rows[-1], columns)
+        # 末行必须明确「后面还有」，但 _clip 自己就会补省略号，
+        # 直接再拼一个就成了「… …」。故先截到留出 " …"（3 列）的宽度，
+        # 去掉 _clip 补的那个省略号，再统一收尾。
+        last = _clip(rows[-1], max(1, columns - 3))
+        if last.endswith("…"):
+            last = last[:-1]
+        rows[-1] = last + " …" if columns >= 4 else _clip(rows[-1], columns)
     return rows
 
 
