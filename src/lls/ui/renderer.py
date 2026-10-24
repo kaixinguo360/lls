@@ -24,6 +24,7 @@ __all__ = [
     "print_lines",
     "print_screen_perfect",
     "render_row_cells",
+    "restore_line",
     "wrap_multi_lines",
 ]
 
@@ -221,6 +222,22 @@ def content_start(screen) -> int:
         if screen.row_text(row).strip():
             return row
     return min(screen.cursor.y, rows - 1)
+
+
+def restore_line(screen, console: Console) -> None:
+    """恢复被覆盖模式占用的**单行**（轻量恢复，不清屏）。
+
+    前提：物理终端上只有光标所在行被 ``read_line`` 覆盖过，其余画面未受影响。
+
+    必须**显式定位光标**，不能靠「写完文本光标自然落在末尾」：
+      * ``row_text`` 会去掉行尾空白（shell 提示符 ``"$ "`` 变成 ``"$"``），
+        写完光标会比原位少若干列 —— 这正是「光标少一位」的来源；
+      * 光标可能位于文本中间；
+      * 含宽字符时字符数与显示列数不等，无法用长度推算列坐标。
+    """
+    cur = screen.cursor
+    console.write(b"\x1b[2K\r" + screen.row_text(cur.y).encode())
+    console.write(f"\x1b[{cur.y + 1};{cur.x + 1}H".encode())
 
 
 def full_redraw(screen, console: Console) -> None:

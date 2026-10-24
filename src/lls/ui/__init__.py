@@ -7,6 +7,7 @@ from .renderer import (
     full_redraw,
     print_screen_perfect,
     render_row_cells,
+    restore_line,
     wrap_multi_lines,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "full_redraw",
     "print_screen_perfect",
     "render_row_cells",
+    "restore_line",
     "wrap_multi_lines",
 ]

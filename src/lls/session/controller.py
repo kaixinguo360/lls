@@ -40,7 +40,7 @@ from lls.commands import CommandContext, execute_command
 from lls.edit import LineEditor
 from lls.term import ScreenModel
 from lls.tty import Console, Key, KeyParser, TerminalBackend, Winsize
-from lls.ui import LinePrinter, full_redraw, print_screen_perfect
+from lls.ui import LinePrinter, full_redraw, print_screen_perfect, restore_line
 
 __all__ = ["Controller"]
 
@@ -394,9 +394,9 @@ class Controller:
             if self._model_changed_in_overlay:
                 full_redraw(self._screen, self._console)
             else:
-                # 未脱节：物理终端上只有光标所在行被 read_line 覆盖过，抹掉重写即可。
-                row = self._screen.cursor.y
-                self._console.write(b"\x1b[2K\r" + self._screen.row_text(row).encode())
+                # 未脱节：物理终端上只有光标所在行被 read_line 覆盖过，
+                # 抹掉重写该行即可（内部会显式定位光标，见 restore_line）。
+                restore_line(self._screen, self._console)
         finally:
             self._model_changed_in_overlay = False
 
