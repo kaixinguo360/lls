@@ -515,8 +515,19 @@ class Engine:
             self._pty.resize(size.lines, size.columns)
 
     def _on_sigchld(self) -> None:
+        """SIGCHLD：有子进程状态变化，但**未必**是 PTY 子进程。
+
+        本进程还会有别的子进程（例如 HTTP 客户端发请求时执行的 ``uname -p``
+        平台探测），它们退出同样会送来该信号。若不加区分地把任何 SIGCHLD 当成
+        「终端会话结束」，一次普通的外部命令退出就会让整个会话误判为终止 ——
+        正在读取输入的命令（如 ``generate``）会把它当成「用户中断」而静默放弃，
+        真正的原因反而被吞掉。
+
+        因此只有确认 PTY 子进程真的被 ``waitpid`` 回收，才算会话结束。
+        """
         self._reap()
-        self._on_child_exit()
+        if self._exit_status is not None:
+            self._on_child_exit()
 
     def _on_hangup(self) -> None:
         """SIGHUP：宿主断开（SSH 掉线、窗口关闭）。
