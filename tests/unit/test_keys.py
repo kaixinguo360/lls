@@ -1,9 +1,19 @@
-"""按键解析器单元测试。"""
+"""按键解析器单元测试。
+
+解析按 ECMA-48 / VT100 的转义序列语法实现，而非枚举常见序列。
+回归重点：终端应答（DSR/DA/DECRQM/OSC/…）绝不能漏成可见输入 ——
+曾因只认 ``R``/``c``/``n`` 三种终结符，导致 DECRQM 应答 ``ESC[?12;1$y``
+的残余 ``y`` 被插入 line 编辑器。
+"""
 
 from __future__ import annotations
 
+import pytest
+
 from lls.tty import KeyParser
 
+
+# ---- 可见字符与控制字符 ----
 
 def test_visible_chars() -> None:
     kp = KeyParser()
@@ -26,12 +36,6 @@ def test_ctrl_keys() -> None:
     assert [k.control for k in keys] == ["ctrl_e", "ctrl_g", "ctrl_c"]
 
 
-def test_arrow_keys() -> None:
-    kp = KeyParser()
-    keys = kp.feed(b"\x1b[A")
-    assert keys[0].control == "up"
-
-
 def test_utf8_split_across_feed() -> None:
     kp = KeyParser()
     b = "中".encode()
@@ -47,17 +51,79 @@ def test_no_key_dropped() -> None:
     assert keys[3].control == "enter"
 
 
-# ---- ESC 歧义：独立 Esc 键 vs 序列前缀 ----
-#
-# ESC 既可以是独立按键，也可以是方向键等序列的前缀（ESC [ A）。
-# 解析器先挂起，调用方超时后用 flush_escape 判定为独立 Esc。
+# ---- 方向键（CSI 与 SS3 两种编码）----
+
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        (b"\x1b[A", "up"),
+        (b"\x1b[B", "down"),
+        (b"\x1b[C", "right"),
+        (b"\x1b[D", "left"),
+        (b"\x1bOA", "up"),
+        (b"\x1bOB", "down"),
+        (b"\x1bOC", "right"),
+        (b"\x1bOD", "left"),
+        (b"\x1b[H", "home"),
+        (b"\x1b[1~", "home"),
+        (b"\x1b[F", "end"),
+        (b"\x1b[4~", "end"),
+        (b"\x1b[3~", "delete"),
+    ],
+)
+def test_known_keys(raw: bytes, want: str) -> None:
+    kp = KeyParser()
+    keys = kp.feed(raw)
+    assert len(keys) == 1
+    assert keys[0].control == want
+
+
+# ---- 终端应答：整段识别，零字符漏出 ----
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"\x1b[12;5R",                  # DSR 光标位置
+        b"\x1b[?12;5R",                 # DSR 带问号
+        b"\x1b[?1;2c",                  # DA1
+        b"\x1b[?6c",                    # DA1 VT102
+        b"\x1b[?62;22c",                # DA1 多参数
+        b"\x1b[>41;354;0c",             # DA2
+        b"\x1b[>0;10;1c",               # DA2 另一种
+        b"\x1b[?0u",                    # kitty 键盘协议
+        b"\x1b[?1u",
+        b"\x1b[?12;1$y",                # DECRQM 模式报告（曾漏出 y）
+        b"\x1b[8;24;80t",               # 窗口大小
+        b"\x1b[1 q",                    # 带中间字节
+        b"\x1bP>|XTerm(370)\x1b\\",     # DCS / XTVERSION
+        b"\x1b]0;my title\x07",         # OSC 标题（BEL 收尾）
+        b"\x1b]11;rgb:0000/0000/0000\x1b\\",  # OSC 背景色（ST 收尾）
+    ],
+)
+def test_terminal_responses_never_leak(raw: bytes) -> None:
+    """任何终端应答都必须整段识别，绝不产生可见字符。"""
+    kp = KeyParser()
+    keys = kp.feed(raw)
+    assert len(keys) == 1, f"{raw!r} 产生了 {keys}"
+    assert keys[0].control == "terminal_response", f"{raw!r} -> {keys[0]}"
+    assert keys[0].raw == raw
+    assert kp.pending_escape == b""
+
+
+def test_decrqm_specifically_does_not_leak_y() -> None:
+    """精确回归：``ESC[?12;1$y`` 曾在 ``$`` 处失败，残余 ``y`` 进了编辑器。"""
+    kp = KeyParser()
+    keys = kp.feed(b"\x1b[?12;1$y")
+    assert [k.control for k in keys] == ["terminal_response"]
+    assert all(k.char == "" for k in keys)
+
+
+# ---- ESC 歧义 ----
 
 def test_lone_escape_is_pending_then_flushed() -> None:
     kp = KeyParser()
-    # 单独 ESC：不能立刻产出按键（可能后面还跟着序列）
     assert kp.feed(b"\x1b") == []
     assert kp.pending_escape == b"\x1b"
-    # 超时后判定为独立 Esc
     key = kp.flush_escape()
     assert key is not None
     assert key.control == "escape"
@@ -71,20 +137,44 @@ def test_escape_sequence_not_flushed_as_escape() -> None:
     keys = kp.feed(b"[A")
     assert [k.control for k in keys] == ["up"]
     assert kp.pending_escape == b""
-    # 序列已消费，flush 不应再产出任何东西
     assert kp.flush_escape() is None
 
 
-def test_escape_then_regular_key() -> None:
-    """ESC 后面紧跟普通字符：ESC 作为独立键，字符照常解析。
+@pytest.mark.parametrize("raw", [b"\x1bx", b"\x1bq", b"\x1b7", b"\x1bc", b"\x1b="])
+def test_escape_then_char_keeps_both(raw: bytes) -> None:
+    """ESC 后紧跟可打印字符：判为「Esc 键 + 该字符」，两者都不丢。
 
-    回归：早期实现把两者拼成 ``ESC x`` 判为 unknown 并整体丢弃，
-    导致用户按 Esc 退出后立刻敲的字符一起消失。
+    这些字节序列也可能是控制序列（如 ``ESC 7`` = DECSC），
+    但它们只出现在程序**输出**中；输入流里的 ``ESC 7`` 只能是
+    用户按了 Esc 再打 7，因此按「Esc + 字符」处理（readline 的语义）。
     """
     kp = KeyParser()
-    assert kp.feed(b"\x1b") == []
-    keys = kp.feed(b"x")
-    assert len(keys) == 2
+    keys = kp.feed(raw)
     assert keys[0].control == "escape"
-    assert keys[1].char == "x"
+    assert keys[1].char == chr(raw[1])
     assert kp.pending_escape == b""
+
+
+# ---- 跨块切分一致性 ----
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"\x1b[12;5R",
+        b"\x1b[?12;1$y",
+        b"\x1b]0;t\x07",
+        b"\x1b]11;rgb:1/1/1\x1b\\",
+        b"\x1b[A",
+        b"\x1bOA",
+        b"\x1b[3~",
+        b"\x1b[1 q",
+    ],
+)
+def test_any_split_point_gives_same_result(raw: bytes) -> None:
+    """字节在任意位置被切断，解析结果都必须一致。"""
+    results = set()
+    for cut in range(1, len(raw)):
+        kp = KeyParser()
+        keys = kp.feed(raw[:cut]) + kp.feed(raw[cut:])
+        results.add((tuple(k.control for k in keys), "".join(k.char for k in keys)))
+    assert len(results) == 1, f"{raw!r} 切分后结果不一致: {results}"

@@ -21,6 +21,7 @@ __all__ = [
     "clear_lines",
     "content_start",
     "full_redraw",
+    "overlay_anchor",
     "print_lines",
     "print_screen_perfect",
     "render_row_cells",
@@ -73,6 +74,26 @@ def wrap_multi_lines(display: str, width: int, end: str = "\r\n") -> tuple[str, 
     return output, lines
 
 
+def overlay_anchor(cursor_y: int, lines_needed: int, rows: int) -> int:
+    """覆盖层的起始行：贴近模型光标，但保证整体不越过屏幕底部。
+
+    覆盖层（命令行、消息）是浮在画面之上的临时显示。它**必须自己保证不越界**：
+    一旦它画到屏幕底部之外，终端就会滚动，把上方内容顶出去 —— 物理画面因此
+    与屏幕模型错位，之后子进程的回显会被写进错误的位置。
+
+    规则：
+
+    * 空间够：从模型光标所在行开始画（直接覆盖光标行）；
+    * 空间不够：整体上移，让末行对齐屏幕底（``rows - lines_needed``）；
+    * 覆盖层比屏幕还高：贴顶（0），多余部分无法完整显示。
+
+    返回 0-based 行号。
+    """
+    if lines_needed >= rows:
+        return 0
+    return max(0, min(cursor_y, rows - lines_needed))
+
+
 class LinePrinter:
     """封装 clear_lines / print_lines，持有 Console 与终端宽度。"""
 
@@ -94,10 +115,33 @@ class LinePrinter:
         w.write(b"\r")
         return 1, 1
 
-    def print_lines(self, text: str, cursor: int | None = None, width: int = 80) -> tuple[int, int]:
-        """打印多行文本并把光标定位到 ``cursor``（字符索引）。返回 (行数, 光标行数)。"""
+    def clear_region(self, top: int, bottom: int) -> None:
+        """清除 ``[top, bottom)`` 行（0-based），并留光标在 ``top`` 行首。
+
+        覆盖层可能因为折行而上移或下落，位置与上一帧不同，必须按**行区间**
+        擦除，而不是靠相对移动计数。
+        """
+        w = self._console
+        for row in range(top, bottom):
+            w.write(f"\x1b[{row + 1};1H\x1b[2K".encode())
+        w.write(f"\x1b[{top + 1};1H".encode())
+
+    def print_lines(
+        self,
+        text: str,
+        cursor: int | None = None,
+        width: int = 80,
+        anchor_row: int | None = None,
+    ) -> tuple[int, int]:
+        """打印多行文本并把光标定位到 ``cursor``（字符索引）。返回 (行数, 光标行数)。
+
+        ``anchor_row`` 给定时先绝对定位到该行行首再绘制（覆盖层用），
+        否则沿用相对移动（从当前光标处向上回退）。
+        """
         w = self._console
         line, lines_all = wrap_multi_lines(text, width)
+        if anchor_row is not None:
+            w.write(f"\x1b[{anchor_row + 1};1H".encode())
         w.write(b"\x1b[2K\r")
         w.write(line.encode())
         if cursor is not None and cursor != len(text):

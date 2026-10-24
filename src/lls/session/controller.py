@@ -40,7 +40,14 @@ from lls.commands import CommandContext, execute_command
 from lls.edit import LineEditor
 from lls.term import ScreenModel
 from lls.tty import Console, Key, KeyParser, TerminalBackend, Winsize
-from lls.ui import LinePrinter, full_redraw, print_screen_perfect, restore_line
+from lls.ui import (
+    LinePrinter,
+    full_redraw,
+    overlay_anchor,
+    print_screen_perfect,
+    restore_line,
+    wrap_multi_lines,
+)
 
 __all__ = ["Controller"]
 
@@ -50,8 +57,38 @@ _RAW_MAX = 8000
 # 超过这个时间仍未收全就判定为独立 Esc 键（readline / tmux 的做法）。
 ESC_PENDING_TIMEOUT = 0.05
 
+# 子进程输出后，等这么久没有新输出才重绘覆盖层。
+# 目的是让程序（尤其全屏程序）的整屏重绘完整落地，避免覆盖层插在中间。
+OVERLAY_REDRAW_DELAY = 0.05
+
 # _read_line 的哨兵返回值：用户按下 Esc（用于退出 line 模式等场景）。
 ESCAPE = object()
+
+
+def clamp_cursor(row: int, col: int, rows: int, columns: int) -> tuple[int, int]:
+    """把光标位置钳制到屏幕范围内。
+
+    覆盖模式退出时要还原到进入前的位置。终端若在覆盖期间改变了尺寸，
+    旧位置可能已越界；钳制后仍能落到一个合法位置，而不是发出无效坐标。
+    """
+    return (
+        max(0, min(row, rows - 1)),
+        max(0, min(col, columns - 1)),
+    )
+
+
+def needs_full_redraw(model_changed: bool, covered_lines: int) -> bool:
+    """覆盖模式退出时，是否需要按模型整屏重绘（而非仅恢复单行）。
+
+    两种情况必须整屏重绘：
+
+    1. ``model_changed``：覆盖期间子进程有输出，模型已领先于物理终端；
+    2. ``covered_lines > 1``：提示符折行占用了多行，退出时 ``clear_lines``
+       已把这些行清空，只恢复光标所在的一行会让下方留下空白。
+
+    仅当「未脱节且只占一行」时才走轻量的单行恢复（无闪烁）。
+    """
+    return model_changed or covered_lines > 1
 
 
 class _Services:
@@ -134,6 +171,26 @@ class Controller:
         # line 模式下若子进程有输出，据此把提示符临时移开、写输出、再画回来，
         # 使输出能够实时可见（类似 tmux 里命令行固定在底部、上方内容持续更新）。
         self._active_prompt: tuple[str, str, int, int, int] | None = None
+        # 覆盖层几何：它自己记录位置与大小，据此约束不越过屏幕底部。
+        #   _overlay_base_cursor —— 进入覆盖模式时的模型光标 (row, col)，
+        #                          覆盖层据此定位，退出时据此还原
+        #   _overlay_anchor_row  —— 当前帧的起始行；None 表示当前没有覆盖层
+        #   _overlay_lines       —— 当前帧占用的行数
+        #   _overlay_erased      —— 本次覆盖期间累计被擦掉的最大行数（恢复时用）
+        self._overlay_base_cursor: tuple[int, int] | None = None
+        # 子进程光标：**每次喂完子进程输出后立刻记录**。
+        # 不能用 self._screen.cursor 代替 —— 覆盖层为了对齐回显会向模型
+        # feed CUP，把模型光标移到覆盖层锚点；那样读到的将是覆盖层自己的
+        # 位置，子进程的光标信息就被覆盖了（实测 vim 光标下移后覆盖层不跟）。
+        self._child_cursor: tuple[int, int] | None = None
+        self._overlay_anchor_row: int | None = None
+        self._overlay_lines = 0
+        self._overlay_erased = 0
+        # 覆盖层的延迟重绘定时器。
+        # 子进程（如 vim）重绘整屏时会连续发出多块输出；若在每块之间插入
+        # 覆盖层的绘制，就会打断它的绘制序列（实测第 1 行内容被 ':' 覆盖）。
+        # 因此输出期间只擦除、不重绘，等输出静默后再画一次。
+        self._overlay_timer: asyncio.TimerHandle | None = None
         # 消息展示期间暂停透传：否则后台输出会把消息冲乱。
         # 期间收到的输出仍进屏幕模型，展示结束后按需重绘补齐。
         self._suppress_passthrough = False
@@ -162,13 +219,27 @@ class Controller:
         code = 0
         try:
             while not self._exit_event.is_set():
-                if self._mode == "char":
-                    await self._char_step()
-                elif self._mode == "line":
-                    await self._line_step()
-                elif self._mode == "prompt":
-                    await self._prompt_step()
-                else:
+                try:
+                    if self._mode == "char":
+                        await self._char_step()
+                    elif self._mode == "line":
+                        await self._line_step()
+                    elif self._mode == "prompt":
+                        await self._prompt_step()
+                    else:
+                        self._mode = "char"
+                except _QuitException:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    # 任何未捕获异常都不能让 traceback 直接写到 stderr:
+                    # 那些字节不经过显示逻辑，会撑滚终端并冲掉覆盖层。
+                    # 统一以覆盖层提示，然后回到可用的状态。
+                    try:
+                        await self._show_message(f"error: {e}")
+                    except Exception:  # noqa: BLE001
+                        pass
                     self._mode = "char"
         except _QuitException as e:
             code = e.code
@@ -209,8 +280,12 @@ class Controller:
         advance = row - 1
         if advance > 0:
             self._screen.feed(b"\n" * advance)
+        self._child_cursor = (self._screen.cursor.y, self._screen.cursor.x)
 
     async def _cleanup(self) -> None:
+        if self._overlay_timer is not None:
+            self._overlay_timer.cancel()
+            self._overlay_timer = None
         if self._loop is not None:
             for fd in (self._pty_fd, sys.stdin.fileno()):
                 if fd >= 0:
@@ -239,6 +314,8 @@ class Controller:
             return
         self._record_raw(data)
         self._screen.feed(data)
+        # 立刻记录子进程把光标放到了哪里（此时模型还没被覆盖层的 CUP 污染）
+        self._child_cursor = (self._screen.cursor.y, self._screen.cursor.x)
         if self._console is None:
             return
         if self._mode != "line":
@@ -256,27 +333,51 @@ class Controller:
             self._model_changed_in_overlay = True
 
     def _write_around_prompt(self, data: bytes) -> None:
-        """在提示符存在的情况下写子进程输出。
+        """在覆盖层存在的情况下写子进程输出。
 
-        做法（与 tmux 底部命令行的效果一致）：先清除提示符占用的行，让光标回到
-        提示符起始位置；把子进程输出原样写入（由子进程决定光标最终位置）；再在
-        新位置重新绘制提示符。这样用户既能看见输出，也能继续编辑已输入的内容。
+        子进程（尤其全屏程序）重绘时会连续发出多块输出。若在每块之间立即重画
+        覆盖层，就会**打断它的绘制序列**：覆盖层落在那块输出刚刚定位到的行上，
+        把内容覆盖掉（实测全屏程序画的第 1 行 ``AAA`` 被 ``:`` 替换）。
 
-        没有活跃提示符时（如 exec/input 正在写子进程、或消息展示中）直接透传。
+        因此这里只做两件事：擦掉覆盖层、原样写入输出；
+        重绘推迟到输出静默之后（见 :meth:`_schedule_overlay_redraw`）。
+        这样程序的整屏重绘得以完整落地，随后覆盖层再浮到最上层。
+
+        没有活跃覆盖层时（exec/input 正在写子进程、或消息展示中）直接透传。
         """
         assert self._console is not None and self._printer is not None
         active = self._active_prompt
         if active is None:
             self._console.write(data)
             return
-        prompt, text, cursor, lines_all, lines_cur = active
-        self._printer.clear_lines(lines_all, lines_cur)
+        self._erase_overlay()
         self._console.write(data)
-        # 输出可能改变终端光标位置，重画后按新的行数重新记录
-        new_all, new_cur = self._printer.print_lines(
-            prompt + text, cursor, self._screen.columns
+        self._schedule_overlay_redraw()
+
+    def _schedule_overlay_redraw(self) -> None:
+        """输出到达后（重新）安排一次覆盖层重绘，等输出静默才真正执行。"""
+        if self._overlay_timer is not None:
+            self._overlay_timer.cancel()
+            self._overlay_timer = None
+        if self._loop is None:
+            self._flush_overlay_redraw()
+            return
+        self._overlay_timer = self._loop.call_later(
+            OVERLAY_REDRAW_DELAY, self._flush_overlay_redraw
         )
-        self._active_prompt = (prompt, text, cursor, new_all, new_cur)
+
+    def _flush_overlay_redraw(self) -> None:
+        """输出静默后重绘覆盖层（基准跟随模型光标）。"""
+        self._overlay_timer = None
+        active = self._active_prompt
+        if active is None or self._console is None:
+            return
+        prompt, text, cursor, _lines_all, _lines_cur = active
+        # 用**子进程**的光标，而不是可能已被覆盖层 CUP 改过的模型光标
+        if self._child_cursor is not None:
+            self._overlay_base_cursor = self._child_cursor
+        _, new_all = self._draw_overlay(prompt + text, cursor)
+        self._active_prompt = (prompt, text, cursor, new_all, new_all)
 
     def _on_stdin_readable(self) -> None:
         if self._exit_event.is_set():
@@ -372,33 +473,57 @@ class Controller:
         assert self._printer is not None
         self._printer.clear_lines(1, 1)
 
+    def _restore_cursor(self, base: tuple[int, int] | None) -> None:
+        """把模型光标还原到进入覆盖模式前的位置（行 + 列）。
+
+        只还原**行**是不够的：用户的 shell 提示符通常带尾随空格，
+        光标原先停在提示符之后（例如第 8 列）；若只回到行首，
+        恢复后光标会出现在行首，和离开时不一致。
+        """
+        if base is None:
+            return
+        row, col = clamp_cursor(base[0], base[1], self._screen.rows, self._screen.columns)
+        self._screen.feed(f"\x1b[{row + 1};{col + 1}H".encode())
+
     def _print_context(self) -> None:
         """恢复被覆盖模式占用的画面（对应 legacy common.print_context）。
 
-        判据的本质 —— **模型与物理终端是否已经脱节**：
+        覆盖层退出时已按自身几何擦除了它占用的行区间，这里把那些行按模型内容
+        补回来。判据：
 
-        * line 模式不透传子进程输出（见 ``_on_master_readable``），所以期间子进程
-          只要有输出，模型就领先于物理终端，必须整屏重绘才能同步；
-        * 反之若子进程全程无输出（用户只是敲了 conf/show 这类命令），物理终端仍是
-          进入覆盖模式前的样子，只需抹掉 ``read_line`` 覆盖的那一行即可 ——
-          开销量级相差两个数量级，且不产生整屏闪烁。
-
-        早年用 ``alternate``（备用缓冲区）当判据是「以症状代替病因」：
-        vim 在备用缓冲区几乎必然重绘，因而几乎必然脱节，但二者并不等价 ——
-        vim 静止时不需要重绘（白闪），而主缓冲区下持续输出时却同样会脱节（漏画）。
-        故此处使用显式的脱节标记 ``_model_changed_in_overlay``。
+        * 覆盖层只占一行、且期间没有子进程输出 —— 物理终端只被覆盖了这一行，
+          抹掉重写即可（轻量、无闪烁）；
+        * 覆盖层占多行、或期间有输出（模型已领先于终端）—— 覆盖区域和模型
+          都可能变化，整屏重绘最稳妥。
         """
         if self._console is None:
             return
+        # 覆盖层退出时已按自身几何擦除，用累计擦除的最大行数判断恢复方式。
+        covered = max(self._overlay_lines, self._overlay_erased)
+        # 有子进程输出时它才是光标位置的权威来源；否则用进入覆盖模式前的位置。
+        base = self._child_cursor if self._model_changed_in_overlay else self._overlay_base_cursor
         try:
-            if self._model_changed_in_overlay:
+            # 还原光标到「应该停在的位置」，**两条恢复路径都要做**：
+            #
+            # * 期间没有子进程输出：就是进入覆盖模式前的位置；
+            # * 期间有输出（如 exec 启动了 vim）：是子进程最后把光标放到的地方
+            #   （_flush_overlay_redraw 已记录）。
+            #
+            # 早期只在「无输出」时还原，有输出时交给 full_redraw 按模型光标定位 ——
+            # 而覆盖层绘制时会把模型光标归到行首（列 0），于是退出后光标总在首列
+            # （实测 exec vim 退出后从 (1,5) 变成 (1,1)）。
+            self._restore_cursor(base)
+            if needs_full_redraw(self._model_changed_in_overlay, covered):
                 full_redraw(self._screen, self._console)
             else:
-                # 未脱节：物理终端上只有光标所在行被 read_line 覆盖过，
-                # 抹掉重写该行即可（内部会显式定位光标，见 restore_line）。
+                # 只覆盖了一行：抹掉重写该行（内部会显式定位光标，见 restore_line）。
                 restore_line(self._screen, self._console)
         finally:
             self._model_changed_in_overlay = False
+            self._overlay_lines = 0
+            self._overlay_anchor_row = None
+            self._overlay_erased = 0
+            self._overlay_base_cursor = None
 
     async def _show_message(self, text: str) -> None:
         """show_line：显示一行消息，等任意键，清除。不改变模式。
@@ -408,20 +533,19 @@ class Controller:
 
         展示期间暂停透传子进程输出，否则后台输出会把消息冲乱；期间到达的输出
         仍写入屏幕模型，展示结束后若确有输出则重绘一次补齐。
+
+        消息也是覆盖层：它可能有多行（如 ``ls`` 的实例列表），必须按覆盖层几何
+        定位（放不下就上移），否则会把终端撑得滚动、顶掉上方内容。
         """
         assert self._printer is not None
-        # print_lines 返回的 lines_all 是多行文本的真实行数（如 ls 的 3 行），
-        # clear_lines 必须按真实行数撤回，否则只清最后一行、光标回不到第一行。
-        lines_all, lines_cur = self._printer.print_lines(
-            text, None, self._screen.columns
-        )
+        self._draw_overlay(text)
         self._suppress_passthrough = True
         self._output_during_message = False
         try:
             await self._next_key()
         finally:
             self._suppress_passthrough = False
-            self._printer.clear_lines(lines_all, lines_cur)
+            self._erase_overlay()
         if self._output_during_message:
             self._output_during_message = False
             self._print_context()
@@ -438,12 +562,17 @@ class Controller:
                 if i:
                     self._pty_write(data[:i])
                 self._model_changed_in_overlay = False
+                # 记下完整光标（行 + 列）：退出覆盖模式时据此还原
+                c = self._screen.cursor
+                self._overlay_base_cursor = (c.y, c.x)
                 self._mode = "line"
                 return
             if b == 0x07:  # Ctrl-G → prompt
                 if i:
                     self._pty_write(data[:i])
                 self._model_changed_in_overlay = False
+                c = self._screen.cursor
+                self._overlay_base_cursor = (c.y, c.x)
                 self._mode = "prompt"
                 return
         self._pty_write(data)
@@ -504,9 +633,15 @@ class Controller:
 
         结束（含 instruct 为空、异常等所有退出路径）统一在 finally 里
         print_context 恢复终端 + 回到 char（精确还原 legacy prompt_mode 的 finally）。
+
+        异常必须在这里捕获并以覆盖层显示：否则 Python 会把 traceback 直接写到
+        stderr，那些字节不经过任何显示逻辑，会把终端撑得滚动、并冲掉覆盖层，
+        物理画面与屏幕模型随即错位。
         """
         try:
             await self._prompt_step_body()
+        except Exception as e:  # noqa: BLE001
+            await self._show_message(f"error: {e}")
         finally:
             self._print_context()
             self._mode = "char"
@@ -541,13 +676,9 @@ class Controller:
 
         while True:
             if output is not None:
-                # 流式生成：精确还原 legacy cmd_generate 的动态多行撤回。
-                # 初始直接写 "waiting..."（legacy: os.write('\033[2K\r...')，不先 clear）。
+                # 流式生成：走覆盖层（绝对定位、按行区间擦除），不滚动终端。
                 lines_all, lines_cur = 1, 1
-                assert self._printer is not None
-                self._printer.print_lines(
-                    "(gen-cmd): waiting...", None, self._screen.columns
-                )
+                self._draw_overlay("(gen-cmd): waiting...")
                 cancelled = False
                 gen_cmd, gen_think = "", ""
                 prev_len = 0
@@ -561,15 +692,14 @@ class Controller:
                             text = f"(gen-think): {gen_think}"
                         else:
                             text = "(gen-cmd): waiting..."
-                        # 动态跟踪 lines_all/lines_cur：AI 命令折多行时按真实行数撤回
                         lines_all, lines_cur = await self._print(
                             text, prev_len, lines_all, lines_cur
                         )
                         prev_len = len(text)
                 except asyncio.CancelledError:
                     cancelled = True
-                # 结束后撤回流式帧（legacy: clear_lines(lines_all, lines_cur)）
-                self._printer.clear_lines(lines_all, lines_cur)
+                # 撤掉流式帧（覆盖层按行区间擦除）
+                self._erase_overlay()
                 if not cancelled:
                     cmd, think = gen_cmd, gen_think
                 else:
@@ -683,6 +813,64 @@ class Controller:
 
     # ---- 行读取（精确还原 legacy read_line）----
 
+    def _draw_overlay(self, text: str, cursor: int | None = None) -> tuple[int, int]:
+        """绘制覆盖层内容（命令行 / 消息 / 流式生成），自约束位置。
+
+        覆盖层（命令行、消息、生成中的命令预览）都浮在画面上，是临时显示。
+        它若不自己约束位置，画到屏幕底之外就会让终端滚动、把上方内容顶走，
+        物理画面与屏幕模型随之错位 —— 之后子进程的回显会被写进错误的行/列。
+
+        因此这里由覆盖层自己负责：
+
+        1. 算出需要几行、上一帧占了哪几行，按**行区间**精确擦除（位置可能变）；
+        2. 用 :func:`overlay_anchor` 定出起始行：靠近基准行，放不下就整体上移；
+        3. 以绝对定位绘制，把模型光标同步到覆盖层起点 —— 那正是擦除后物理光标
+           所在处，子进程回显因此落在与物理一致的位置。
+
+        ``cursor`` 为 None 时表示纯展示（消息、流式预览），光标停在文末。
+        返回 ``(anchor, lines_all)``。
+        """
+        assert self._printer is not None
+        if self._overlay_timer is not None:
+            # 即将重绘，取消挂起的延迟重绘，避免同一帧画两次
+            self._overlay_timer.cancel()
+            self._overlay_timer = None
+        width = self._screen.columns
+        _, lines_needed = wrap_multi_lines(text, width)
+        base_row = (
+            self._overlay_base_cursor[0]
+            if self._overlay_base_cursor is not None
+            else self._screen.cursor.y
+        )
+        anchor = overlay_anchor(base_row, lines_needed, self._screen.rows)
+        # 先擦掉上一帧（它的位置和高度可能都不同）
+        self._erase_overlay()
+        lines_all, lines_cur = self._printer.print_lines(
+            text, cursor, width, anchor_row=anchor
+        )
+        self._overlay_anchor_row = anchor
+        self._overlay_lines = lines_all
+        # 模型光标对齐到覆盖层起点
+        self._screen.feed(f"\x1b[{anchor + 1};1H".encode())
+        return anchor, lines_all
+
+    def _erase_overlay(self) -> None:
+        """擦除当前覆盖层占用的行区间（不改动其他画面）。
+
+        擦除后把行数记到 ``_overlay_erased``：调用方据此知道刚才有多少行被清空，
+        恢复画面时必须按模型补回来（否则只恢复一行会让其余行留下空白）。
+        """
+        if self._printer is None:
+            return
+        if self._overlay_anchor_row is not None and self._overlay_lines:
+            top = self._overlay_anchor_row
+            bottom = min(top + self._overlay_lines, self._screen.rows)
+            if bottom > top:
+                self._printer.clear_region(top, bottom)
+            self._overlay_erased = max(self._overlay_erased, bottom - top)
+        self._overlay_anchor_row = None
+        self._overlay_lines = 0
+
     async def _read_line(
         self,
         prompt: str = ":",
@@ -706,10 +894,21 @@ class Controller:
 
         assert self._printer is not None
         width = self._screen.columns
-        lines_all, lines_cur = self._printer.print_lines(
-            prompt + editor.text, len(prompt) + editor.cursor, width
+        # 覆盖层的基准光标 = **进入覆盖模式时**的模型光标，由 _char_step 记录。
+        # 这里只在尚未记录时兜底（例如 generate 内部直接调用本方法），
+        # 否则每读一次命令都会覆盖它，退出时就回不到最初的位置。
+        if self._overlay_base_cursor is None:
+            c = self._screen.cursor
+            self._overlay_base_cursor = (c.y, c.x)
+        self._overlay_erased = 0  # 新的覆盖周期，重新累计
+        anchor, lines_all = self._draw_overlay(
+            prompt + editor.text, len(prompt) + editor.cursor
         )
-        # 暴露当前提示符状态：line 模式下子进程输出到来时据此移开/重画提示符。
+        lines_cur = lines_all
+        # **立刻**登记活跃覆盖层，而不是等到第一次按键之后。
+        # 否则「刚进入 line、用户在等、子进程此时输出」的窗口里
+        # _active_prompt 仍是 None，输出会直接透传并把覆盖层冲掉
+        # （实测 exec 启动 vim 时 ':' 就是这样消失、之后不再出现）。
         self._active_prompt = (
             prompt,
             editor.text,
@@ -722,27 +921,34 @@ class Controller:
                 key = await self._next_key()
                 if key is None:
                     return None
-                if key.control == "ctrl_c":
-                    if cancel is not None:
-                        return cancel
-                    line = editor.text
-                    if include_last:
-                        line += "\x03"
-                    return line
-                if key.control == "ctrl_d":
-                    if exit is not None or cancel is not None:
-                        return exit if exit is not None else cancel
-                    line = editor.text
-                    if include_last:
-                        line += "\x04"
-                    return line
-                if key.control == "enter":
-                    self._printer.clear_lines(lines_all, lines_cur)
-                    return editor.submit()
-                if key.control == "escape" and escape is not None:
-                    # Esc：清除当前行并返回调用方指定的值（用于退出 line 模式）。
-                    self._printer.clear_lines(lines_all, lines_cur)
-                    return escape
+                if key.control == "terminal_response":
+                    # 终端对查询（DSR/DA）的应答，不是用户输入：
+                    # 转发给子进程 —— 它在等这个结果；绝不当按键编辑或显示。
+                    self._pty_write(key.raw)
+                    continue
+                if key.control in ("ctrl_c", "ctrl_d", "enter") or (
+                    key.control == "escape" and escape is not None
+                ):
+                    # 所有离开输入循环的路径都先擦除覆盖层（它可能占多行，
+                    # 且位置与进入时不同，按记录的行区间擦）。
+                    self._erase_overlay()
+                    if key.control == "ctrl_c":
+                        if cancel is not None:
+                            return cancel
+                        line = editor.text
+                        if include_last:
+                            line += "\x03"
+                        return line
+                    if key.control == "ctrl_d":
+                        if exit is not None or cancel is not None:
+                            return exit if exit is not None else cancel
+                        line = editor.text
+                        if include_last:
+                            line += "\x04"
+                        return line
+                    if key.control == "enter":
+                        return editor.submit()
+                    return escape  # Esc
                 if key.control == "backspace":
                     editor.backspace()
                 elif key.control == "delete":
@@ -763,10 +969,11 @@ class Controller:
                     pass
                 elif key.char:
                     editor.insert(key.char)
-                self._printer.clear_lines(lines_all, lines_cur)
-                lines_all, lines_cur = self._printer.print_lines(
-                    prompt + editor.text, len(prompt) + editor.cursor, width
+                # 内容变化后重新布局：行数可能变，位置随之上下调整。
+                anchor, lines_all = self._draw_overlay(
+                    prompt + editor.text, len(prompt) + editor.cursor
                 )
+                lines_cur = lines_all
                 self._active_prompt = (
                     prompt,
                     editor.text,
@@ -775,8 +982,7 @@ class Controller:
                     lines_cur,
                 )
         finally:
-            # 提示符已不在显示（enter 已清除，其余路径由调用方处理），
-            # 之后的输出不再需要绕过它。
+            # 覆盖层已不在显示，之后的输出不再需要绕过它。
             self._active_prompt = None
 
     async def _print(
@@ -786,18 +992,14 @@ class Controller:
         lines_all: int = 1,
         lines_cur: int = 1,
     ) -> tuple[int, int]:
-        """流式刷新：精确还原 legacy cmd_generate 的 clear_lines + print_lines。
+        """流式刷新生成中的命令预览（覆盖层）。
 
-        legacy 用动态 ``lines_all``/``lines_cur`` 撤回上一帧（AI 命令折成多行时
-        ``lines_all`` > 1，clear_lines 必须按真实行数撤回，否则残留）。
-        本函数返回新的 ``(lines_all, lines_cur)``，供调用处持续跟踪。
+        生成过程每收到一段内容就重画一次，内容可能折成多行并不断变化。
+        走覆盖层几何（按行区间擦除 + 绝对定位重画），因此不会把终端撑得滚动。
+        返回新的 ``(lines_all, lines_cur)``，供调用处持续跟踪。
         """
-        assert self._printer is not None
-        if prev_len is not None and len(text) < prev_len:
-            self._printer.clear_lines(lines_all, lines_cur, clear=True)
-        else:
-            self._printer.clear_lines(lines_all, lines_cur, clear=False)
-        return self._printer.print_lines(text, None, self._screen.columns)
+        anchor, new_all = self._draw_overlay(text)
+        return new_all, new_all
 
     def _record_line_history(self, value: str, history_id: str) -> None:
         editor = self._editors.get(history_id)

@@ -168,6 +168,7 @@ async def _exec_flow(
         ctx.io.write(line.encode(), enter=enter)
         await asyncio.sleep(0.1)
         ctx.ui.restore_context()
+    # exec 与 input 都是「向子进程写一段内容」，执行后同样留在 line 模式。
     return CommandResult()
 
 
