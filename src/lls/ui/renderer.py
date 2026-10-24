@@ -115,16 +115,20 @@ class LinePrinter:
         w.write(b"\r")
         return 1, 1
 
-    def clear_region(self, top: int, bottom: int) -> None:
-        """清除 ``[top, bottom)`` 行（0-based），并留光标在 ``top`` 行首。
+    def clear_region(self, top: int, bottom: int, *, leave_cursor: bool = True) -> None:
+        """清除 ``[top, bottom)`` 行（0-based）。
 
         覆盖层可能因为折行而上移或下落，位置与上一帧不同，必须按**行区间**
         擦除，而不是靠相对移动计数。
+
+        ``leave_cursor=False`` 时**不**把光标挪回 ``top`` 行首 —— 调用方紧接着
+        就要在别处定位（如覆盖层重绘到新的锚点），那次挪动纯属多余字节。
         """
         w = self._console
         for row in range(top, bottom):
             w.write(f"\x1b[{row + 1};1H\x1b[2K".encode())
-        w.write(f"\x1b[{top + 1};1H".encode())
+        if leave_cursor:
+            w.write(f"\x1b[{top + 1};1H".encode())
 
     def print_lines(
         self,

@@ -158,8 +158,10 @@ async def _exec_flow(
         line = parts[0].strip()
         instruct = parts[-1].strip()
 
-    # 清掉提示行（legacy cmd_exec_handler: print('\033[2K\r')）
-    ctx.ui.clear_screen_line()
+    # 注意：不要再清提示行。read_line 退出时已经把「提示符占用的行」
+    # 按屏幕模型恢复成原内容了（_hide_overlay），这里再清一次会把刚恢复的
+    # 内容擦掉，造成该行永久空白（实测覆盖层换位置后原行变成空白）。
+    # legacy 之所以清这一行，是因为它退出时只抹掉提示符、不恢复内容。
 
     if line:
         if enter:
