@@ -25,6 +25,12 @@ src/lls/tty/        PTY 与平台终端后端（按键编解码）
 agent 循环（`ai/agent.py`）也只驱动「请求 → 工具 → 请求」，具体工具由命令层
 提供。
 
+## 平台
+
+Linux/macOS 原生支持；Windows 请用 WSL。判据是 `pty` / `termios` / `fcntl`
+三个模块是否真的可用，而不是平台名；`lls --doctor` 会显示 `posix tty: OK`
+或缺失原因。
+
 ## 命令
 
 Ctrl-E 进入命令模式，输入命令名。

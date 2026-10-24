@@ -40,9 +40,13 @@ def doctor() -> int:
         print("pyte:     OK")
     except ImportError:
         print("pyte:     缺失 (pip install pyte)")
+    from .tty import supports_posix_terminal
+
+    if supports_posix_terminal():
+        print("posix tty: OK (pty/termios/fcntl)")
+    else:
+        print("posix tty: 缺失 (需要 pty/termios/fcntl；Windows 请用 WSL)")
     print(f"shell:    {_default_shell()}")
-    if sys.platform not in ("linux", "darwin"):
-        print("警告: 当前平台无 POSIX 终端，请使用 WSL / Linux / macOS")
     return 0
 
 

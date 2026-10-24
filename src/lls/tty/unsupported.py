@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .backend import Console, PtySession, TerminalBackend, Winsize
+from .backend import Console, PtySession, Winsize
 
 __all__ = ["UnsupportedBackend"]
 
