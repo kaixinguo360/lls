@@ -31,6 +31,7 @@ from lls.ai import (
     AgentEvent,
     AgentEventKind,
     AgentTool,
+    ConfigError,
     Message,
     Tool,
     default_catalog,
@@ -699,6 +700,8 @@ class _Session:
         self._state.history = list(self._history)
         self._state.log = list(self._log)
         self._state.updated_at = time.time()
+        # 写回存储：内存单例之外还会落盘，lls 重启后仍能接着这段会话。
+        store().save(self._state)
 
     def _record(self, task: str, reply: str, note: str = "") -> None:
         self._log.append((task, reply, note))
@@ -752,7 +755,14 @@ def _open_session(fresh: bool) -> Tuple[Any, str, SessionState]:
     else:
         keeper.set_current(state.id)
     # provider 可能已经从配置里删掉：这里报错，状态本身仍然留着。
-    return catalog.get(state.provider_id), state.model_id, state
+    try:
+        provider = catalog.get(state.provider_id)
+    except ConfigError as e:
+        raise ConfigError(
+            "%s（会话 %s 的 provider 已不存在；用 agent --new 开新会话）"
+            % (e, state.id)
+        ) from e
+    return provider, state.model_id, state
 
 
 @command("agent", aliases=("a",), category="ai")

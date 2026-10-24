@@ -11,7 +11,11 @@ import json
 
 from lls.ai import Chunk, ChunkKind, ConfigError, Message, ToolCall
 from lls.commands.builtin import agent as agent_cmd
-from lls.commands.builtin.agent_store import SessionStore
+from lls.commands.builtin.agent_store import (
+    SessionStore,
+    default_sessions_dir,
+    migrate_legacy_sessions,
+)
 
 # ---- 桩 ----
 
@@ -227,6 +231,7 @@ def test_provider_removed_from_config_is_reported_and_state_kept(monkeypatch) ->
 
     assert result.handler is None
     assert any("gone" in text for text in services.messages)
+    assert any("agent --new" in text for text in services.messages)
     assert keeper.get(state.id) is not None
 
 
@@ -295,3 +300,153 @@ def test_session_log_survives_a_restart_of_the_session_object(monkeypatch) -> No
 
     assert "任务一" in services.prompts[0]
     assert "答复一" in services.prompts[0]
+
+
+# ---- 落盘 ----
+
+
+def test_sessions_are_written_to_and_read_from_disk(tmp_path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    state = keeper.new("stub", "stub-model")
+    state.history = [
+        Message("user", "任务"),
+        Message(
+            "assistant",
+            None,
+            tool_calls=(
+                ToolCall(id="c1", name="read_terminal", arguments='{"lines": 5}'),
+            ),
+        ),
+        Message("tool", "画面", tool_call_id="c1"),
+        Message("assistant", "答复"),
+    ]
+    state.log = [("任务", "答复", "")]
+    state.updated_at = 123.0
+    keeper.save(state)
+
+    assert sorted(path.name for path in tmp_path.glob("*.json")) == sorted(
+        [state.id + ".json", "index.json"]
+    )
+    assert not list(tmp_path.glob("*.tmp"))
+
+    reopened = SessionStore(root=tmp_path)
+    loaded = reopened.get(state.id)
+    assert loaded is not None
+    assert loaded.history == state.history
+    assert loaded.log == state.log
+    assert loaded.created_at == state.created_at
+    assert loaded.updated_at == 123.0
+    assert reopened.current() is not None
+    assert reopened.current().id == state.id
+
+
+def test_current_pointer_survives_a_restart(tmp_path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    first = keeper.new("stub", "m")
+    keeper.new("stub", "m")
+    keeper.set_current(first.id)
+
+    reopened = SessionStore(root=tmp_path)
+
+    assert reopened.current() is not None
+    assert reopened.current().id == first.id
+
+
+def test_corrupt_and_unknown_files_are_skipped(tmp_path) -> None:
+    (tmp_path / "aaaaaa.json").write_text("{oops", encoding="utf-8")
+    (tmp_path / "bbbbbb.json").write_text(
+        json.dumps(
+            {"version": 999, "id": "bbbbbb", "provider_id": "p", "model_id": "m"}
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "cccccc.json.tmp").write_text("{}", encoding="utf-8")
+
+    keeper = SessionStore(root=tmp_path)
+
+    assert len(keeper) == 0
+    assert keeper.current() is None
+    assert keeper.last_error is None
+
+
+def test_loading_enforces_the_session_cap_and_deletes_files(tmp_path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    first = keeper.new("a", "m")
+    second = keeper.new("a", "m")
+    third = keeper.new("a", "m")
+    for offset, state in enumerate((first, second, third), start=1):
+        state.updated_at = float(offset)
+        keeper.save(state)
+
+    reopened = SessionStore(keep=2, root=tmp_path)
+
+    assert [state.id for state in reopened.list()] == [third.id, second.id]
+    assert not (tmp_path / (first.id + ".json")).exists()
+    assert (tmp_path / (second.id + ".json")).exists()
+
+
+def test_a_failed_write_degrades_to_memory(tmp_path) -> None:
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+
+    keeper = SessionStore(root=blocker)
+    state = keeper.new("a", "m")
+
+    assert keeper.get(state.id) is state
+    assert keeper.last_error
+
+
+def test_agent_continues_from_disk_after_a_restart(monkeypatch, tmp_path) -> None:
+    first = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复一")])
+    _run(monkeypatch, provider, ["/exit"], first_task="任务一", keeper=first)
+    session_id = first.current().id
+
+    reopened = SessionStore(root=tmp_path)
+    second = ScriptedProvider([_text("答复二")])
+    services, result, _ = _run(
+        monkeypatch, second, ["/exit"], first_task="任务二", keeper=reopened
+    )
+
+    assert result.handler == "default"
+    sent = second.requests[0]["messages"]
+    assert any("任务一" in (message.content or "") for message in sent)
+    assert any("答复一" in (message.content or "") for message in sent)
+    assert "任务一" in services.prompts[0]
+    assert reopened.current().id == session_id
+
+
+def test_default_sessions_dir_follows_the_environment(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setenv("LLS_SESSIONS_HOME", str(tmp_path))
+
+    assert default_sessions_dir() == tmp_path / "sessions"
+
+
+def test_default_sessions_dir_is_not_under_state(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("LLS_SESSIONS_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert default_sessions_dir() == tmp_path / ".local" / "lls" / "sessions"
+
+
+def test_legacy_sessions_are_copied_on_first_use(tmp_path) -> None:
+    old = tmp_path / "old"
+    old.mkdir()
+    (old / "abc123.json").write_text("{}", encoding="utf-8")
+    (old / "index.json").write_text("{}", encoding="utf-8")
+    target = tmp_path / "new" / "sessions"
+
+    assert migrate_legacy_sessions(target, source=old) == 2
+    assert sorted(p.name for p in target.glob("*.json")) == ["abc123.json", "index.json"]
+    # 旧目录只读不改。
+    assert (old / "abc123.json").exists()
+    # 只搬一次：新目录已经在就不动。
+    (target / "abc123.json").write_text("mine", encoding="utf-8")
+    assert migrate_legacy_sessions(target, source=old) == 0
+    assert (target / "abc123.json").read_text(encoding="utf-8") == "mine"
+
+
+def test_legacy_migration_skips_missing_source(tmp_path) -> None:
+    assert migrate_legacy_sessions(tmp_path / "sessions", source=tmp_path / "nope") == 0
+    assert not (tmp_path / "sessions").exists()

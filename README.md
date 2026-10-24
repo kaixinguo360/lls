@@ -53,8 +53,10 @@ Ctrl-E 后输入 `agent`（或带首个任务：`agent 把测试跑一遍`）进
 system prompt 也会要求模型用简短纯文本答复，细节留在终端输出里。
 空行或 Ctrl-C 清掉当前输入；Esc、Ctrl-D 或 `/exit` 退出会话回到透传。执行中
 按 Ctrl-C 只中止当前任务，会话继续；半成品不会写入历史。想直接操作 shell 时
-按 Esc 退出。会话状态留在进程内存里（`commands/builtin/agent_store.py`）：再次
-`agent` 回到同一段上下文，`agent --new` 才开一条新会话。lls 退出后这些会话就没了。
+按 Esc 退出。会话状态由 `commands/builtin/agent_store.py` 管理并落盘到
+`$LLS_SESSIONS_HOME/sessions/`（默认 `~/.local/lls/sessions/`，一条会话一个
+JSON 文件；旧版放在 `~/.local/state/lls/sessions/` 的会自动搬过来一次）：再次 `agent` 回到同一段上下文，`agent --new` 才开一条新会话；lls
+重启后也能从上次的会话继续。只有完整结束的一轮才写盘。
 
 工具：
 - `read_terminal`：读取终端最近若干行，可等待输出静默；什么时候读、等多久由
