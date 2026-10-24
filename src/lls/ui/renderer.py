@@ -13,11 +13,14 @@
 
 from __future__ import annotations
 
+import unicodedata
+
 from lls.tty import Console
 
 __all__ = [
     "LinePrinter",
     "char_width",
+    "conservative_char_width",
     "overlay_anchor",
     "render_row_cells",
     "wrap_multi_lines",
@@ -47,8 +50,29 @@ def char_width(c: str) -> int:
     return 1
 
 
-def wrap_multi_lines(display: str, width: int, end: str = "\r\n") -> tuple[str, int]:
-    """将长字符串按终端宽度自动换行。返回 (输出串, 行数)。"""
+def conservative_char_width(c: str) -> int:
+    """保守宽度：模糊宽度（East Asian Ambiguous）按**两列**算。
+
+    ``—````"````"````…````①`` 这类字符，Unicode 把宽度定成「模糊」，由终端自行
+    决定。不少终端（尤其 CJK 配置）按两列渲染，而 :func:`char_width` 按一列算。
+    用它排版时，一行会比实际窄一列，终端于是软折行。
+
+    覆盖层是按行号绝对定位绘制的：多出来的物理行会让行列对应关系整体错位，
+    旧帧擦不干净、一帧帧堆在屏上。宁可每行少用一列，也不能窄算。
+    """
+    if unicodedata.east_asian_width(c) == "A":
+        return 2
+    return char_width(c)
+
+
+def wrap_multi_lines(
+    display: str, width: int, end: str = "\r\n", measure=char_width
+) -> tuple[str, int]:
+    """将长字符串按终端宽度自动换行。返回 (输出串, 行数)。
+
+    ``measure`` 决定每个字符算几列；覆盖层排版传入
+    :func:`conservative_char_width`，避免在模糊宽度上窄算。
+    """
     output = ""
     lines = 1
     n = 0
@@ -58,7 +82,7 @@ def wrap_multi_lines(display: str, width: int, end: str = "\r\n") -> tuple[str, 
             lines += 1
             n = 0
             continue
-        c_width = char_width(c)
+        c_width = measure(c)
         if n + c_width > width:
             output += end
             lines += 1

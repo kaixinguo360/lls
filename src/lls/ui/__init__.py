@@ -3,6 +3,7 @@
 from .renderer import (
     LinePrinter,
     char_width,
+    conservative_char_width,
     overlay_anchor,
     render_row_cells,
     wrap_multi_lines,
@@ -11,6 +12,7 @@ from .renderer import (
 __all__ = [
     "LinePrinter",
     "char_width",
+    "conservative_char_width",
     "overlay_anchor",
     "render_row_cells",
     "wrap_multi_lines",
