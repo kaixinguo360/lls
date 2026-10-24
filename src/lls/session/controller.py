@@ -135,6 +135,7 @@ class Controller:
         self._printer = LinePrinter(self._console)
 
         self._loop = asyncio.get_running_loop()
+        self._align_model_to_cursor()
         self._loop.add_reader(self._pty_fd, self._on_master_readable)
         self._loop.add_reader(sys.stdin.fileno(), self._on_stdin_readable)
         try:
@@ -159,6 +160,40 @@ class Controller:
         finally:
             await self._cleanup()
         return code
+
+    def _align_model_to_cursor(self) -> None:
+        """把屏幕模型的起始行对齐到宿主终端当前光标所在行。
+
+        模型的初始状态是一张空屏、光标在 (0,0)，但用户进入 LLS 时光标未必在顶行
+        （最常见的情况：上一个 shell 的提示符就停在屏幕最后一行）。若不对齐，模型
+        认为内容从屏幕顶部开始，而物理上从中间/底部开始，两者差了一段行距；一旦
+        需要整屏重绘（按模型行号定位光标），内容与光标就会整体跳到屏幕顶部。
+
+        做法：用 DSR 查询光标行 R（1-based），给模型喂 R-1 个换行，
+        使模型光标与物理光标落在同一行。模型顶部因此留出的空行代表
+        「模型未建模的历史画面」，重绘时只从第一个非空行开始画，不会把它们搬上屏幕。
+
+        终端不响应 DSR（重定向、非交互、部分嵌入式终端）时保持原样，
+        行为与之前一致，不引入回归。
+        """
+        if self._console is None:
+            return
+        query = getattr(self._console, "cursor_position", None)
+        if query is None:
+            return
+        position = query()
+        if position is None:
+            return
+        take_pending = getattr(self._console, "take_pending", None)
+        if take_pending is not None:
+            pending = take_pending()
+            if pending:
+                # 查询期间用户可能已经敲了键，交给主循环，不丢失
+                self._stdin_q.put_nowait(pending)
+        row, _column = position
+        advance = row - 1
+        if advance > 0:
+            self._screen.feed(b"\n" * advance)
 
     async def _cleanup(self) -> None:
         if self._loop is not None:

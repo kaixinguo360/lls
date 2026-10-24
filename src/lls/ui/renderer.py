@@ -19,6 +19,7 @@ __all__ = [
     "LinePrinter",
     "char_width",
     "clear_lines",
+    "content_start",
     "full_redraw",
     "print_lines",
     "print_screen_perfect",
@@ -209,15 +210,35 @@ def render_row_cells(cells) -> str:
     return "".join(parts)
 
 
+def content_start(screen) -> int:
+    """第一个非空行的下标；全空时返回光标所在行。
+
+    模型顶部可能有一段空行（见 ``Controller`` 启动时对物理光标位置的对齐），
+    这些空行**不是**要显示的内容，重绘时不应把它们搬到屏幕顶部。
+    """
+    rows = screen.rows
+    for row in range(rows):
+        if screen.row_text(row).strip():
+            return row
+    return min(screen.cursor.y, rows - 1)
+
+
 def full_redraw(screen, console: Console) -> None:
-    """从屏幕模型完整重绘整屏（含颜色），并定位光标。
+    """从屏幕模型重绘内容区（含颜色），并定位光标。
 
     用于覆盖模式（line/prompt 的 read_line 占用了屏幕）退出后恢复画面。
     与重放 raw 相比：结果确定、不受截断影响、能精确还原全屏应用（vim/less）的画面。
+
+    起点取**第一个非空行**而非屏幕顶行：模型顶部可能因启动对齐而留有空行，
+    若从顶行开始画，会把下方的内容整体上移到屏幕顶部（表现为光标跳到顶行），
+    用户原本位于底部的画面就被搬走了。从内容起始行画、只清到屏幕末尾，
+    则内容留在原处，上方未受影响的画面也不会被擦掉。
     """
-    out: list[str] = ["\x1b[2J\x1b[H"]
+    top = content_start(screen)
     rows = screen.rows
-    for row in range(rows):
+    # 定位到内容起始行并清除其下所有内容（不清上方，避免破坏未参与建模的画面）
+    out: list[str] = [f"\x1b[{top + 1};1H\x1b[0J"]
+    for row in range(top, rows):
         out.append(render_row_cells(screen.row_cells(row)))
         if row < rows - 1:
             out.append("\r\n")
@@ -262,6 +283,14 @@ def print_screen_perfect(
     # legacy bug 修复：y_end 必须先于 y_begin 计算
     y_end = content_lines if content_lines > height else height
     y_begin = content_lines - height if content_lines > height else 0
+
+    # 跳过开头的空行：模型顶部可能因启动对齐（见 Controller 的光标对齐）留空，
+    # 那些行代表「模型未建模的历史画面」，不是内容，显示视图里不应占位。
+    first = 0
+    while first < content_lines - 1 and lines[first].strip() == "":
+        first += 1
+    if first > y_begin:
+        y_begin = first
 
     if not raw:
         console.write(("+" + "-" * width + "+" + end).encode())

@@ -14,14 +14,20 @@ from __future__ import annotations
 import fcntl
 import os
 import pty
+import re
+import select
 import signal
 import struct
 import sys
 import termios
+import time
 import tty
 from typing import Callable
 
 from .backend import Console, PtySession, TerminalBackend, Winsize
+
+# DSR（Device Status Report）应答：ESC [ 行 ; 列 R
+_DSR_RE = re.compile(rb"\x1b\[(\d+);(\d+)R")
 
 __all__ = ["PosixBackend"]
 
@@ -68,8 +74,51 @@ class _PosixPtySession:
 class _PosixConsole:
     """宿主终端：直接写 stdin/stdout 的 fd。"""
 
+    def __init__(self) -> None:
+        self._pending = b""
+
     def write(self, data: bytes) -> None:
         os.write(sys.stdout.fileno(), data)
+
+    def cursor_position(self, timeout: float = 0.25) -> tuple[int, int] | None:
+        """查询宿主终端光标位置（DSR：``ESC[6n`` → ``ESC[行;列R``）。
+
+        返回 1-based ``(row, column)``；终端不响应（重定向/不支持）时返回 None。
+        期间读到的非应答字节（用户提前敲的键）存入 ``_pending``，
+        由 :meth:`take_pending` 取回，避免丢键。
+        """
+        fd = sys.stdin.fileno()
+        os.write(sys.stdout.fileno(), b"\x1b[6n")
+        buf = b""
+        deadline = time.monotonic() + timeout
+        while True:
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                break
+            try:
+                ready, _, _ = select.select([fd], [], [], remain)
+            except InterruptedError:
+                continue
+            if not ready:
+                break
+            try:
+                chunk = os.read(fd, 256)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            match = _DSR_RE.search(buf)
+            if match:
+                self._pending = buf[: match.start()] + buf[match.end() :]
+                return int(match.group(1)), int(match.group(2))
+        self._pending = buf
+        return None
+
+    def take_pending(self) -> bytes:
+        """取走查询期间读到的、属于用户输入的字节。"""
+        data, self._pending = self._pending, b""
+        return data
 
 
 class PosixBackend:

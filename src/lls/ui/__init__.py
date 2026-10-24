@@ -3,6 +3,7 @@
 from .renderer import (
     LinePrinter,
     char_width,
+    content_start,
     full_redraw,
     print_screen_perfect,
     render_row_cells,
@@ -12,6 +13,7 @@ from .renderer import (
 __all__ = [
     "LinePrinter",
     "char_width",
+    "content_start",
     "full_redraw",
     "print_screen_perfect",
     "render_row_cells",
