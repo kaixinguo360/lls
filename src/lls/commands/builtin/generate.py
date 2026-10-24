@@ -10,16 +10,18 @@ from __future__ import annotations
 import asyncio
 import json
 from functools import lru_cache
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 from lls.ai import Catalog, ChunkKind, Message, Tool, load, resolve_config_path
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.session.services import Services
+from lls.ui import conservative_char_width, wrap_multi_lines
 
 __all__ = [
     "CONTEXT_LINES",
     "SYSTEM_PROMPT",
+    "THINK_LINES",
     "build_messages",
     "cmd_generate",
     "tail_lines",
@@ -102,21 +104,111 @@ def _catalog() -> Catalog:
 
 # ---- 显示辅助 ----
 #
-# 覆盖层统一按单行绘制：多行覆盖层缩短时，当前引擎只在锚点变化时擦除旧位置，
-# 尾部残字会留在屏上。把预览压成一行即可完全避开这一路径，不必改动引擎。
+# 统一原则：**先把整行拼出来，再交给折行**。不要逐段扣宽度 ——
+# 只要有一处估算和真实字符串对不上（漏了后缀、提示词换了一条、宽字符算错），
+# 整行就会宽出几列而被再折一次，表现为「总是差一点点」。
+
+# 思考预览最多占几行。超出后只显示末尾 —— 画面固定在底部，读的人始终看最新
+# 的一段。上限是为了不让覆盖层高到撑破屏幕（那会让终端滚动、画面错位）。
+THINK_LINES = 5
+THINK_LABEL = "(gen-think): "
+
+MENU_PREFIX = "(gen-cmd): "
+MENU_SUFFIX = " [y/i/n/e/r] "
+MENU_LINES = 3
 
 
-def _one_line(text: str, columns: int) -> str:
-    flat = text.replace("\r", " ").replace("\n", " ")
-    limit = max(1, columns - 16)
-    if len(flat) > limit:
-        return flat[: limit - 1] + "…"
-    return flat
+def _flat(text: str) -> str:
+    """压成一行（换行与回车按空格处理）。"""
+    return text.replace("\r", " ").replace("\n", " ")
+
+
+def _width(text: str) -> int:
+    """按**保守宽度**量一段文字的列数。
+
+    模糊宽度字符（``—``、``"``、``…`` 等）按两列算：部分终端就是这么渲染的。
+    窄算会让整行宽出屏幕、被终端软折行，而覆盖层是按行号绝对定位的 ——
+    多出来的物理行会把行列对应关系全部推错。
+    """
+    return sum(conservative_char_width(c) for c in text)
+
+
+def _fit(text: str, limit: int) -> str:
+    """按保守宽度截断到 ``limit`` 列，超出部分用省略号收尾。"""
+    flat = _flat(text)
+    if _width(flat) <= limit:
+        return flat
+
+    marker = "…"
+    room = limit - conservative_char_width(marker)  # 省略号本身也要占位
+    if room <= 0:
+        return ""
+
+    kept = []
+    used = 0
+    for char in flat:
+        width = conservative_char_width(char)
+        if used + width > room:
+            break
+        kept.append(char)
+        used += width
+    return "".join(kept) + marker
+
+
+def _wrap(text: str, columns: int) -> List[str]:
+    """把整段内容当成**一行**，按保守宽度折成若干行。
+
+    换行与回车一律拍平成空格：思考内容里的换行是模型自己的排版，直接搬进
+    覆盖层会变成空行，把预览撑成一段段碎片。折行只由终端宽度决定。
+    """
+    return wrap_multi_lines(
+        _flat(text),
+        max(1, columns),
+        end="\n",
+        measure=conservative_char_width,
+    )[0].split("\n")
+
+
+def _preview_lines(text: str, columns: int, limit: int, label: str) -> List[str]:
+    """思考预览：整行拼好再折行，只保留末尾 ``limit`` 行。"""
+    return _wrap(label + text, columns)[-limit:]
+
+
+def _menu_text(payload: str, hint: str, columns: int) -> str:
+    """确认菜单：整行拼好再折行，行数封顶。
+
+    超过上限时二分找出「还能塞下多少 payload」，而不是提前估算某一段该留多
+    宽 —— 估算一旦和真实字符串对不上，整行就会多折一行。二分保证按键提示
+    （``[y/i/n/e/r]``）始终完整留在末尾。
+    """
+    flat = _flat(payload)
+
+    def render(text: str) -> List[str]:
+        return _wrap(MENU_PREFIX + text + hint + MENU_SUFFIX, columns)
+
+    rows = render(flat)
+    if len(rows) <= MENU_LINES:
+        return "\n".join(rows)
+
+    low, high = 0, len(flat)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(render(flat[:middle] + "…")) <= MENU_LINES:
+            low = middle
+        else:
+            high = middle - 1
+    return "\n".join(render(flat[:low] + "…"))
 
 
 def _paint(s: Services, label: str, text: str) -> None:
-    columns = s.screen.columns
-    s.draw_overlay("(%s): %s" % (label, _one_line(text, columns)))
+    """画一行状态。"""
+    s.draw_overlay(_fit("(%s): %s" % (label, text), s.screen.columns))
+
+
+def _paint_thinking(s: Services, text: str) -> None:
+    """画思考预览：折行、限高、贴底。"""
+    lines = _preview_lines(text, s.screen.columns, THINK_LINES, THINK_LABEL)
+    s.draw_overlay("\n".join(lines))
 
 
 # ---- 生成 ----
@@ -144,7 +236,7 @@ async def _stream_payload(s: Services, request: str, screen: str) -> str:
                 box["call"] = chunk.call
             elif chunk.kind is ChunkKind.REASONING:
                 think.append(chunk.text)
-                _paint(s, "gen-think", "".join(think))
+                _paint_thinking(s, "".join(think))
             elif chunk.kind is ChunkKind.DONE:
                 return
 
@@ -189,8 +281,20 @@ async def _read_request(s: Services, value: str = "") -> Optional[str]:
     return line
 
 
-async def _produce(s: Services, request: str, screen: str) -> Tuple[str, bool]:
-    """生成并确认，返回 ``(payload, enter)``；payload 为空表示放弃。
+class _Outcome(NamedTuple):
+    """一次生成的结果。
+
+    ``payload is None`` 表示**放弃**（用户按 n、编辑后清空、会话结束、中断）；
+    空字符串是**正常结果**（模型判断该发空内容），照样走确认与写入。
+    """
+
+    payload: Optional[str] = None
+    enter: bool = True
+    note: Optional[str] = None
+
+
+async def _produce(s: Services, request: str, screen: str) -> _Outcome:
+    """生成并确认。
 
     ``请求#内容`` 只跳过生成，仍然走确认菜单 —— 手写的内容同样需要过一眼。
     """
@@ -198,7 +302,7 @@ async def _produce(s: Services, request: str, screen: str) -> Tuple[str, bool]:
     if "#" in request:
         payload = request.partition("#")[2].strip()
         if not payload:
-            return "", True
+            return _Outcome(note="`#` 后面没有内容")
 
     hint = ", confirm?"
     while True:
@@ -206,15 +310,9 @@ async def _produce(s: Services, request: str, screen: str) -> Tuple[str, bool]:
             try:
                 payload = await _stream_payload(s, request, screen)
             except _Cancelled:
-                return "", True
-            if not payload:
-                return "", True
+                return _Outcome(note="生成已中断")
 
-        columns = s.screen.columns
-        text = "(gen-cmd): %s%s [y/i/n/e/r] " % (
-            _one_line(payload, columns),
-            hint,
-        )
+        text = _menu_text(payload, hint, s.screen.columns)
         answer = await s.read_line(
             text,
             include_last=False,
@@ -223,24 +321,24 @@ async def _produce(s: Services, request: str, screen: str) -> Tuple[str, bool]:
             keep_history=False,
         )
         if answer is None:
-            return "", True
+            return _Outcome(note="会话已结束")
 
         key = answer.strip().lower()
         hint = ", confirm?"
 
         if key == "" or key in ("y", "yes", "u", "use"):
-            return payload, True
+            return _Outcome(payload, True)
         if key in ("i", "input"):
-            return payload, False
+            return _Outcome(payload, False)
         if key in ("n", "no", "q", "quit", "exit", "cancel"):
-            return "", True
+            return _Outcome()
         if key in ("r", "re", "retry"):
             payload = None
             continue
         if key in ("e", "edit"):
             edited = await _read_request(s, request)
             if edited is None or not edited.strip():
-                return "", True
+                return _Outcome()
             request = edited
             payload = None
             continue
@@ -248,23 +346,32 @@ async def _produce(s: Services, request: str, screen: str) -> Tuple[str, bool]:
         hint = ", please input 'y' or 'n':"
 
 
-async def run_generate(s: Services, request: Optional[str] = None) -> None:
-    """完整流程：读请求 → 生成 → 确认 → 写入子进程。"""
+async def run_generate(s: Services, request: Optional[str] = None) -> bool:
+    """完整流程：读请求 → 生成 → 确认 → 写入子进程。
+
+    返回是否**真的写入了内容**。没写就说明这次什么都没发生，调用方据此决定
+    要不要继续留在命令模式 —— 一声不响地退回透传，看起来就像程序自己抽风。
+    """
     try:
         if request is None:
             request = await _read_request(s)
         if request is None:
-            return
+            return False
         request = request.strip()
         if not request:
-            return
+            return False
 
         s.flush_model()
         screen = tail_lines(s.screen.text(), CONTEXT_LINES)
 
-        payload, enter = await _produce(s, request, screen)
-        if not payload:
-            return
+        outcome = await _produce(s, request, screen)
+        if outcome.payload is None:
+            # 放弃：用户主动按 n 时没有 note（本来就预期如此），其余情况说明原因。
+            if outcome.note:
+                await s.show_message(outcome.note)
+            return False
+
+        payload, enter = outcome.payload, outcome.enter
 
         # 产出来自模型而非键盘，不经过提示行的 submit()，否则事后无从召回。
         # 但只有能放进单行编辑器的内容才值得记住：多行或带控制序列的 payload
@@ -274,12 +381,15 @@ async def run_generate(s: Services, request: Optional[str] = None) -> None:
         s.write(payload.encode(), enter=enter)
         await asyncio.sleep(0.1)
         s.restore_context()
+        return True
     except Exception as e:  # noqa: BLE001
         await s.show_message("error: %s" % e)
+        return False
 
 
 @command("generate", aliases=("g", "gen"), category="ai")
 async def cmd_generate(s: Services, args: Optional[str]) -> CommandResult:
     """由终端状态与请求生成一段输入，确认后写入子进程"""
-    await run_generate(s, args)
-    return CommandResult(handler="default")
+    wrote = await run_generate(s, args)
+    # 写入了才回透传（要看到命令生效）；没写入就留在命令模式，让用户重来。
+    return CommandResult(handler="default" if wrote else None)
