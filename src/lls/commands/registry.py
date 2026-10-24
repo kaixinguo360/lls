@@ -1,26 +1,23 @@
-﻿"""命令分发。
-
-命令自己完成全部行为，返回值只承载「命令自己做不了」的事
-（模式切换 / 退出），见 :class:`~lls.commands.result.CommandResult`。
-"""
+"""命令分发。"""
 
 from __future__ import annotations
 
-from .context import CommandContext
-from .spec import all_commands, get_command
 from lls.commands.result import CommandResult
+from lls.session.services import Services
+
+from .spec import all_commands, get_command
 
 __all__ = ["command_help", "execute_command"]
 
 
 async def execute_command(
-    name: str, ctx: CommandContext, args: str | None
+    name: str, services: Services, args: str | None
 ) -> CommandResult | None:
     """执行命令；返回 ``CommandResult``，命令不存在时返回 None。"""
     spec = get_command(name)
     if spec is None:
         return None
-    return await spec.fn(ctx, args)
+    return await spec.fn(services, args)
 
 
 def command_help() -> str:

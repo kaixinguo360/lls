@@ -135,7 +135,7 @@ def test_scrollback() -> None:
     assert "line3" in sb[-1]
 
 
-def test_text_for_ai_context() -> None:
+def test_text_trims_trailing_blank_lines() -> None:
     m = _model(rows=3, columns=8)
     m.feed(b"one\r\ntwo\r\n")
     text = m.text()

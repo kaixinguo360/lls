@@ -8,7 +8,7 @@
 * ``_PosixPtySession.resize`` 把宿主尺寸变化转给子进程的 PTY；
   SIGWINCH 本身由 ``session.engine`` 监听，不在本模块。
 
-绝不 import 任何 ui / commands / ai / term 模块，保持平台层纯净。
+绝不 import 任何 ui / commands / term 模块，保持平台层纯净。
 """
 
 from __future__ import annotations

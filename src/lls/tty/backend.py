@@ -24,8 +24,8 @@ class Winsize:
 class Key:
     """一个按键事件。
 
-    覆盖模式（line/prompt）下由 ``tty.keys`` 把字节流解析成 Key；
-    透传模式（char）下不使用本类型，字节原样转发。
+    命令模式下由 ``tty.keys`` 把字节流解析成 Key；
+    透传模式下不使用本类型，字节原样转发。
     """
 
     char: str = ""          # 可见字符（含宽字符）

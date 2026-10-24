@@ -5,7 +5,7 @@
 * **纯计算**：``wrap_multi_lines`` / ``char_width`` / ``overlay_anchor`` ——
   给定文本与终端宽度，算出该占几行、覆盖层该从哪一行开始，不碰终端；
 * **写终端**：``LinePrinter``（覆盖层绘制）、``render_row_cells``（把模型
-  单元格编码成带样式的字节）、``print_screen_perfect``（按模型整屏显示）。
+  单元格编码成带样式的字节）。
 
 覆盖层的几何约束由 ``overlay_anchor`` 统一负责：放不下就整体上移，绝不越过
 屏幕底部 —— 一旦越界终端会滚动，物理行与模型行随即错位。
@@ -18,9 +18,7 @@ from lls.tty import Console
 __all__ = [
     "LinePrinter",
     "char_width",
-    "content_start",
     "overlay_anchor",
-    "print_screen_perfect",
     "render_row_cells",
     "wrap_multi_lines",
 ]
@@ -229,110 +227,3 @@ def render_row_cells(cells) -> str:
             parts.append(text)
     return "".join(parts)
 
-
-def content_start(screen) -> int:
-    """第一个非空行的下标；全空时返回光标所在行。
-
-    模型顶部可能有一段空行（见 ``session.engine`` 启动时对物理光标位置的对齐），
-    这些空行**不是**要显示的内容，重绘时不应把它们搬到屏幕顶部。
-    """
-    rows = screen.rows
-    for row in range(rows):
-        if screen.row_text(row).strip():
-            return row
-    return min(screen.cursor.y, rows - 1)
-
-
-
-
-
-def print_screen_perfect(
-    screen,
-    console: Console,
-    end: str = "\r\n",
-    tail: str = "",
-    width: int | None = None,
-    height: int | None = None,
-    frame: bool = False,
-    raw: bool = False,
-) -> None:
-    """精确移植 legacy terminal.print_screen_perfect 的外观。
-
-    边框 ``+----+`` + 光标反色高亮 + 状态信息行。
-    修复了 legacy 里 ``y_begin`` 在 ``y_end`` 赋值前引用导致的 NameError。
-    """
-    if width is None:
-        width = (screen.columns - 4) if frame else (screen.columns - 2)
-
-    lines = screen.lines()
-    # legacy 的 screen.lines 是**动态列表**（长度 = 光标到达的最大行 + 1），
-    # 故非 frame 时不画尾部空行。pyte 的 lines() 固定 rows 行（尾部补空），
-    # 这里按 legacy 语义裁到最后一个非空行，避免画出大量空行把画面推走。
-    content_lines = len(lines)
-    while content_lines > 1 and lines[content_lines - 1].strip() == "":
-        content_lines -= 1
-
-    if height is None:
-        height = screen.rows if frame else content_lines
-
-    # legacy bug 修复：y_end 必须先于 y_begin 计算
-    y_end = content_lines if content_lines > height else height
-    y_begin = content_lines - height if content_lines > height else 0
-
-    # 跳过开头的空行：模型顶部可能因启动对齐（见 session.engine 的光标对齐）留空，
-    # 那些行代表「模型未建模的历史画面」，不是内容，显示视图里不应占位。
-    first = 0
-    while first < content_lines - 1 and lines[first].strip() == "":
-        first += 1
-    if first > y_begin:
-        y_begin = first
-
-    if not raw:
-        console.write(("+" + "-" * width + "+" + end).encode())
-    for i in range(y_begin, y_end):
-        line = lines[i] if i < len(lines) else ""
-        line += tail
-        x_begin = 0
-        if frame:
-            x_end = width if len(line) > width else len(line)
-        else:
-            x_end = len(line)
-        display = line[x_begin:x_end] + " " * (width - (x_end - x_begin))
-        if screen.cursor.y == i:
-            if frame:
-                if screen.cursor.x >= x_begin and screen.cursor.x < x_end:
-                    cursor = screen.cursor.x + x_begin
-                    display = (
-                        display[:cursor]
-                        + "\x1b[7m" + display[cursor : cursor + 1] + "\x1b[0m"
-                        + display[cursor + 1 :]
-                    )
-            else:
-                while screen.cursor.x > len(display) - 1:
-                    display += " "
-                display = (
-                    display[: screen.cursor.x]
-                    + "\x1b[7m" + display[screen.cursor.x : screen.cursor.x + 1] + "\x1b[0m"
-                    + display[screen.cursor.x + 1 :]
-                )
-        if frame:
-            console.write(("|" + display + "|").encode())
-        else:
-            console.write(display.rstrip(" ").encode())
-        if not (raw and i == (y_end - 1)):
-            console.write(end.encode())
-        console.write(b"\r")
-    if not raw:
-        console.write(("+" + "-" * width + "+" + end).encode())
-        buffer = "alter" if screen.alternate else "main"
-        console.write(
-            (
-                f"cursor: {{x={screen.cursor.x + 1},y={screen.cursor.y + 1}}}"
-                f", lines: {content_lines}"
-                f", offset: 0"
-                f", height: {screen.rows}"
-                f", buffer: {buffer}"
-                f", mode: normal"
-                + end
-            ).encode()
-        )

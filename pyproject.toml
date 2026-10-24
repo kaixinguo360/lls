@@ -5,34 +5,26 @@ build-backend = "hatchling.build"
 [project]
 name = "lls"
 version = "0.2.0"
-description = "AI 增强的 shell 终端包装器：PTY 代理 + VT100 内核 + LLM 命令生成"
+description = "基于 PTY 的终端包装器：VT100 屏幕模型 + 覆盖层界面"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "LLS" }]
 dependencies = [
     "pyte>=0.8.2",
-    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
-openai = ["openai>=1.0"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "ruff>=0.1", "mypy>=1.0"]
 
 [project.scripts]
 lls = "lls.cli:main"
-
-[project.entry-points."lls.ai.roles"]
-chat = "lls.ai.role:ChatRole"
-completion = "lls.ai.role:CompletionRole"
-structured = "lls.ai.role:StructuredRole"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lls"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
 
 [tool.ruff]
 line-length = 100
@@ -44,5 +36,5 @@ ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["src/lls/term", "src/lls/edit", "src/lls/ai"]
+files = ["src/lls/term", "src/lls/edit"]
 strict = true

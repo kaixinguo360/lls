@@ -1,6 +1,6 @@
 """Engine —— 终端引擎：PTY、屏幕模型、渲染、输入、信号。
 
-**本模块不认识任何具体业务**：不知道什么是命令、模式、AI。它只提供原语，
+**本模块不认识任何具体业务**：不知道什么是命令。它只提供原语，
 由外部注册的处理器（:class:`~lls.session.services.Handler`）决定如何响应输入。
 
 主循环做的唯一一件事是反复调用当前处理器的 ``step()``。处理器想要切换，
@@ -28,7 +28,6 @@ from lls.tty import Console, Key, KeyParser, PtySession, TerminalBackend, Winsiz
 from lls.ui import (
     LinePrinter,
     overlay_anchor,
-    print_screen_perfect,
     render_row_cells,
     wrap_multi_lines,
 )
@@ -36,8 +35,6 @@ from lls.ui import (
 from .services import Handler, Services
 
 __all__ = ["Engine"]
-
-_RAW_MAX = 8000
 
 # 收到 ESC 后等待后续字节的时间。方向键等序列几乎立刻到达，
 # 超过这个时间仍未收全就判定为独立 Esc 键（readline / tmux 的做法）。
@@ -88,7 +85,6 @@ class Engine:
         self._handlers = handlers
         self._current = initial_handler
         self._pending_handler: str | None = None
-        self._quit_requested = False
 
         self._pty: PtySession | None = None
         self._pty_fd = -1
@@ -100,7 +96,6 @@ class Engine:
         self._key_parser = KeyParser()
         self._key_buf: list[Key] = []
 
-        self.raw = bytearray()
         self._exit_event = asyncio.Event()
         self._exit_status: int | None = None
         self._exit_code: int | None = None
@@ -164,7 +159,7 @@ class Engine:
             pass
 
         try:
-            while not self._exit_event.is_set() and not self._quit_requested:
+            while not self._exit_event.is_set():
                 handler = self._handlers.get(self._current)
                 if handler is None:
                     # 处理器名字无效：退回注册表里的第一个，避免空转
@@ -197,10 +192,6 @@ class Engine:
     def request_handler(self, name: str) -> None:
         """请求切换处理器（下一轮生效）。"""
         self._pending_handler = name
-
-    def request_quit(self) -> None:
-        """请求退出主循环（不结束子进程，让它自行收尾）。"""
-        self._quit_requested = True
 
     # ---- 退出码 ----
 
@@ -296,7 +287,6 @@ class Engine:
         if not data:
             self._on_child_exit()
             return
-        self._record_raw(data)
         if self._console is None:
             self.screen.feed(data)
             return
@@ -627,20 +617,7 @@ class Engine:
         if wpid == self._pty.pid and self._exit_status is None:
             self._exit_status = status
 
-    def _record_raw(self, data: bytes) -> None:
-        self.raw.extend(data)
-        if len(self.raw) > _RAW_MAX:
-            overflow = len(self.raw) - _RAW_MAX
-            del self.raw[:overflow]
-            # 需对齐 UTF-8 边界，避免截断时把多字节字符劈成半个导致乱码。
-            while self.raw and (self.raw[0] & 0xC0) == 0x80:
-                del self.raw[0]
-
     # ---- 终端写入（Services 转发目标）----
-
-    def write_terminal(self, data: bytes) -> None:
-        if self._console is not None:
-            self._console.write(data)
 
     def write_child(self, data: bytes, *, enter: bool = False) -> None:
         """写子进程；``enter`` 为 True 时追加换行（若末尾尚无换行）。"""
@@ -661,17 +638,6 @@ class Engine:
         if self._console is not None:
             self._console.write(b"\x1b[2J\x1b[H\r")
 
-    def show_screen(self, *, raw: bool = False) -> None:
-        """清屏并显示当前屏幕（边框视图，或原始字节）。"""
-        if self._console is None:
-            return
-        self._console.write(b"\x1b[2J\x1b[H\r")
-        if raw:
-            self._console.write(bytes(self.raw))
-            self._console.write(b"\r\n")
-        else:
-            print_screen_perfect(self.screen, self._console, end="\r\n")
-
     async def show_message(self, text: str) -> None:
         """以覆盖层显示消息，等任意键后收起。不改变处理器。
 
@@ -687,9 +653,6 @@ class Engine:
 
     def restore(self) -> None:
         """收起覆盖层，按模型还原它占的行，并把物理光标定位到模型光标。"""
-        self.render_from_model(keep_overlay=False)
-
-    def hide_overlay(self) -> None:
         self.render_from_model(keep_overlay=False)
 
     # ---- 覆盖层 ----
@@ -859,13 +822,6 @@ class Engine:
             # 覆盖层不再显示，后续输出无需再绕过它。
             self._active_prompt = None
 
-    def record_history(self, value: str, history_id: str) -> None:
-        editor = self._editors.get(history_id)
-        if editor is None:
-            editor = LineEditor()
-            self._editors[history_id] = editor
-        editor.record(value)
-
     def requeue_pending_keys(self) -> None:
         """把尚在键缓冲里的按键回填到输入队列。
 
@@ -939,16 +895,3 @@ class Engine:
             return get_task.result()
         return None
 
-    # ---- 定时 ----
-
-    def call_later(self, delay: float, fn: Any) -> Any:
-        if self._loop is None:
-            return None
-        return self._loop.call_later(delay, fn)
-
-    def cancel_timer(self, handle: Any) -> None:
-        if handle is not None:
-            try:
-                handle.cancel()
-            except Exception:
-                pass

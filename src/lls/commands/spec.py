@@ -1,16 +1,21 @@
-﻿"""命令规格与注册装饰器。"""
+"""命令规格与注册装饰器。
+
+命令就是一个异步函数：``(services, args) -> CommandResult``。
+``services`` 是引擎对外的能力集合（见 :mod:`lls.session.services`）——
+命令直接用它做事，不需要再套一层「上下文」或「UI 协议」。
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
-from .context import CommandContext
 from lls.commands.result import CommandResult
+from lls.session.services import Services
 
-__all__ = ["CommandSpec", "command"]
+__all__ = ["CommandFn", "CommandSpec", "all_commands", "command", "get_command"]
 
-CommandFn = Callable[[CommandContext, str | None], Awaitable[CommandResult]]
+CommandFn = Callable[[Services, str | None], Awaitable[CommandResult]]
 
 
 @dataclass(slots=True)
@@ -38,8 +43,8 @@ def command(
             name=name, fn=fn, aliases=aliases, category=category, summary=summary
         )
         _REGISTRY[name] = spec
-        for a in aliases:
-            _REGISTRY[a] = spec
+        for alias in aliases:
+            _REGISTRY[alias] = spec
         return fn
 
     return decorator

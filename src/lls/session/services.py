@@ -1,17 +1,14 @@
 """Services —— 框架对外提供的全部能力。
 
 这是「终端引擎」与「上层逻辑」之间**唯一**的接口。引擎本身不认识命令、
-模式、AI 这些概念；它只负责 PTY、屏幕模型、渲染与输入，并通过本类把这些
+处理器这些概念；它只负责 PTY、屏幕模型、渲染与输入，并通过本类把这些
 能力暴露出去。处理器与命令都只依赖这里的原语，因而可以自由组合出任意行为，
 无需改动引擎。
 
 约定：
-* 所有方法都是**原语**，不做业务判断（不解析命令、不决定模式）；
+* 所有方法都是**原语**，不做业务判断（不解析命令、不决定处理器）；
 * 会阻塞等待用户输入的方法都是 ``async``；
 * 引擎状态只有一个所有者（引擎自身），本类只做转发，不缓存。
-
-本类同时满足 ``UIService`` 与 ``ShellService`` 两个协议，因此命令拿到的
-``ctx.ui`` / ``ctx.io`` 就是同一个对象的不同视角。
 """
 
 from __future__ import annotations
@@ -19,7 +16,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 from lls.term import ScreenModel
-from lls.tty import Key
 
 if TYPE_CHECKING:  # pragma: no cover
     from .engine import Engine
@@ -60,19 +56,11 @@ class Services:
         """子进程的屏幕模型（唯一真相）。"""
         return self._engine.screen
 
-    def screen_raw(self) -> bytes:
-        """自启动以来收到的原始字节（有上限，见引擎的 ``_RAW_MAX``）。"""
-        return bytes(self._engine.raw)
-
-    # ---- UIService：宿主终端显示 ----
+    # ---- 宿主终端显示 ----
 
     def clear_screen(self) -> None:
         """清屏并归位（``ESC[2J ESC[H``）。"""
         self._engine.clear_screen()
-
-    def show_screen(self, *, raw: bool = False) -> None:
-        """清屏后以边框视图显示屏幕内容；``raw=True`` 时显示原始字节。"""
-        self._engine.show_screen(raw=raw)
 
     async def show_message(self, text: str) -> None:
         """以覆盖层显示一段文本，等任意键后收起。不改变当前处理器。"""
@@ -88,26 +76,13 @@ class Services:
         """在模型光标处画覆盖层，返回 ``(起始行, 行数)``。不写模型。"""
         return self._engine.draw_overlay(text, cursor)
 
-    def hide_overlay(self) -> None:
-        """收起覆盖层，把它占的行按模型还原。"""
-        self._engine.hide_overlay()
-
     # ---- 子进程 ----
 
     def write(self, data: bytes, *, enter: bool = False) -> None:
         """向子进程写字节；``enter=True`` 时追加换行。"""
         self._engine.write_child(data, enter=enter)
 
-    @property
-    def child_alive(self) -> bool:
-        """子进程是否仍在运行。"""
-        return not self._engine.exited
-
     # ---- 输入 ----
-
-    async def read_key(self) -> Key | None:
-        """读一个按键；子进程退出时返回 None。"""
-        return await self._engine.read_key()
 
     async def read_chars(self, timeout: float | None = None) -> bytes | None:
         """读一段原始输入字节（不解析按键）。超时返回 ``b""``，退出返回 None。"""
@@ -161,12 +136,6 @@ class Services:
         """
         self._engine.flush_backlog()
 
-    # ---- 历史 ----
-
-    def record_history(self, value: str, history_id: str) -> None:
-        """把一条输入记入某历史列表。"""
-        self._engine.record_history(value, history_id)
-
     # ---- 处理器切换 ----
 
     def set_handler(self, name: str) -> None:
@@ -176,17 +145,3 @@ class Services:
         这样切换是**协作式**的：处理器总能把当前这一步做完。
         """
         self._engine.request_handler(name)
-
-    def request_quit(self) -> None:
-        """请求引擎退出主循环（不是退出子进程）。"""
-        self._engine.request_quit()
-
-    # ---- 定时 ----
-
-    def call_later(self, delay: float, fn: Any) -> Any:
-        """在事件循环里延迟调用（返回可取消的句柄）。"""
-        return self._engine.call_later(delay, fn)
-
-    def cancel_timer(self, handle: Any) -> None:
-        """取消一个 :meth:`call_later` 返回的句柄。"""
-        self._engine.cancel_timer(handle)

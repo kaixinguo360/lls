@@ -11,15 +11,13 @@ __all__ = ["main", "parse_args", "doctor"]
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="lls", description="AI 增强的 shell 终端包装器")
+    p = argparse.ArgumentParser(prog="lls", description="基于 PTY 的终端包装器")
     p.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="要运行的命令（不填则用 $SHELL）",
     )
     p.add_argument("--doctor", action="store_true", help="诊断环境并退出")
-    p.add_argument("--config", help="配置文件路径")
-    p.add_argument("--role", help="默认 role")
     return p.parse_args(argv)
 
 
@@ -41,14 +39,6 @@ def doctor() -> int:
         print("pyte:     OK")
     except ImportError:
         print("pyte:     缺失 (pip install pyte)")
-    try:
-        import openai  # noqa: F401
-
-        print("openai:   OK")
-    except ImportError:
-        print("openai:   缺失 (pip install 'lls[openai]')")
-    key = os.environ.get("LLS_OPENAI_API_KEY")
-    print(f"api_key:  {'已设置' if key else '未设置 (export LLS_OPENAI_API_KEY=...)'}")
     print(f"shell:    {_default_shell()}")
     if sys.platform not in ("linux", "darwin"):
         print("警告: 当前平台无 POSIX 终端，请使用 WSL / Linux / macOS")
@@ -63,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
 
     command = args.command or [_default_shell()]
 
-    # 非交互：透传执行（不过 AI）
+    # 非交互：直接执行，不接管终端
     if not sys.stdin.isatty():
         try:
             return subprocess.call(command)
@@ -74,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     # 交互：进入主循环
     from .app import run_interactive
 
-    return run_interactive(command, config=args.config, role=args.role)
+    return run_interactive(command)
 
 
 if __name__ == "__main__":

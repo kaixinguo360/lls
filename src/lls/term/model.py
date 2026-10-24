@@ -143,9 +143,9 @@ class ScreenModel(Protocol):
         ...
 
     def text(self, *, limit: int | None = None, include_scrollback: bool = True) -> str:
-        """供 AI 上下文使用的整屏文本。
+        """整屏文本。
 
-        默认取「回滚区尾部 + 可见区」，并去掉末尾空行——这正是丢给模型的
-        console 内容；``limit`` 用于按行数截断（对应旧实现的 ``console_max_height``）。
+        默认取「回滚区尾部 + 可见区」，并去掉末尾空行；``limit`` 用于按行数
+        截断。
         """
         ...

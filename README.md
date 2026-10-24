@@ -1,19 +1,23 @@
 # LLS
 
-AI 增强的 shell 终端包装器：PTY 代理 + VT100 内核 + LLM 命令生成。
+基于 PTY 的终端包装器：VT100 屏幕模型 + 覆盖层界面。
 
 > 当前处于重构中。旧实现见 [`legacy/`](legacy/)，新实现见 [`src/lls/`](src/lls/)。
 
-## 状态
+## 结构
 
-- [x] P0 骨架（pyproject + src 包 + 工具链）
-- [x] P1 相机（快照 / 回放 / golden 对拍测试）
-- [ ] P2 VT 内核（pyte 适配器已就绪，自研状态机待做）
-- [ ] P3 运行时（asyncio 事件循环 + PTY 适配器）
-- [ ] P4 渲染与编辑（底部临时覆盖行 + 差量渲染）
-- [ ] P5 命令与配置（Effect 协议 + TOML 配置）
-- [ ] P6 AI 层（Context/Role/Session/Transport）
-- [ ] P7 收尾（文档 / doctor / replay）
+```
+src/lls/session/    终端引擎与它对外的能力接口
+src/lls/handlers.py 输入处理器（透传 / 命令分发）
+src/lls/commands/   命令层，按类别分模块
+src/lls/term/       VT100 屏幕模型（pyte 适配）
+src/lls/ui/         显示原语（换行、覆盖层定位、按模型渲染）
+src/lls/edit/       行编辑缓冲
+src/lls/tty/        PTY 与平台终端后端
+```
+
+引擎不认识任何命令：主循环只反复调用当前处理器的 `step()`。新增一种输入
+方式 = 新增一个处理器；新增一条命令 = 加一个带 `@command` 的函数。
 
 ## 开发
 
