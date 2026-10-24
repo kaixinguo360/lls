@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import List
 
 import pytest
 
+from lls.ai import Message, ToolCall
 from lls.commands.builtin import generate as gen
 from lls.ui import conservative_char_width
 
@@ -66,6 +68,20 @@ class FakeServices:
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _tool_call(payload: str) -> ToolCall:
+    return ToolCall(
+        id="call_1", name="emit_input", arguments=json.dumps({"input": payload})
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_session():
+    """每个用例都从空会话开始，避免互相污染。"""
+    gen._CONVERSATION.clear()
+    yield
+    gen._CONVERSATION.clear()
 
 
 # ---- 消息构造 ----
@@ -302,8 +318,8 @@ def test_menu_flattens_payload_newlines() -> None:
 
 
 def _patch_generation(monkeypatch, payload: str) -> None:
-    async def fake(s, request, screen):
-        return payload
+    async def fake(s, request, screen, history=()):
+        return payload, _tool_call(payload)
 
     monkeypatch.setattr(gen, "_stream_payload", fake)
 
@@ -352,9 +368,10 @@ def test_reject_keys_abort(monkeypatch, answer) -> None:
 def test_retry_regenerates_then_accepts(monkeypatch) -> None:
     calls = []
 
-    async def fake(s, request, screen):
+    async def fake(s, request, screen, history=()):
         calls.append(request)
-        return "cmd%d" % len(calls)
+        made = "cmd%d" % len(calls)
+        return made, _tool_call(made)
 
     monkeypatch.setattr(gen, "_stream_payload", fake)
 
@@ -376,9 +393,10 @@ def test_unknown_key_reprompts(monkeypatch) -> None:
 def test_edit_reads_new_request_then_regenerates(monkeypatch) -> None:
     requests = []
 
-    async def fake(s, request, screen):
+    async def fake(s, request, screen, history=()):
         requests.append(request)
-        return "from:" + request
+        made = "from:" + request
+        return made, _tool_call(made)
 
     monkeypatch.setattr(gen, "_stream_payload", fake)
 
@@ -495,7 +513,7 @@ def test_run_generate_empty_request_does_nothing(monkeypatch) -> None:
 
 
 def test_run_generate_reports_errors(monkeypatch) -> None:
-    async def boom(s, request, screen):
+    async def boom(s, request, screen, history=()):
         raise RuntimeError("backend exploded")
 
     monkeypatch.setattr(gen, "_stream_payload", boom)
@@ -542,7 +560,7 @@ def test_empty_payload_can_be_discarded(monkeypatch) -> None:
 
 
 def test_cancelled_generation_is_reported(monkeypatch) -> None:
-    async def cancelled(s, request, screen):
+    async def cancelled(s, request, screen, history=()):
         raise gen._Cancelled()
 
     monkeypatch.setattr(gen, "_stream_payload", cancelled)
@@ -608,3 +626,89 @@ def test_command_stays_in_command_mode_when_nothing_written(monkeypatch) -> None
     result = _run(gen.cmd_generate(services, "请求"))
 
     assert result.handler is None
+
+# ---- 会话：多轮上下文 ----
+
+
+def test_build_messages_puts_history_between_system_and_request() -> None:
+    history = [
+        Message("user", "上一轮"),
+        Message("assistant", None, tool_calls=(_tool_call("ls"),)),
+        Message("tool", "written", tool_call_id="call_1"),
+    ]
+
+    messages = gen.build_messages("这一轮", "screen", history)
+
+    assert messages[0].role == "system"
+    assert [m.content for m in messages[1:4]] == ["上一轮", None, "written"]
+    assert messages[-1].role == "user"
+    assert "这一轮" in messages[-1].content
+
+
+def test_successful_run_records_one_turn(monkeypatch) -> None:
+    _patch_generation(monkeypatch, "echo hi")
+    services = FakeServices(["y"])
+
+    _run(gen.run_generate(services, "请求"))
+
+    messages = gen._CONVERSATION.messages()
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    assert "请求" in messages[0].content
+    assert messages[2].content == "written"
+
+
+def test_input_mode_records_the_missing_newline(monkeypatch) -> None:
+    _patch_generation(monkeypatch, "partial")
+    services = FakeServices(["i"])
+
+    _run(gen.run_generate(services, "请求"))
+
+    assert gen._CONVERSATION.messages()[2].content == "written without a newline"
+
+
+def test_failed_run_records_nothing(monkeypatch) -> None:
+    async def boom(s, request, screen, history=()):
+        raise RuntimeError("backend exploded")
+
+    monkeypatch.setattr(gen, "_stream_payload", boom)
+    services = FakeServices([])
+
+    _run(gen.run_generate(services, "请求"))
+
+    assert gen._CONVERSATION.messages() == []
+
+
+def test_abandoned_run_records_nothing(monkeypatch) -> None:
+    _patch_generation(monkeypatch, "rm -rf /")
+    services = FakeServices(["n"])
+
+    _run(gen.run_generate(services, "请求"))
+
+    assert gen._CONVERSATION.messages() == []
+
+
+def test_second_run_sends_the_first_turn_back(monkeypatch) -> None:
+    seen = []
+
+    async def fake(s, request, screen, history=()):
+        seen.append(list(history))
+        made = "echo %d" % len(seen)
+        return made, _tool_call(made)
+
+    monkeypatch.setattr(gen, "_stream_payload", fake)
+
+    _run(gen.run_generate(FakeServices(["y"]), "第一次"))
+    _run(gen.run_generate(FakeServices(["y"]), "第二次"))
+
+    assert seen[0] == []
+    assert [m.role for m in seen[1]] == ["user", "assistant", "tool"]
+    assert "第一次" in seen[1][0].content
+
+
+def test_history_is_trimmed_to_the_configured_turns(monkeypatch) -> None:
+    _patch_generation(monkeypatch, "ls")
+
+    for index in range(gen.HISTORY_TURNS + 3):
+        _run(gen.run_generate(FakeServices(["y"]), "第%d次" % index))
+
+    assert len(gen._CONVERSATION) == gen.HISTORY_TURNS

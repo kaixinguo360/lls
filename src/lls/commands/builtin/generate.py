@@ -10,9 +10,18 @@ from __future__ import annotations
 import asyncio
 import json
 from functools import lru_cache
-from typing import List, NamedTuple, Optional, Tuple
+from typing import List, NamedTuple, Optional, Sequence, Tuple
 
-from lls.ai import Catalog, ChunkKind, Message, Tool, load, resolve_config_path
+from lls.ai import (
+    Catalog,
+    ChunkKind,
+    Conversation,
+    Message,
+    Tool,
+    ToolCall,
+    load,
+    resolve_config_path,
+)
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.session.services import Services
@@ -66,10 +75,16 @@ EMIT_TOOL = Tool(
 
 # ---- 消息构造 ----
 
+# 一次 lls 运行就是一段会话：每轮记下当时的终端画面、请求、模型给出的调用，
+# 以及这一轮最后怎么处理的。下一次生成把这些一起发回去，模型才有「上轮」可参考。
+HISTORY_TURNS = 6
 
-def build_messages(request: str, screen: str) -> List[Message]:
-    """构造两条消息：固定 system + 携带上下文与请求的 user。"""
-    user = (
+_CONVERSATION = Conversation(HISTORY_TURNS)
+
+
+def build_user_text(request: str, screen: str) -> str:
+    """本轮交给模型的用户消息：先是终端画面，再是请求。"""
+    return (
         "<terminal_state>\n"
         + screen
         + "\n</terminal_state>\n\n"
@@ -77,7 +92,17 @@ def build_messages(request: str, screen: str) -> List[Message]:
         + request
         + "\n</request>"
     )
-    return [Message("system", SYSTEM_PROMPT), Message("user", user)]
+
+
+def build_messages(
+    request: str, screen: str, history: Sequence[Message] = ()
+) -> List[Message]:
+    """构造请求消息：固定 system + 历史轮次 + 本轮 user。"""
+    return [
+        Message("system", SYSTEM_PROMPT),
+        *history,
+        Message("user", build_user_text(request, screen)),
+    ]
 
 
 def tail_lines(text: str, limit: int) -> str:
@@ -218,10 +243,15 @@ class _Cancelled(Exception):
     """用户在生成过程中按下 Ctrl-C。"""
 
 
-async def _stream_payload(s: Services, request: str, screen: str) -> str:
-    """调用 provider 生成 payload；期间可被 Ctrl-C 中断。"""
+async def _stream_payload(
+    s: Services, request: str, screen: str, history: Sequence[Message] = ()
+) -> Tuple[str, ToolCall]:
+    """调用 provider 生成 payload；期间可被 Ctrl-C 中断。
+
+    返回 ``(payload, call)`` —— 调用本身也要留下，它是这一轮的 assistant 消息。
+    """
     provider, model = _catalog().resolve()
-    messages = build_messages(request, screen)
+    messages = build_messages(request, screen, history)
     box = {}  # type: dict
     think = []  # type: List[str]
 
@@ -268,7 +298,7 @@ async def _stream_payload(s: Services, request: str, screen: str) -> str:
     value = arguments.get("input")
     if not isinstance(value, str):
         raise RuntimeError("tool call has no 'input' string")
-    return value
+    return value, call
 
 
 async def _read_request(s: Services, value: str = "") -> Optional[str]:
@@ -286,19 +316,26 @@ class _Outcome(NamedTuple):
 
     ``payload is None`` 表示**放弃**（用户按 n、编辑后清空、会话结束、中断）；
     空字符串是**正常结果**（模型判断该发空内容），照样走确认与写入。
+
+    ``call`` 是这一轮模型给出的工具调用，记录会话时需要它；``请求#内容``
+    这种没经过模型的轮次为 None。
     """
 
     payload: Optional[str] = None
     enter: bool = True
     note: Optional[str] = None
+    call: Optional[ToolCall] = None
 
 
-async def _produce(s: Services, request: str, screen: str) -> _Outcome:
+async def _produce(
+    s: Services, request: str, screen: str, history: Sequence[Message] = ()
+) -> _Outcome:
     """生成并确认。
 
     ``请求#内容`` 只跳过生成，仍然走确认菜单 —— 手写的内容同样需要过一眼。
     """
     payload = None  # type: Optional[str]
+    call = None  # type: Optional[ToolCall]
     if "#" in request:
         payload = request.partition("#")[2].strip()
         if not payload:
@@ -308,7 +345,7 @@ async def _produce(s: Services, request: str, screen: str) -> _Outcome:
     while True:
         if payload is None:
             try:
-                payload = await _stream_payload(s, request, screen)
+                payload, call = await _stream_payload(s, request, screen, history)
             except _Cancelled:
                 return _Outcome(note="生成已中断")
 
@@ -327,11 +364,11 @@ async def _produce(s: Services, request: str, screen: str) -> _Outcome:
         hint = ", confirm?"
 
         if key == "" or key in ("y", "yes", "u", "use"):
-            return _Outcome(payload, True)
+            return _Outcome(payload, True, None, call)
         if key in ("i", "input"):
-            return _Outcome(payload, False)
+            return _Outcome(payload, False, None, call)
         if key in ("n", "no", "q", "quit", "exit", "cancel"):
-            return _Outcome()
+            return _Outcome(call=call)
         if key in ("r", "re", "retry"):
             payload = None
             continue
@@ -363,8 +400,9 @@ async def run_generate(s: Services, request: Optional[str] = None) -> bool:
 
         s.flush_model()
         screen = tail_lines(s.screen.text(), CONTEXT_LINES)
+        user_text = build_user_text(request, screen)
 
-        outcome = await _produce(s, request, screen)
+        outcome = await _produce(s, request, screen, _CONVERSATION.messages())
         if outcome.payload is None:
             # 放弃：用户主动按 n 时没有 note（本来就预期如此），其余情况说明原因。
             if outcome.note:
@@ -381,6 +419,14 @@ async def run_generate(s: Services, request: Optional[str] = None) -> bool:
         s.write(payload.encode(), enter=enter)
         await asyncio.sleep(0.1)
         s.restore_context()
+
+        # 一轮到这里才是完整的：确认过、写过了。协议要求工具调用后必须紧跟
+        # 一条 tool 回复，所以整轮一起进历史，中途失败不会留下半条消息。
+        _CONVERSATION.add_turn(
+            Message("user", user_text),
+            outcome.call,
+            "written" if enter else "written without a newline",
+        )
         return True
     except Exception as e:  # noqa: BLE001
         await s.show_message("error: %s" % e)
