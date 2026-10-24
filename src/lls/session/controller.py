@@ -32,10 +32,8 @@ import os
 import signal
 import sys
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from lls.ai import AIError, Session, stream_chat
-from lls.ai.types import ChunkKind
 from lls.commands import CommandContext, execute_command
 from lls.edit import LineEditor
 from lls.term import ScreenModel
@@ -48,6 +46,9 @@ from lls.ui import (
     wrap_multi_lines,
 )
 
+if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
+    from lls.ai import Session
+
 __all__ = ["Controller"]
 
 _RAW_MAX = 8000
@@ -59,6 +60,20 @@ ESC_PENDING_TIMEOUT = 0.05
 # 子进程输出后，等这么久没有新输出才重绘覆盖层。
 # 目的是让程序（尤其全屏程序）的整屏重绘完整落地，避免覆盖层插在中间。
 OVERLAY_REDRAW_DELAY = 0.05
+
+# char 模式下模型追赶子进程的调度参数。
+#
+# 为什么要分批：解析是纯 Python，一整屏重绘约 10ms。一次 read 可能拿到 10KB
+# （约十几帧），若同步解析完再返回，事件循环就被独占上百毫秒，期间读不到新的
+# 输出 —— 显示只能一顿一顿地刷新。分批后每轮只解析一小片，读和写都及时。
+#
+# 实测（30 帧整屏重绘，帧间隔越小越流畅）：
+#   同步喂完          202ms
+#   2048 字节 / 4ms   119ms   <- 采用
+#    512 字节 / 2ms   174ms   （切片太小，追赶轮次变多反而更慢）
+_FEED_SLICE = 2048          # 单次喂给模型的最大字节数
+_FEED_BUDGET = 0.004        # 单轮解析的时间预算（秒）
+_BACKLOG_LIMIT = 256 * 1024  # 积压上限：超过就一次喂完，避免无限增长
 
 # _read_line 的哨兵返回值：用户按下 Esc（用于退出 line 模式等场景）。
 ESCAPE = object()
@@ -146,6 +161,8 @@ class Controller:
         #   _overlay_lines       —— 当前帧占用的行数
         self._overlay_anchor_row: int | None = None
         self._overlay_lines = 0
+        # char 模式下等待喂给模型的字节（显示已先透传出去，模型在后面追赶）。
+        self._backlog = bytearray()
         # 覆盖层的延迟重绘定时器。
         # 子进程（如 vim）重绘整屏时会连续发出多块输出；若在每块之间插入
         # 覆盖层的绘制，就会打断它的绘制序列（实测第 1 行内容被 ':' 覆盖）。
@@ -272,22 +289,74 @@ class Controller:
             self._on_child_exit()
             return
         self._record_raw(data)
-        self._screen.feed(data)
         if self._console is None:
+            self._screen.feed(data)
             return
         if self._mode != "line":
-            # char / prompt 模式直接透传（legacy read_stdout: mode != "line"）：
-            # 这条路径上覆盖层不存在，物理终端由子进程独占，透传是正确且最快的。
+            # char / prompt 模式：子进程独占物理终端，透传即可。
+            #
+            # **显示优先**：立刻写终端，模型排队追赶（见 _pump_backlog）。
+            # 解析是纯 Python，一次整屏重绘约 10ms；若在写终端前同步解析，
+            # 事件循环就被占住、读不到下一批输出，画面只能一顿一顿地刷新
+            # （实测整屏重绘密集的程序，帧间隔从 23ms 恶化到 200ms）。
+            # 模型只是影子，晚几百毫秒无妨 —— 需要它时（切回 line）先排空积压。
             self._console.write(data)
+            self._backlog += data
+            self._pump_backlog()
         else:
             # line 模式**绝不透传子进程字节**：物理终端的一切内容都由屏幕模型
             # 投影而来（见 _render_from_model）。透传会让「子进程画的」与
             # 「覆盖层画的」争用同一个终端，只能靠擦除/还原/时序补丁勉强维持。
+            self._flush_backlog()   # 渲染依赖完整的模型
+            self._screen.feed(data)
             if self._suppress_passthrough:
                 # 消息展示期间不重绘，避免冲乱消息；内容已进模型，稍后补齐。
                 self._output_during_message = True
             else:
                 self._render_from_model()
+
+    def _pump_backlog(self) -> None:
+        """解析一小片积压。
+
+        不做 `call_soon` 式的连续追赶：那会让事件循环排满解析回调，反而挤占
+        读 pty 的时机（实测比同步喂完还慢）。改成「每次收到输出顺带解析一片」，
+        解析速度自然与产出速度挂钩；落后太多时由 :data:`_BACKLOG_LIMIT`
+        兜底一次喂完，保证模型不会无限期落后于子进程。
+        """
+        self._feed_backlog_slice()
+
+    def _feed_backlog_slice(self) -> None:
+        """喂一小片积压（按时间预算），并清掉 dirty。
+
+        char 模式下物理终端已是透传后的真实画面，dirty 没有意义；不清的话，
+        下次进 line 会把这些「早就显示在屏幕上」的行再重绘一遍。
+        """
+        if not self._backlog:
+            return
+        if len(self._backlog) > _BACKLOG_LIMIT:
+            # 积压过多：一次喂完。宁可卡一下，也不让模型与子进程脱节。
+            self._screen.feed(bytes(self._backlog))
+            self._backlog.clear()
+            self._screen.clear_dirty()
+            return
+        started = time.perf_counter()
+        cut = 0
+        total = len(self._backlog)
+        while cut < total:
+            step = min(_FEED_SLICE, total - cut)
+            self._screen.feed(bytes(self._backlog[cut:cut + step]))
+            cut += step
+            if time.perf_counter() - started >= _FEED_BUDGET:
+                break
+        del self._backlog[:cut]
+        self._screen.clear_dirty()
+
+    def _flush_backlog(self) -> None:
+        """把积压全部喂完（切回 line 模式前必须做，渲染依赖完整模型）。"""
+        if self._backlog:
+            self._screen.feed(bytes(self._backlog))
+            self._backlog.clear()
+            self._screen.clear_dirty()
 
     def _render_from_model(
         self, *, keep_overlay: bool = True, leave_cursor: bool = True
@@ -606,6 +675,8 @@ class Controller:
         while True:
             if output is not None:
                 # 流式生成：走覆盖层（绝对定位、按行区间擦除），不滚动终端。
+                from lls.ai.types import ChunkKind   # 延迟导入，见 _gen_messages
+
                 lines_all, lines_cur = 1, 1
                 self._draw_overlay("(gen-cmd): waiting...")
                 cancelled = False
@@ -704,6 +775,10 @@ class Controller:
     # ---- 生成辅助 ----
 
     def _gen_messages(self, instruct: str, context: Any, role: Any) -> Any:
+        # 延迟导入：lls.ai 约 200ms，而纯 shell 会话（绝大多数时间）用不到它。
+        # 放在顶层会让每次启动都付这笔开销（实测启动因此从 ~1.0s 降到 ~0.8s）。
+        from lls.ai import stream_chat
+
         messages = self._session.replay(role, instruct, context)
         return stream_chat(self._settings.ai, messages)
 

@@ -21,6 +21,7 @@ pyte 的两个关键限制（本适配器必须自己解决）：
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any
 
 import pyte
@@ -34,6 +35,40 @@ _SWITCH_ON = (b"\x1b[?1049h", b"\x1b[?1047h", b"\x1b[?47h")
 _SWITCH_OFF = (b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l")
 _ALL_SWITCHES = _SWITCH_ON + _SWITCH_OFF
 _MAX_SEQ = max(len(s) for s in _ALL_SWITCHES)
+
+
+class _Screen(pyte.Screen):
+    """``pyte.Screen`` 加自建回滚区。
+
+    不用 ``pyte.HistoryScreen``：它在 ``__getattribute__`` 里拦截**每一次**
+    属性访问，而 ``draw()`` 每写一个字符都要访问 ``buffer`` / ``cursor`` /
+    ``columns``。实测 10 帧整屏重绘触发 97349 次拦截，占 ``feed()`` 总耗时
+    的 56%，让每次整屏重绘从 10ms 涨到 23ms —— 全屏程序连续重绘时，
+    这些毫秒累积成肉眼可见的卡顿。
+
+    这里只在**真正发生滚动**时（``index()`` 把顶行挤出去）记一行文本，
+    其余路径与普通 ``Screen`` 完全一致。
+    """
+
+    def __init__(self, columns: int, lines: int, history: int = 2000) -> None:
+        self._history: deque[str] = deque(maxlen=history or 1)
+        self._keep_history = history > 0
+        super().__init__(columns, lines)
+
+    def index(self) -> None:
+        # 顶行即将被挤出屏幕时先把它记进回滚区
+        if self._keep_history and self.cursor.y == self.lines - 1:
+            top = self.margins.top if self.margins else 0
+            if top == 0:
+                self._history.append(self._row_to_text(0))
+        super().index()
+
+    def _row_to_text(self, row: int) -> str:
+        line = self.buffer[row]
+        return "".join(line[x].data if x in line else " " for x in range(self.columns)).rstrip() if line else ""
+
+    def history_lines(self) -> list[str]:
+        return list(self._history)
 
 
 def _to_cell(char: Any) -> Cell:
@@ -75,9 +110,9 @@ class PyteScreenModel:
         self._stream = self._streams[id(self._main)]
         self._pending = b""  # 可能被块边界切断的开关序列前缀
 
-    def _make(self, rows: int, columns: int, history: int) -> pyte.HistoryScreen:
-        # HistoryScreen(columns, lines, history, ratio)
-        return pyte.HistoryScreen(columns, rows, history=history, ratio=1.0)
+    def _make(self, rows: int, columns: int, history: int) -> _Screen:
+        # 注意参数顺序：Screen(columns, lines)
+        return _Screen(columns, rows, history=history)
 
     # ---- 缓冲区切换 ----
 
@@ -196,11 +231,7 @@ class PyteScreenModel:
         return [self.row_text(r) for r in range(self._rows)]
 
     def scrollback(self, limit: int | None = None) -> list[str]:
-        rows: list[str] = []
-        for line in self._cur.history.top:
-            rows.append(
-                "".join(_to_cell(line.get(x)).data for x in range(self._cols)).rstrip()
-            )
+        rows: list[str] = self._cur.history_lines()
         return rows[-limit:] if limit else rows
 
     def text(self, *, limit: int | None = None, include_scrollback: bool = True) -> str:
