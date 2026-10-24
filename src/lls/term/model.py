@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol, Sequence, runtime_checkable
+from typing import FrozenSet, Protocol, Sequence, runtime_checkable
 
 __all__ = [
     "BLANK",
@@ -26,7 +26,9 @@ __all__ = [
 ]
 
 
-DirtyRows = frozenset[int]
+# 这是赋值而非注解，``from __future__ import annotations`` 不覆盖它；
+# ``frozenset[int]`` 要 3.9 才可下标，故用 typing 的形式。
+DirtyRows = FrozenSet[int]
 """自上次 ``clear_dirty()`` 以来内容发生变化的可见行号。"""
 
 
