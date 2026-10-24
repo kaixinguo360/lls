@@ -6,8 +6,9 @@ import argparse
 import os
 import subprocess
 import sys
+import traceback
 
-__all__ = ["main", "parse_args", "doctor"]
+__all__ = ["doctor", "main", "parse_args"]
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -45,7 +46,7 @@ def doctor() -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _run(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     if args.doctor:
@@ -65,6 +66,19 @@ def main(argv: list[str] | None = None) -> int:
     from .app import run_interactive
 
     return run_interactive(command)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """进程最外层。
+
+    任何未捕获异常都打印完整堆栈后以非零码退出 —— 兜底只做这一件事，
+    以免遗漏的错误信息被静默吞掉。
+    """
+    try:
+        return _run(argv)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
