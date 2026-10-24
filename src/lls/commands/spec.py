@@ -8,17 +8,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 from lls.commands.result import CommandResult
 from lls.session.services import Services
 
 __all__ = ["CommandFn", "CommandSpec", "all_commands", "command", "get_command"]
 
-CommandFn = Callable[[Services, str | None], Awaitable[CommandResult]]
+# 这是赋值而非注解，``from __future__ import annotations`` 不覆盖它，
+# 因此在 3.8 上必须用 Optional 而不是 ``str | None``。
+CommandFn = Callable[[Services, Optional[str]], Awaitable[CommandResult]]
 
 
-@dataclass(slots=True)
+@dataclass
 class CommandSpec:
     name: str
     fn: CommandFn

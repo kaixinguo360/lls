@@ -7,14 +7,16 @@ name = "lls"
 version = "0.2.0"
 description = "基于 PTY 的终端包装器：VT100 屏幕模型 + 覆盖层界面"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "LLS" }]
 dependencies = [
     "pyte>=0.8.2",
+    "pyyaml>=5.1",
 ]
 
 [project.optional-dependencies]
+ai = ["openai>=1.0"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "ruff>=0.1", "mypy>=1.0"]
 
 [project.scripts]
@@ -28,13 +30,13 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py38"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.8"
 files = ["src/lls/term", "src/lls/edit"]
 strict = true

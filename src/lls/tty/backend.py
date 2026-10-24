@@ -14,13 +14,13 @@ from typing import Protocol
 __all__ = ["Console", "Key", "PtySession", "TerminalBackend", "Winsize"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Winsize:
     rows: int
     columns: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Key:
     """一个按键事件。
 

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 __all__ = ["CommandResult"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class CommandResult:
     """命令执行完毕后的状态请求。默认什么都不请求。"""
 

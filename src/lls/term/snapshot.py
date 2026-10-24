@@ -18,7 +18,7 @@ from .model import ScreenModel
 __all__ = ["Snapshot", "capture", "diff", "load", "dump", "dumps"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Snapshot:
     """一次屏幕快照。``id`` 用于标识采样点（如语料内的字节偏移）。"""
 

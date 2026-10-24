@@ -30,7 +30,7 @@ DirtyRows = frozenset[int]
 """自上次 ``clear_dirty()`` 以来内容发生变化的可见行号。"""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Cell:
     """一个字符格的最终显示状态。
 
@@ -70,7 +70,7 @@ BLANK_STYLE = ("default", "default", False, False, False, False, False)
 BLANK = Cell()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Cursor:
     """光标位置与可见性。"""
 
