@@ -24,17 +24,9 @@ async def cmd_quit(s: Services, args: str | None) -> CommandResult:
     return CommandResult(handler="default")
 
 
-@command("clear", aliases=("c",), category="core")
-async def cmd_clear(s: Services, args: str | None) -> CommandResult:
-    """清屏"""
-    s.clear_screen()
-    return CommandResult()
-
-
 @command("err", category="core")
 async def cmd_err(s: Services, args: str | None) -> CommandResult:
     """显示最近捕获的错误信息"""
-    s.clear_screen()
     if not _last_error:
         await s.show_message("no catched error")
     else:

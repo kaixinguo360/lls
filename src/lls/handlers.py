@@ -109,25 +109,17 @@ class CommandHandler:
             # 子进程退出
             return
         if line is self._escape:
-            # Esc：退出本处理器回到透传。
-            #
-            # 同批到达的后续按键（按了 Esc 又立刻敲字）还留在键盘缓冲里，
-            # 而透传层读的是原始字节队列 —— 两个队列不互通，不回填就丢了。
-            s.requeue_pending_keys()
-            s.set_handler("default")
-            if self._restore_on_exit:
-                s.restore_context()
+            # Esc：退出本处理器回到透传
+            self._leave(s)
             return
-        if line == "":
+        text = line.strip()
+        if text == "" or text == self._cancel:
+            # 空输入回车 / 只有空白 / Ctrl-C（cancel 值）：同样退回透传。
+            # 命令模式下「回车什么都不做也不离开」会让人卡在这里，
+            # 退出手段应当和 Esc 一致。
+            self._leave(s)
             return
-        if line == self._cancel:
-            # Ctrl-C：等同退出回默认处理器
-            s.requeue_pending_keys()
-            s.set_handler("default")
-            if self._restore_on_exit:
-                s.restore_context()
-            return
-        cmd, args = split_command(line)
+        cmd, args = split_command(text)
         try:
             result = await execute_command(cmd, s, args)
         except Exception as e:  # noqa: BLE001
@@ -146,3 +138,15 @@ class CommandHandler:
                 await outcome
         if result.handler is not None:
             s.set_handler(result.handler)
+
+    def _leave(self, s: Services) -> None:
+        """离开本处理器，回到透传。
+
+        ``requeue_pending_keys`` 不能省：同批到达的后续按键（按了回车/Esc 又
+        立刻敲字）还留在键盘缓冲里，而透传层读的是原始字节队列 —— 两个队列
+        不互通，不回填就表现为「切过去之后按键失灵」。
+        """
+        s.requeue_pending_keys()
+        s.set_handler("default")
+        if self._restore_on_exit:
+            s.restore_context()

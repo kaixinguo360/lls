@@ -634,10 +634,6 @@ class Engine:
             if e.errno == errno.EIO:
                 self._on_child_exit()
 
-    def clear_screen(self) -> None:
-        if self._console is not None:
-            self._console.write(b"\x1b[2J\x1b[H\r")
-
     async def show_message(self, text: str) -> None:
         """以覆盖层显示消息，等任意键后收起。不改变处理器。
 

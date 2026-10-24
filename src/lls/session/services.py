@@ -58,10 +58,6 @@ class Services:
 
     # ---- 宿主终端显示 ----
 
-    def clear_screen(self) -> None:
-        """清屏并归位（``ESC[2J ESC[H``）。"""
-        self._engine.clear_screen()
-
     async def show_message(self, text: str) -> None:
         """以覆盖层显示一段文本，等任意键后收起。不改变当前处理器。"""
         await self._engine.show_message(text)
