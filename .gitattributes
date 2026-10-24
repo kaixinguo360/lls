@@ -1,0 +1,15 @@
+# 统一行尾：仓库内与检出后都是 LF。
+# 本项目按字节比对终端输出，CRLF 会引入看不见的差异。
+* text=auto eol=lf
+
+# 以下内容必须保持原始字节，禁止任何换行符转换。
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# 黄金样本（逐字节比对的测试数据）不得被转换
+tests/golden/** -text
+tests/corpora/** -text
