@@ -71,6 +71,11 @@ _READ_COALESCE_MIN = 16     # 首笔至少这么大才值得等待合并（按�
 class Engine:
     """终端引擎。"""
 
+    # 这两个 asyncio 原语在 run() 里创建，不在 __init__：3.8 的 Event / Queue
+    # 会在构造时绑定当时的事件循环，而本类通常先于 asyncio.run() 构造。
+    _stdin_q: asyncio.Queue
+    _exit_event: asyncio.Event
+
     def __init__(
         self,
         backend: TerminalBackend,
@@ -92,11 +97,9 @@ class Engine:
         self._printer: LinePrinter | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
-        self._stdin_q: asyncio.Queue[bytes] = asyncio.Queue()
         self._key_parser = KeyParser()
         self._key_buf: list[Key] = []
 
-        self._exit_event = asyncio.Event()
         self._exit_status: int | None = None
         self._exit_code: int | None = None
 
@@ -135,6 +138,13 @@ class Engine:
     # ---- 主入口 ----
 
     async def run(self) -> int:
+        # 这两个原语必须**在运行中的循环里**创建：3.8 的 asyncio.Event / Queue
+        # 会在构造时绑定当时的事件循环（3.10 起才改为惰性绑定）。本类通常在
+        # asyncio.run() 之前就构造好了，在那里创建会绑到另一个循环上，之后
+        # await 时报 "got Future attached to a different loop"。
+        self._stdin_q = asyncio.Queue()
+        self._exit_event = asyncio.Event()
+
         winsize = Winsize(rows=self.screen.rows, columns=self.screen.columns)
         self._pty = self._backend.spawn(self._argv, winsize)
         self._pty_fd = self._pty.fileno()
