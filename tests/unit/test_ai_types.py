@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from lls.ai import Chunk, ChunkKind, Message, ProviderConfig, Tool, ToolCall
+from lls.ai.providers._wire import merge_tool_fragments
 from lls.ai.providers.openai import OpenAIProvider
 
 
@@ -148,7 +149,7 @@ def _fragment(index: int, *, id=None, name=None, arguments=None):
 
 def _merge(fragments):
     pending: dict = {}
-    OpenAIProvider._merge(pending, fragments)
+    merge_tool_fragments(pending, fragments)
     return pending
 
 

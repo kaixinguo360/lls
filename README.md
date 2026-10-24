@@ -101,6 +101,27 @@ ai:
 `default_model` 用 `provider_id/model_id` 寻址，模型名本身可含斜杠
 （只按第一个斜杠切分）。用 `pip install 'lls[ai]'` 装 `openai` 依赖。
 
+两种 `type` 说同一种协议，区别只在传输层：
+
+| type | 实现 | 依赖 |
+|---|---|---|
+| `openai` | 用 `openai` 包 | 需要 `pip install 'lls[ai]'` |
+| `openai-http` | 标准库直接发 HTTP/1.1、自己解 SSE | **无** |
+
+不想装 SDK 就把 `type` 换成 `openai-http`，其余配置不变：
+
+```yaml
+    openai:
+      type: openai-http
+      base_url: https://api.openai.com/v1
+      api_key: sk-...
+      models: [gpt-4o-mini]
+```
+
+`openai-http` 走 `asyncio` 直连（http/https 都支持），生成期间界面照常刷新、
+Ctrl-C 能立刻断开连接。对后端的要求和 SDK 一致：
+`POST {base_url}/chat/completions`，流式 SSE。
+
 `params` 里的键会原样进请求体（`temperature` 之类）：
 
 ```yaml

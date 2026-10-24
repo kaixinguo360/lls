@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
-from ..types import Chunk, ChunkKind, Message, ProviderConfig, Tool, ToolCall
+from ..types import Chunk, ChunkKind, Message, ProviderConfig, Tool
+from ._wire import finished_calls, merge_tool_fragments
 
 __all__ = ["OpenAIProvider", "ProviderError"]
 
@@ -76,24 +77,14 @@ class OpenAIProvider:
                 reasoning = getattr(delta, "reasoning_content", None)
                 if reasoning:
                     yield Chunk(ChunkKind.REASONING, reasoning)
-                self._merge(pending, getattr(delta, "tool_calls", None))
+                merge_tool_fragments(pending, getattr(delta, "tool_calls", None))
         except ProviderError:
             raise
         except Exception as e:  # noqa: BLE001
             raise ProviderError(str(e)) from e
 
-        for index in sorted(pending):
-            slot = pending[index]
-            if not slot["name"]:
-                continue
-            yield Chunk(
-                ChunkKind.TOOL_CALL,
-                call=ToolCall(
-                    id=slot["id"] or "call_%d" % index,
-                    name=slot["name"],
-                    arguments=slot["arguments"],
-                ),
-            )
+        for call in finished_calls(pending):
+            yield Chunk(ChunkKind.TOOL_CALL, call=call)
 
         yield Chunk(ChunkKind.DONE)
 
@@ -126,24 +117,3 @@ class OpenAIProvider:
         if not choices:
             return None
         return getattr(choices[0], "delta", None)
-
-    @staticmethod
-    def _merge(pending: Dict[int, Dict[str, str]], fragments: Any) -> None:
-        """把分片工具调用按 index 归并。"""
-        for fragment in fragments or ():
-            index = getattr(fragment, "index", 0) or 0
-            slot = pending.setdefault(
-                index, {"id": "", "name": "", "arguments": ""}
-            )
-            call_id = getattr(fragment, "id", None)
-            if call_id:
-                slot["id"] = call_id
-            function = getattr(fragment, "function", None)
-            if function is None:
-                continue
-            name = getattr(function, "name", None)
-            if name:
-                slot["name"] += name
-            arguments = getattr(function, "arguments", None)
-            if arguments:
-                slot["arguments"] += arguments

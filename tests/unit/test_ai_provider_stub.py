@@ -80,7 +80,9 @@ class _Stub(BaseHTTPRequestHandler):
 def stub():
     _Stub.requests = []
     server = HTTPServer(("127.0.0.1", 0), _Stub)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
+        ).start()
     try:
         yield server.server_port
     finally:
