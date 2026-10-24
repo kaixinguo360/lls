@@ -13,6 +13,42 @@ import pytest
 from lls.tty import KeyParser
 
 
+# ---- 回车：CRLF 是一个键 ----
+
+# 终端、粘贴、远程会话都可能把回车发成 \r\n。若拆成两个 Enter，紧接着的下一次
+# 读取会立刻拿到一个空行 —— 表现为「刚进提示就自己回车了一次」，命令凭空退出。
+
+
+def test_crlf_is_a_single_enter() -> None:
+    assert [k.control for k in KeyParser().feed(b"\r\n")] == ["enter"]
+
+
+def test_crlf_split_across_chunks_is_a_single_enter() -> None:
+    kp = KeyParser()
+
+    assert [k.control for k in kp.feed(b"\r")] == ["enter"]
+    assert kp.feed(b"\n") == []
+
+
+def test_two_enters_stay_two_enters() -> None:
+    assert [k.control for k in KeyParser().feed(b"\r\r")] == ["enter", "enter"]
+
+
+def test_lone_newline_is_still_enter() -> None:
+    assert [k.control for k in KeyParser().feed(b"\n")] == ["enter"]
+
+
+def test_text_followed_by_crlf() -> None:
+    keys = KeyParser().feed(b"generate\r\n")
+
+    assert "".join(k.char for k in keys) == "generate"
+    assert [k.control for k in keys if k.control] == ["enter"]
+
+
+def test_only_the_newline_after_cr_is_swallowed() -> None:
+    assert [k.control for k in KeyParser().feed(b"\n\n")] == ["enter", "enter"]
+
+
 # ---- 可见字符与控制字符 ----
 
 def test_visible_chars() -> None:

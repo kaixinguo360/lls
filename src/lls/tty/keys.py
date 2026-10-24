@@ -86,6 +86,8 @@ class KeyParser:
         self._decoder = codecs.getincrementaldecoder("utf-8")("strict")
         self._state = _GROUND
         self._buf = b""
+        # 上一个字节是 \r 时为真：紧随其后的 \n 属于同一个回车，不能算两次。
+        self._after_cr = False
 
     @property
     def pending_escape(self) -> bytes:
@@ -108,6 +110,17 @@ class KeyParser:
         return self._advance(byte)
 
     def _feed_ground(self, byte: int) -> list[Key]:
+        # CRLF 是一个回车。终端、粘贴、远程会话都可能把回车发成 \r\n；若拆成
+        # 两个 Enter，紧跟其后的下一次读取会立刻拿到一个空行 —— 表现为「刚进
+        # 提示就自己回车了一次」，命令凭空退出。
+        if self._after_cr:
+            self._after_cr = False
+            if byte == 0x0A:
+                return []
+        if byte == 0x0D:
+            self._after_cr = True
+            return [Key(control="enter", raw=bytes([byte]))]
+
         if byte == 0x1B:
             self._state = _ESC
             self._buf = b"\x1b"
