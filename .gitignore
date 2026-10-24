@@ -1,2 +1,21 @@
 # Git Ignore File
 __pycache__/
+
+# Python
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# 工具
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 本地配置与历史（运行时产物）
+.lls_*
+*.raw
