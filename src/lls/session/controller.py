@@ -168,6 +168,9 @@ class Controller:
         # 有了它，LLS 的退出码才能反映子进程（否则 shell 里 `lls foo; echo $?`
         # 永远是 0，脚本无法据此判断成败）。
         self._exit_status: int | None = None
+        # 因宿主信号而退出时的退出码（None 表示走子进程的退出码）。
+        # 取值与 screen 对齐：SIGHUP 用 0，SIGTERM/SIGQUIT 用 1。
+        self._exit_code: int | None = None
         self._editors: dict[str, LineEditor] = {}
         # 当前正在显示的提示符状态：(prompt, 文本, 光标, lines_all, lines_cur)。
         # line 模式下若子进程有输出，据此把提示符临时移开、写输出、再画回来，
@@ -207,7 +210,14 @@ class Controller:
         try:
             self._loop.add_signal_handler(signal.SIGWINCH, self._on_winch)
             self._loop.add_signal_handler(signal.SIGCHLD, self._on_sigchld)
+            self._loop.add_signal_handler(signal.SIGHUP, self._on_hangup)
+            self._loop.add_signal_handler(signal.SIGTERM, self._on_terminate)
+            self._loop.add_signal_handler(signal.SIGQUIT, self._on_quit)
+            self._loop.add_signal_handler(signal.SIGINT, self._on_interrupt)
+            self._loop.add_signal_handler(signal.SIGTSTP, self._on_suspend)
+            self._loop.add_signal_handler(signal.SIGCONT, self._on_resume)
         except (NotImplementedError, RuntimeError):
+            # 部分平台/非主线程不支持在事件循环里装信号处理器：退化为默认行为
             pass
 
         try:
@@ -235,8 +245,10 @@ class Controller:
         finally:
             await self._cleanup()
 
-        # 循环结束只因为子进程退出，因此 LLS 的退出码反映子进程，
-        # 这样 `lls sh -c 'exit 3'; echo $?` 才能拿到 3。
+        # 因宿主信号退出时用该信号对应的退出码（与 screen 一致）；
+        # 否则反映子进程，这样 `lls sh -c 'exit 3'; echo $?` 才能拿到 3。
+        if self._exit_code is not None:
+            return self._exit_code
         return self._child_exit_code()
 
     def _child_exit_code(self) -> int:
@@ -559,6 +571,75 @@ class Controller:
     def _on_sigchld(self) -> None:
         self._reap()
         self._on_child_exit()
+
+    def _on_hangup(self) -> None:
+        """SIGHUP：宿主断开（SSH 掉线、窗口关闭）。
+
+        screen 的对应处理是通知后端挂断后 ``exit(0)``。LLS 没有可驻留的后端，
+        子进程是直接子进程，所以必须先把它一并结束，否则会变成孤儿继续跑。
+        退出码按 screen 用 0。
+        """
+        self._forward_and_quit(signal.SIGHUP, 0)
+
+    def _on_terminate(self) -> None:
+        """SIGTERM：外部要求终止。screen 走 ``Finit(1)``，退出码为 1。"""
+        self._forward_and_quit(signal.SIGTERM, 1)
+
+    def _on_quit(self) -> None:
+        """SIGQUIT：与 SIGTERM 同等处理（screen 里两者共用一个 handler）。"""
+        self._forward_and_quit(signal.SIGQUIT, 1)
+
+    def _forward_and_quit(self, signum: int, code: int) -> None:
+        """把信号转给子进程组，然后让 LLS 以 ``code`` 退出。
+
+        子进程经 ``setsid`` 成为独立会话，**收不到**发给 LLS 的信号；
+        不转发的话它会被留在后台继续跑。
+        """
+        if self._exit_event.is_set():
+            return
+        self._exit_code = code
+        if self._pty is not None:
+            self._pty.signal(signum)
+        self._on_child_exit()
+
+    def _on_interrupt(self) -> None:
+        """SIGINT：转发给子进程组，**自己继续运行**。
+
+        这是与 screen 一致的关键一条：Ctrl-C 的语义是打断窗口里的前台作业，
+        不是杀掉多路复用器本身。terminal 产生的 SIGINT 本就会直接送达子进程的
+        前台进程组，这里处理的是**别人直接发给 LLS** 的那一种。
+        """
+        if self._exit_event.is_set() or self._pty is None:
+            return
+        self._pty.signal(signal.SIGINT)
+
+    def _on_suspend(self) -> None:
+        """SIGTSTP：交还终端后停住自己。
+
+        不交还终端的话，挂起期间用户面对一个 raw 模式的终端：没有回显、
+        Ctrl-C 也不生效。恢复时 :meth:`_on_resume` 重新接管。
+
+        这里用 ``SIGSTOP`` 而不是把 SIGTSTP 改回默认处置再自发一次：后者会覆盖
+        asyncio 注册的处理器，恢复后第二次挂起就不再经过本方法，终端也就不会被
+        交还。``SIGSTOP`` 本身不可捕获，效果相同且不动处理器。
+        """
+        if self._console is None:
+            return
+        self._backend.suspend_console()
+        os.kill(os.getpid(), signal.SIGSTOP)
+
+    def _on_resume(self) -> None:
+        """SIGCONT：重新接管终端。
+
+        挂起期间终端已交还给 shell，必须重新进入 raw 模式，否则输入不会被我们
+        读到。挂起期间子进程的输出积在 pty 缓冲里，恢复后会经 ``_on_master_readable``
+        正常到达并触发相应重绘，这里只需把 char 模式下尚未解析的积压补上，
+        使模型与终端一致。
+        """
+        if self._console is None:
+            return
+        self._backend.resume_console()
+        self._flush_backlog()
 
     def _on_child_exit(self) -> None:
         """子进程退出的唯一入口：终止忙轮询并唤醒主循环。幂等。"""

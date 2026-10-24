@@ -27,5 +27,11 @@ class UnsupportedBackend:
         self._fail()
         raise AssertionError("unreachable")
 
+    def suspend_console(self) -> None:
+        self._fail()
+
+    def resume_console(self) -> None:
+        self._fail()
+
     def close_console(self) -> None:
         self._fail()

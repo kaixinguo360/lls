@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Protocol
+from typing import Protocol
 
 __all__ = ["Console", "Key", "PtySession", "TerminalBackend", "Winsize"]
 
@@ -47,12 +47,12 @@ class PtySession(Protocol):
         """向子进程写字节（不等待）。"""
         ...
 
-    def on_output(self, cb: Callable[[bytes], None]) -> None:
-        """注册子进程输出回调（每次 read 一块）。"""
-        ...
-
     def resize(self, rows: int, columns: int) -> None:
         """调整 PTY 窗口大小。"""
+        ...
+
+    def signal(self, signum: int) -> None:
+        """把信号发给子进程所在的整个进程组。"""
         ...
 
     def close(self) -> None:
@@ -65,8 +65,6 @@ class Console(Protocol):
 
     def write(self, data: bytes) -> None: ...
 
-    def resize(self, rows: int, columns: int) -> None: ...
-
 
 class TerminalBackend(Protocol):
     """平台终端后端：负责开 PTY、切宿主终端为 raw 模式。"""
@@ -77,6 +75,14 @@ class TerminalBackend(Protocol):
 
     def open_console(self) -> Console:
         """把宿主终端置为 raw 模式，返回可写字节的 Console。"""
+        ...
+
+    def suspend_console(self) -> None:
+        """临时交还宿主终端（挂起用，保留原始属性以便恢复）。"""
+        ...
+
+    def resume_console(self) -> None:
+        """从挂起恢复：重新进入 raw 模式。"""
         ...
 
     def close_console(self) -> None:
