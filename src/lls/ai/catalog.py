@@ -54,8 +54,11 @@ class Catalog:
         self._instances[provider_id] = instance
         return instance
 
-    def resolve(self, spec: Optional[str] = None) -> Tuple[Provider, str]:
-        """解析 ``provider/model``；省略时用配置里的 ``default_model``。
+    def resolve_spec(self, spec: Optional[str] = None) -> Tuple[str, str]:
+        """把 ``provider/model`` 拆成 ``(provider_id, model_id)``。
+
+        省略时用配置里的 ``default_model``。调用方需要**只**拿到 id 时用它
+        （例如记下一条会话用的是哪个 provider），不必为了实例化而构造 provider。
 
         :raises ConfigError: 无可用配置或 spec 非法。
         """
@@ -65,7 +68,14 @@ class Catalog:
                 "no model configured: set ai.default_model in %s"
                 % (self._config.path or "config")
             )
-        provider_id, model_id = parse_model_spec(chosen)
+        return parse_model_spec(chosen)
+
+    def resolve(self, spec: Optional[str] = None) -> Tuple[Provider, str]:
+        """解析 ``provider/model``；省略时用配置里的 ``default_model``。
+
+        :raises ConfigError: 无可用配置、spec 非法或没有该 provider。
+        """
+        provider_id, model_id = self.resolve_spec(spec)
         return self.get(provider_id), model_id
 
 

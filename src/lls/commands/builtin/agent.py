@@ -42,6 +42,8 @@ from lls.session.services import Services
 from lls.tty import KeyParser, encode_keys
 from lls.ui import conservative_char_width, wrap_multi_lines
 
+from .agent_store import SessionState, store
+
 __all__ = ["cmd_agent"]
 
 # ---- 常量 ----
@@ -589,15 +591,24 @@ class _Painter:
 class _Session:
     """一个持续的 Agent 会话：多轮任务共享历史，每轮内部自动多步执行。"""
 
-    def __init__(self, services: Services, provider: Any, model: str) -> None:
+    def __init__(
+        self,
+        services: Services,
+        provider: Any,
+        model: str,
+        state: Optional[SessionState] = None,
+    ) -> None:
         self._s = services
         self._provider = provider
         self._model = model
+        # 会话状态由外部持有（见 agent_store）：本对象只是它的一次「运行」。
+        # 不传 state 时就地新建一份，退出即丢弃（测试与一次性调用用得上）。
+        self._state = state if state is not None else SessionState(model_id=model)
         self._view = _TerminalView(services)
         self._guard = _RepeatGuard()
         self._tools = _build_tools(services, self._view, self._guard)
-        self._history: List[Message] = []
-        self._log: List[Tuple[str, str, str]] = []
+        self._history: List[Message] = list(self._state.history)
+        self._log: List[Tuple[str, str, str]] = list(self._state.log)
 
     async def run(self, first_task: Optional[str]) -> bool:
         """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。"""
@@ -677,6 +688,17 @@ class _Session:
         summary = result.summary if result.summary.strip() else "（无文本答复）"
         self._history = trim_turns(result.messages, keep)
         self._record(task, summary)
+        self._save()
+
+    def _save(self) -> None:
+        """把已完成的一轮写回会话状态。
+
+        只有走到这里的轮次才会写：中断（Ctrl-C）、异常、子进程退出都保留原
+        状态 —— 与「半成品不入历史」一致，下次进来看不到失败的半轮。
+        """
+        self._state.history = list(self._history)
+        self._state.log = list(self._log)
+        self._state.updated_at = time.time()
 
     def _record(self, task: str, reply: str, note: str = "") -> None:
         self._log.append((task, reply, note))
@@ -702,14 +724,46 @@ class _Session:
 
 # ---- 命令 ----
 
+_NEW = "--new"
+
+
+def _parse_args(args: Optional[str]) -> Tuple[bool, Optional[str]]:
+    """拆出 ``--new``（其余原样作为首个任务）。"""
+    text = (args or "").strip()
+    if text == _NEW:
+        return True, None
+    if text.startswith(_NEW + " "):
+        return True, text[len(_NEW):].strip() or None
+    return False, text or None
+
+
+def _open_session(fresh: bool) -> Tuple[Any, str, SessionState]:
+    """取回（或新建）要进入的会话。
+
+    会话身份就靠这里延续：不加 ``--new`` 时总是回到 ``store().current()``，
+    因此退出 ``agent`` 再从命令模式进来，看到的是同一段上下文。
+    """
+    catalog = default_catalog()
+    keeper = store()
+    state = None if fresh else keeper.current()
+    if state is None:
+        provider_id, model_id = catalog.resolve_spec()
+        state = keeper.new(provider_id, model_id)
+    else:
+        keeper.set_current(state.id)
+    # provider 可能已经从配置里删掉：这里报错，状态本身仍然留着。
+    return catalog.get(state.provider_id), state.model_id, state
+
+
 @command("agent", aliases=("a",), category="ai")
 async def cmd_agent(s: Services, args: Optional[str]) -> CommandResult:
     """进入交互式 Agent 会话，按任务自动多轮执行"""
+    fresh, task = _parse_args(args)
     try:
-        provider, model = default_catalog().resolve()
+        provider, model, state = _open_session(fresh)
     except Exception as e:  # noqa: BLE001
         await s.show_message("error: %s" % e)
         return CommandResult()
 
-    exited = await _Session(s, provider, model).run(args)
+    exited = await _Session(s, provider, model, state).run(task)
     return CommandResult(handler="default" if exited else None)

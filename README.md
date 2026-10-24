@@ -53,7 +53,8 @@ Ctrl-E 后输入 `agent`（或带首个任务：`agent 把测试跑一遍`）进
 system prompt 也会要求模型用简短纯文本答复，细节留在终端输出里。
 空行或 Ctrl-C 清掉当前输入；Esc、Ctrl-D 或 `/exit` 退出会话回到透传。执行中
 按 Ctrl-C 只中止当前任务，会话继续；半成品不会写入历史。想直接操作 shell 时
-按 Esc 退出；再次 `agent` 是新会话（终端画面本身就是上下文）。
+按 Esc 退出。会话状态留在进程内存里（`commands/builtin/agent_store.py`）：再次
+`agent` 回到同一段上下文，`agent --new` 才开一条新会话。lls 退出后这些会话就没了。
 
 工具：
 - `read_terminal`：读取终端最近若干行，可等待输出静默；什么时候读、等多久由

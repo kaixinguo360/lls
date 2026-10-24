@@ -14,6 +14,7 @@ import pytest
 from lls.ai import Chunk, ChunkKind, ConfigError, ToolCall
 from lls.commands import get_command
 from lls.commands.builtin import agent as agent_cmd
+from lls.commands.builtin.agent_store import SessionStore
 from lls.tty import KeyNameError
 
 # ---- 桩 ----
@@ -90,6 +91,12 @@ class FakeCatalog:
     def __init__(self, provider) -> None:
         self._provider = provider
 
+    def resolve_spec(self):
+        return "stub", "stub-model"
+
+    def get(self, provider_id):
+        return self._provider
+
     def resolve(self):
         return self._provider, "stub-model"
 
@@ -146,11 +153,31 @@ def _call(call_id: str, name: str, arguments) -> ToolCall:
     return ToolCall(id=call_id, name=name, arguments=raw)
 
 
-def _session(monkeypatch, provider, answers, *, screen=None, first_task=None, chars=()):
+def _fresh_store(monkeypatch):
+    """换一份干净的会话存储：会话要跨 `agent` 调用延续，但不必跨用例。"""
+    keeper = SessionStore()
+    monkeypatch.setattr(agent_cmd, "store", lambda: keeper)
+    return keeper
+
+
+def _session(
+    monkeypatch,
+    provider,
+    answers,
+    *,
+    screen=None,
+    first_task=None,
+    chars=(),
+    keeper=None,
+):
     services = FakeServices(answers, screen=screen)
     if chars:
         services.queue_chars(*chars)
     monkeypatch.setattr(agent_cmd, "default_catalog", lambda: FakeCatalog(provider))
+    if keeper is None:
+        _fresh_store(monkeypatch)
+    else:
+        monkeypatch.setattr(agent_cmd, "store", lambda: keeper)
     result = asyncio.run(agent_cmd.cmd_agent(services, first_task))
     return services, result
 
