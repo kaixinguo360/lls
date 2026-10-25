@@ -2,7 +2,7 @@
 
 分两类：
 
-* **纯计算**：``wrap_multi_lines`` / ``char_width`` / ``overlay_anchor`` ——
+* **纯计算**：``wrap_multi_lines`` / ``overlay_anchor`` 与 :mod:`lls.ui.width` ——
   给定文本与终端宽度，算出该占几行、覆盖层该从哪一行开始，不碰终端；
 * **写终端**：``LinePrinter``（覆盖层绘制）、``render_row_cells``（把模型
   单元格编码成带样式的字节）。
@@ -13,9 +13,9 @@
 
 from __future__ import annotations
 
-import unicodedata
-
 from lls.tty import Console
+
+from .width import Measure, char_width, conservative_char_width
 
 __all__ = [
     "LinePrinter",
@@ -26,47 +26,12 @@ __all__ = [
     "wrap_multi_lines",
 ]
 
-# 字符显示宽度表（legacy display.py 原样，经实战验证）。
-_CHAR_WIDTHS = [
-    (126, 1), (159, 0), (687, 1), (710, 0), (711, 1),
-    (727, 0), (733, 1), (879, 0), (1154, 1), (1161, 0),
-    (4347, 1), (4447, 2), (7467, 1), (7521, 0), (8369, 1),
-    (8426, 0), (9000, 1), (9002, 2), (11021, 1), (12350, 2),
-    (12351, 1), (12438, 2), (12442, 0), (19893, 2), (19967, 1),
-    (55203, 2), (63743, 1), (64106, 2), (65039, 1), (65059, 0),
-    (65131, 2), (65279, 1), (65376, 2), (65500, 1), (65510, 2),
-    (120831, 1), (262141, 2), (1114109, 1),
-]
-
-
-def char_width(c: str) -> int:
-    """返回字符 c 在终端的显示宽度。"""
-    o = ord(c)
-    if o == 0x0E or o == 0x0F:
-        return 0
-    for num, wid in _CHAR_WIDTHS:
-        if o <= num:
-            return wid
-    return 1
-
-
-def conservative_char_width(c: str) -> int:
-    """保守宽度：模糊宽度（East Asian Ambiguous）按**两列**算。
-
-    ``—````"````"````…````①`` 这类字符，Unicode 把宽度定成「模糊」，由终端自行
-    决定。不少终端（尤其 CJK 配置）按两列渲染，而 :func:`char_width` 按一列算。
-    用它排版时，一行会比实际窄一列，终端于是软折行。
-
-    覆盖层是按行号绝对定位绘制的：多出来的物理行会让行列对应关系整体错位，
-    旧帧擦不干净、一帧帧堆在屏上。宁可每行少用一列，也不能窄算。
-    """
-    if unicodedata.east_asian_width(c) == "A":
-        return 2
-    return char_width(c)
-
 
 def wrap_multi_lines(
-    display: str, width: int, end: str = "\r\n", measure=char_width
+    display: str,
+    width: int,
+    end: str = "\r\n",
+    measure: Measure = char_width,
 ) -> tuple[str, int]:
     """将长字符串按终端宽度自动换行。返回 (输出串, 行数)。
 
@@ -113,25 +78,10 @@ def overlay_anchor(cursor_y: int, lines_needed: int, rows: int) -> int:
 
 
 class LinePrinter:
-    """封装 clear_lines / print_lines，持有 Console 与终端宽度。"""
+    """在宿主终端上绘制多行文本。"""
 
     def __init__(self, console: Console) -> None:
         self._console = console
-
-    def clear_lines(self, lines_all: int, lines_cur: int, clear: bool = True) -> tuple[int, int]:
-        """清除多行终端输出。返回 (1, 1)（与 legacy 一致）。"""
-        w = self._console
-        if lines_all != lines_cur:
-            for _ in range(lines_all - lines_cur):
-                w.write(b"\r\x1b[1B")
-        for _ in range(lines_all - 1):
-            if clear:
-                w.write(b"\x1b[2K")
-            w.write(b"\r\x1b[1A")
-        if clear:
-            w.write(b"\x1b[2K")
-        w.write(b"\r")
-        return 1, 1
 
     def print_lines(
         self,

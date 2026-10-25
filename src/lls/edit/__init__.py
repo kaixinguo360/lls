@@ -1,5 +1,5 @@
-"""edit 包：行编辑器与历史。"""
+"""edit 包：行编辑器。"""
 
-from .buffer import LineEditor, display_width, render_prompt_line
+from .buffer import LineEditor, render_prompt_line
 
-__all__ = ["LineEditor", "display_width", "render_prompt_line"]
+__all__ = ["LineEditor", "render_prompt_line"]

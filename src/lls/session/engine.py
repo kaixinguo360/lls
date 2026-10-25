@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import os
 import select
@@ -71,8 +72,8 @@ _READ_COALESCE_MIN = 16     # 首笔至少这么大才值得等待合并（按�
 class Engine:
     """终端引擎。"""
 
-    # 这两个 asyncio 原语在 run() 里创建，不在 __init__：3.8 的 Event / Queue
-    # 会在构造时绑定当时的事件循环，而本类通常先于 asyncio.run() 构造。
+    # 在 run() 里创建，不在 __init__：Event / Queue 在 3.8 上构造时就会绑定
+    # 当时的事件循环，而本类通常先于 asyncio.run() 构造。
     _stdin_q: asyncio.Queue
     _exit_event: asyncio.Event
 
@@ -138,10 +139,8 @@ class Engine:
     # ---- 主入口 ----
 
     async def run(self) -> int:
-        # 这两个原语必须**在运行中的循环里**创建：3.8 的 asyncio.Event / Queue
-        # 会在构造时绑定当时的事件循环（3.10 起才改为惰性绑定）。本类通常在
-        # asyncio.run() 之前就构造好了，在那里创建会绑到另一个循环上，之后
-        # await 时报 "got Future attached to a different loop"。
+        # 必须在运行中的循环里创建：3.8 上 Event / Queue 构造时就绑定当前循环，
+        # 而本类通常在 asyncio.run() 之前构造好，绑过去的循环随后并不执行。
         self._stdin_q = asyncio.Queue()
         self._exit_event = asyncio.Event()
 
@@ -182,10 +181,8 @@ class Engine:
                 except Exception as e:  # noqa: BLE001
                     # 任何未捕获异常都不能让 traceback 直接写到 stderr:
                     # 那些字节不经过显示逻辑，会撑滚终端并冲掉覆盖层。
-                    try:
+                    with contextlib.suppress(Exception):
                         await self.show_message(f"error: {e}")
-                    except Exception:  # noqa: BLE001
-                        pass
                 # 处理器可能请求了切换（协作式：本轮做完才切）
                 if self._pending_handler is not None:
                     self._current = self._pending_handler
@@ -278,10 +275,8 @@ class Engine:
         if self._loop is not None:
             for fd in (self._pty_fd, sys.stdin.fileno()):
                 if fd >= 0:
-                    try:
+                    with contextlib.suppress(Exception):
                         self._loop.remove_reader(fd)
-                    except Exception:
-                        pass
         if self._pty is not None:
             self._pty.close()
         self._backend.close_console()
@@ -616,10 +611,8 @@ class Engine:
         if self._exit_event.is_set():
             return
         if self._loop is not None and self._pty_fd >= 0:
-            try:
+            with contextlib.suppress(Exception):
                 self._loop.remove_reader(self._pty_fd)
-            except Exception:
-                pass
         self._exit_event.set()
         self._reap()
 
@@ -903,22 +896,21 @@ class Engine:
 
     async def _wait_stdin(self, timeout: float | None = None) -> bytes | None:
         """等一段 stdin 字节。子进程退出返回 None，超时返回 b""。"""
-        if timeout is not None:
-            if self._stdin_q.empty():
-                get_task = asyncio.ensure_future(self._stdin_q.get())
-                exit_task = asyncio.ensure_future(self._exit_event.wait())
-                done, pending = await asyncio.wait(
-                    {get_task, exit_task},
-                    timeout=timeout,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
-                if get_task in done:
-                    return get_task.result()
-                if exit_task in done:
-                    return None
-                return b""
+        if timeout is not None and self._stdin_q.empty():
+            get_task = asyncio.ensure_future(self._stdin_q.get())
+            exit_task = asyncio.ensure_future(self._exit_event.wait())
+            done, pending = await asyncio.wait(
+                {get_task, exit_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            if get_task in done:
+                return get_task.result()
+            if exit_task in done:
+                return None
+            return b""
         get_task = asyncio.ensure_future(self._stdin_q.get())
         exit_task = asyncio.ensure_future(self._exit_event.wait())
         done, pending = await asyncio.wait(

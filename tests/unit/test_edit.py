@@ -1,8 +1,9 @@
-"""行编辑器单元测试（钉死 legacy read_line 的编辑语义）。"""
+"""行编辑器的编辑语义。"""
 
 from __future__ import annotations
 
-from lls.edit import LineEditor, display_width, render_prompt_line
+from lls.edit import LineEditor, render_prompt_line
+from lls.ui import text_width
 
 
 def _ed() -> LineEditor:
@@ -88,15 +89,15 @@ def test_history_dedup() -> None:
 
 
 def test_wide_char_cursor_width() -> None:
-    assert display_width("中") == 2
-    assert display_width("ab中") == 4
+    assert text_width("中") == 2
+    assert text_width("ab中") == 4
 
 
 def test_render_prompt_line_highlight() -> None:
     e = _ed()
     for c in "ab":
         e.insert(c)
-    display, col = render_prompt_line("> ", e, columns=80)
+    display, col = render_prompt_line("> ", e)
     # 光标在行尾（x=2），高亮一个空格
     assert "\x1b[7m \x1b[0m" in display
     # 列号 = prompt(2) + line(2) = 4
@@ -108,6 +109,6 @@ def test_render_prompt_line_mid_cursor() -> None:
     for c in "abc":
         e.insert(c)
     e.left()  # 光标在 b 处（x=2）
-    display, col = render_prompt_line("> ", e, columns=80)
+    display, col = render_prompt_line("> ", e)
     assert "\x1b[7mc\x1b[0m" in display  # 高亮 c（光标处字符）
     assert col == 4  # prompt(2) + "ab"(2)

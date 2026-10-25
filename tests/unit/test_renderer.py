@@ -65,15 +65,6 @@ def test_print_lines_cursor_positioning() -> None:
     assert b"\x1b[7m" not in out  # 不用反色高亮
 
 
-def test_clear_lines() -> None:
-    c = FakeConsole()
-    p = LinePrinter(c)
-    p.clear_lines(2, 1)
-    out = c.snapshot()
-    assert b"\x1b[2K" in out
-    assert b"\x1b[1A" in out
-
-
 def test_print_lines_clears_each_wrapped_row() -> None:
     """退格让一行变短时，旧字符不能留在后面几行上。"""
     c = FakeConsole()
