@@ -11,10 +11,19 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import Callable
 
-__all__ = ["char_width", "conservative_char_width", "text_width"]
+__all__ = [
+    "char_width",
+    "conservative_char_width",
+    "strip_sgr",
+    "text_width",
+]
+
+# 覆盖层里允许出现 SGR（加粗、颜色）序列：它们不占列，量宽度时必须先去掉。
+_SGR = re.compile("\x1b\\[[0-9;]*m")
 
 # 码点区间上界 → 显示宽度。二分不必：表很短，且绝大多数查询落在前几项。
 _WIDTHS = (
@@ -49,6 +58,11 @@ def conservative_char_width(char: str) -> int:
     return char_width(char)
 
 
+def strip_sgr(text: str) -> str:
+    """去掉 SGR（颜色、加粗）转义序列，只留可见字符。"""
+    return _SGR.sub("", text)
+
+
 def text_width(text: str, measure: Measure = char_width) -> int:
-    """字符串的显示宽度。"""
-    return sum(measure(char) for char in text)
+    """字符串的显示宽度（SGR 序列按零列算）。"""
+    return sum(measure(char) for char in strip_sgr(text))

@@ -41,7 +41,7 @@ from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.session.services import Services
 from lls.tty import KeyParser, encode_keys
-from lls.ui import conservative_char_width, wrap_multi_lines
+from lls.ui import SGR_RESET, conservative_char_width, strip_sgr, wrap_multi_lines
 
 from .agent_store import SessionState, store
 
@@ -69,6 +69,7 @@ REPEAT_REMIND_AT = 3      # 连续相同调用第几次开始提醒
 
 INPUT_PROMPT = "(agent): "
 REPLY_PREFIX = "(agent-reply) "
+REPLY_BOLD = "\x1b[1m"      # 最近一条答复加粗显示
 NOTE_PREFIX = "(agent-note) "
 
 SYSTEM_PROMPT = f"""\
@@ -222,8 +223,8 @@ SEND_RAW_TOOL = Tool(
 # ---- 单行/折叠显示 ----
 
 def _width(text: str) -> int:
-    """按保守宽度量一段文字（模糊宽度字符按两列算）。"""
-    return sum(conservative_char_width(char) for char in text)
+    """按保守宽度量一段文字（模糊宽度字符按两列算，SGR 序列不算宽）。"""
+    return sum(conservative_char_width(char) for char in strip_sgr(text))
 
 
 def _flat(text: str) -> str:
@@ -289,32 +290,27 @@ def _tail_line(prefix: str, text: str, columns: int) -> str:
     return prefix + marker + "".join(reversed(kept))
 
 
-def _reply_rows(text: str, columns: int) -> list[str]:
+def _reply_rows(text: str, columns: int, bold: bool = False) -> list[str]:
     """把标签和答复拼在一起后再按终端宽度折行。
 
     续行不再缩进：悬挂缩进会白占一大块列宽（答复一半以上都是缩进就太亏了）。
     首尾换行与空行一律丢掉：模型常在答复末尾补一个换行，保留下来就会多出
     一条空行；空行还会挤占只有几行的显示预算。
+
+    ``bold`` 为真时只给答复正文加粗（标签保持原样），便于在连着的几轮里
+    一眼认出最新那条。
     """
     clean = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
     clean = clean.strip("\n")
+    body = REPLY_BOLD + clean + SGR_RESET if bold and clean else clean
     wrapped, _ = wrap_multi_lines(
-        REPLY_PREFIX + clean,
+        REPLY_PREFIX + body,
         max(1, columns),
         end="\n",
         measure=conservative_char_width,
     )
-    rows = [row for row in wrapped.split("\n") if row.strip()]
-    if len(rows) > REPLY_LINES:
-        rows = rows[:REPLY_LINES]
-        # 末行必须明确「后面还有」，但 _clip 自己就会补省略号，
-        # 直接再拼一个就成了「… …」。故先截到留出 " …"（3 列）的宽度，
-        # 去掉 _clip 补的那个省略号，再统一收尾。
-        last = _clip(rows[-1], max(1, columns - 3))
-        if last.endswith("…"):
-            last = last[:-1]
-        rows[-1] = last + " …" if columns >= 4 else _clip(rows[-1], columns)
-    return rows
+    # 空行只剩 SGR 序列，按可见内容判断才不会把空行留下。
+    return [row for row in wrapped.split("\n") if strip_sgr(row).strip()]
 
 
 def _task_message(task: str, screen: str) -> str:
@@ -709,10 +705,14 @@ class _Session:
     def _prompt_text(self) -> str:
         columns = max(1, self._s.screen.columns)
         rows: list[str] = []
-        for task, reply, note in self._log:
+        latest = -1
+        for index, (_, reply, _) in enumerate(self._log):
+            if reply:
+                latest = index
+        for index, (task, reply, note) in enumerate(self._log):
             rows.append(_line("(agent) ", task, columns))
             if reply:
-                rows.extend(_reply_rows(reply, columns))
+                rows.extend(_reply_rows(reply, columns, bold=index == latest))
             if note:
                 rows.append(_line(NOTE_PREFIX, note, columns))
         # 日志不能高到把覆盖层顶出屏幕；矮终端上再收紧。

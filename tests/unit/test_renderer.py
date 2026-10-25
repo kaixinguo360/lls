@@ -39,6 +39,24 @@ def test_wrap_multi_lines() -> None:
     assert "\r\n" in out
 
 
+def test_wrap_counts_sgr_as_zero_width() -> None:
+    """加粗（SGR）不占列：折行位置与不带样式时一致。"""
+    plain, plain_lines = wrap_multi_lines("123456789", 8)
+    styled, styled_lines = wrap_multi_lines("\x1b[1m123456789\x1b[0m", 8)
+
+    assert styled_lines == plain_lines == 2
+    assert styled.replace("\x1b[1m", "").replace("\x1b[0m", "") == plain
+
+
+def test_wrap_replays_style_on_each_line() -> None:
+    """每行自带样式的开与合：按行绝对定位重画时不依赖画行顺序。"""
+    out, lines = wrap_multi_lines("\x1b[1m" + "ab" * 6 + "\x1b[0m", 4)
+
+    rows = out.split("\r\n")
+    assert lines == len(rows) > 1
+    assert all(row.startswith("\x1b[1m") and row.endswith("\x1b[0m") for row in rows)
+
+
 # ---- LinePrinter ----
 
 def test_print_lines_writes_content() -> None:

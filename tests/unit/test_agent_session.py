@@ -14,6 +14,7 @@ import pytest
 from lls.ai import Chunk, ChunkKind, ConfigError, ToolCall
 from lls.commands import get_command
 from lls.commands.builtin import agent as agent_cmd
+from lls.ui import strip_sgr
 from lls.commands.builtin.agent_store import SessionStore
 from lls.tty import KeyNameError
 
@@ -427,7 +428,17 @@ def test_reply_rows_wrap_with_the_prefix_and_without_hanging_indent() -> None:
     assert len(rows[0]) > len(agent_cmd.REPLY_PREFIX)
     assert all(agent_cmd._width(row) <= 30 for row in rows)
     assert all(not row.startswith(" ") for row in rows)
-    assert len(rows) <= agent_cmd.REPLY_LINES
+    assert not any(row.endswith("…") for row in rows)
+
+
+def test_reply_rows_are_not_capped_by_height() -> None:
+    """答复不再按固定行数截断：有多少行就显示多少行。"""
+    reason = "\n".join(f"第{i}行" for i in range(30))
+
+    rows = agent_cmd._reply_rows(reason, 80)
+
+    assert len(rows) == 30
+    assert rows[-1] == "第29行"
 
 
 def test_reply_rows_drop_blank_lines() -> None:
@@ -442,9 +453,38 @@ def test_prompt_has_no_blank_line_before_the_input() -> None:
     session = agent_cmd._Session(services, ScriptedProvider([]), "m")
     session._log = [("任务", "答复", "")]
 
-    assert session._prompt_text() == (
-        "(agent) 任务\n(agent-reply) 答复\n(agent): "
-    )
+    prompt = session._prompt_text()
+
+    assert strip_sgr(prompt) == "(agent) 任务\n(agent-reply) 答复\n(agent): "
+
+
+# ---- 最近一条答复加粗 ----
+
+
+def test_only_the_latest_reply_is_bold() -> None:
+    services = FakeServices([])
+    session = agent_cmd._Session(services, ScriptedProvider([]), "m")
+    session._log = [("任务一", "旧答复", ""), ("任务二", "新答复", "")]
+
+    rows = session._prompt_text().split("\n")
+
+    assert not any("\x1b[1m" in row for row in rows if "旧答复" in row)
+    assert any("\x1b[1m" in row and "新答复" in row for row in rows)
+    assert all(row.endswith("\x1b[0m") for row in rows if "新答复" in row)
+
+
+def test_bold_reply_survives_line_width_limit() -> None:
+    """加粗不占列宽：折行后每行仍不超过终端宽度，且换行处样式重放。"""
+    services = FakeServices([])
+    session = agent_cmd._Session(services, ScriptedProvider([]), "m")
+    session._log = [("任务", "答复" * 40, "")]
+
+    rows = session._prompt_text().split("\n")
+
+    assert len(rows) > 2
+    for row in rows:
+        assert agent_cmd._width(row) <= services.screen.columns
+    assert all("\x1b[1m" in row and row.endswith("\x1b[0m") for row in rows[1:-1])
 
 
 # ---- 思考预览：始终显示最新一段 ----

@@ -17,14 +17,43 @@ from lls.tty import Console
 
 from .width import Measure, char_width, conservative_char_width
 
+SGR_RESET = "\x1b[0m"
+
 __all__ = [
     "LinePrinter",
+    "SGR_RESET",
     "char_width",
     "conservative_char_width",
     "overlay_anchor",
     "render_row_cells",
     "wrap_multi_lines",
 ]
+
+
+def _csi_end(text: str, start: int) -> int:
+    """``text[start]`` 起是一个 ESC ``[`` 序列：返回它结束后的下标。"""
+    index = start + 2
+    while index < len(text) and not ("@" <= text[index] <= "~"):
+        index += 1
+    return min(index + 1, len(text))
+
+
+def _next_style(style: str, seq: str) -> str:
+    """按一条 SGR 序列更新「当前仍生效的样式」。
+
+    换行后要把样式重放一次，否则新行从终端残留的状态开始 —— 屏幕
+是分多次
+    写出来的，不能指望终端帮我们记住上一行末的状态。
+    """
+    if not seq.endswith("m"):
+        return style
+    params = seq[2:-1]
+    if params in ("", "0"):
+        return ""
+    if "0" in params.split(";"):
+        # 「重置 + 又设了新样式」（如 ``0;1``）：之前的样式全丢。
+        return seq
+    return style + seq
 
 
 def wrap_multi_lines(
@@ -37,23 +66,41 @@ def wrap_multi_lines(
 
     ``measure`` 决定每个字符算几列；覆盖层排版传入
     :func:`conservative_char_width`，避免在模糊宽度上窄算。
+
+    SGR（颜色/加粗）转义序列按零列算，并跨行重放：每行结尾先重置、
+    下一行开头再补回生效中的样式。这样按行绝对定位重画时，每行都
+    自带完整样式，不依赖画行的先后顺序。
     """
     output = ""
     lines = 1
     n = 0
-    for c in display:
+    style = ""
+    index = 0
+    size = len(display)
+    while index < size:
+        c = display[index]
+        if c == "\x1b" and display[index + 1 : index + 2] == "[":
+            stop = _csi_end(display, index)
+            seq = display[index:stop]
+            output += seq
+            style = _next_style(style, seq)
+            index = stop
+            continue
+        index += 1
         if c == "\n":
-            output += end
+            output += (SGR_RESET if style else "") + end + style
             lines += 1
             n = 0
             continue
         c_width = measure(c)
         if n + c_width > width:
-            output += end
+            output += (SGR_RESET if style else "") + end + style
             lines += 1
             n = 0
         output += c
         n += c_width
+    if style:
+        output += SGR_RESET
     return output, lines
 
 
