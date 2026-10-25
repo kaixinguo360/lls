@@ -69,6 +69,52 @@ _READ_WINDOW = 0.002        # 合并窗口：把这段时间内陆续到达的�
 _READ_COALESCE_MIN = 16     # 首笔至少这么大才值得等待合并（按键回显仅 1-3 字节）
 
 
+class _PendingWrites:
+    """宿主终端的写缓冲：一帧内的多次写攒成一笔发出。
+
+    画一帧要写「模型里变化的行 + 覆盖层各行 + 光标定位」，分开写的话
+    终端按块逐次刷新，中途还可能被子进程输出的字节插进来 —— 看起来
+    就是半帧、或者覆盖层先闪一下再被画上。攒成一笔，终端按一个整体
+    处理，顺序也自然确定。
+
+    帧外的写（透传的原始字节）直接下去，不攒：那些字节的时机就是它们
+    自己的语义。
+    """
+
+    def __init__(self) -> None:
+        self._console: Console | None = None
+        self._chunks: list[bytes] = []
+        self._depth = 0
+
+    def attach(self, console: Console) -> None:
+        self._console = console
+
+    def write(self, data: bytes) -> None:
+        if self._depth:
+            self._chunks.append(data)
+        elif self._console is not None:
+            self._console.write(data)
+
+    @contextlib.contextmanager
+    def frame(self) -> Any:
+        """把这一段的写合并成一笔：最外层退出时一次写出。"""
+        self._depth += 1
+        try:
+            yield
+        finally:
+            self._depth -= 1
+            if self._depth == 0:
+                self._flush()
+
+    def _flush(self) -> None:
+        if not self._chunks:
+            return
+        data = b"".join(self._chunks)
+        self._chunks.clear()
+        if self._console is not None:
+            self._console.write(data)
+
+
 class Engine:
     """终端引擎。"""
 
@@ -95,6 +141,7 @@ class Engine:
         self._pty: PtySession | None = None
         self._pty_fd = -1
         self._console: Console | None = None
+        self._out = _PendingWrites()
         self._printer: LinePrinter | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -147,8 +194,7 @@ class Engine:
         winsize = Winsize(rows=self.screen.rows, columns=self.screen.columns)
         self._pty = self._backend.spawn(self._argv, winsize)
         self._pty_fd = self._pty.fileno()
-        self._console = self._backend.open_console()
-        self._printer = LinePrinter(self._console)
+        self._attach_console(self._backend.open_console())
 
         self._loop = asyncio.get_running_loop()
         self._align_model_to_cursor()
@@ -301,7 +347,7 @@ class Engine:
             # 解析是纯 Python，一次整屏重绘约 10ms；若在写终端前同步解析，
             # 事件循环就被占住、读不到下一批输出，画面只能一顿一顿地刷新。
             # 模型只是影子，晚几百毫秒无妨 —— 需要它时先排空积压。
-            self._console.write(data)
+            self._out.write(data)
             self._backlog += data
             self._pump_backlog()
         else:
@@ -310,6 +356,17 @@ class Engine:
             self.flush_backlog()
             self.screen.feed(data)
             self.render_from_model()
+
+    def _attach_console(self, console: Console) -> None:
+        """接上宿主终端。
+
+        从此**所有**写终端都经过帧缓冲（``self._out``）：打印器拿到的也是
+        它，而不是裸 console —— 否则覆盖层那一串写会绕开合并，一帧又变回
+        分好几次下发。
+        """
+        self._console = console
+        self._out.attach(console)
+        self._printer = LinePrinter(self._out)
 
     def _read_all_available(self) -> bytes | None:
         """在很短的窗口内读走子进程所有输出，**合并成一块**。
@@ -452,16 +509,19 @@ class Engine:
         self.screen.clear_dirty()
 
         if dirty:
-            out = []
-            for row in sorted(dirty):
-                if not 0 <= row < self.screen.rows:
-                    continue
-                out.append(f"\x1b[{row + 1};1H")
-                out.append(render_row_cells(self.screen.row_cells(row)))
-                out.append("\x1b[0K")
-            if out:
-                self._console.write("".join(out).encode())
-        if leave_cursor:
+            with self._out.frame():
+                out = []
+                for row in sorted(dirty):
+                    if not 0 <= row < self.screen.rows:
+                        continue
+                    out.append(f"\x1b[{row + 1};1H")
+                    out.append(render_row_cells(self.screen.row_cells(row)))
+                    out.append("\x1b[0K")
+                if out:
+                    self._out.write("".join(out).encode())
+                if leave_cursor:
+                    self._place_physical_cursor()
+        elif leave_cursor:
             self._place_physical_cursor()
         if keep_overlay:
             self._schedule_overlay_redraw()
@@ -518,6 +578,30 @@ class Engine:
         self.screen.resize(size.lines, size.columns)
         if self._pty is not None:
             self._pty.resize(size.lines, size.columns)
+        self._relayout_overlay()
+
+    def _relayout_overlay(self) -> None:
+        """窗口尺寸变了：覆盖层的锚点与行数都是按旧宽度算的。
+
+        模型 resize 之后整屏都会标成 dirty，所以这里不是「补一次擦除」，
+        而是当场按新尺寸重铺一遍：物理画面刚被终端改过，覆盖层也必须
+        立刻贴到新位置上 —— 否则它会按旧宽度折行、停在旧行，看上去
+        像卡住了。两件事写在同一次写里，不留中间态。
+        """
+        if self._console is None:
+            return
+        self._overlay_anchor_row = None
+        self._overlay_lines = 0
+        if self._active_prompt is None:
+            # 透传时屏幕归子进程管（它自己会收到 SIGWINCH 重画），没有覆盖层
+            # 要贴上去就不必再按模型铺一遍 —— 拖动窗口时这类重绘会连着来。
+            if not self._passthrough():
+                self.render_from_model(keep_overlay=False)
+            return
+        # 一次写里完成：先按模型铺满新尺寸的画面，再把覆盖层画回去。
+        with self._out.frame():
+            self.render_from_model(keep_overlay=False)
+            self._flush_overlay_redraw()
 
     def _on_sigchld(self) -> None:
         """SIGCHLD：有子进程状态变化，但**未必**是 PTY 子进程。
@@ -703,16 +787,17 @@ class Engine:
         # 「让出旧位置」只在真的换位置或变矮时做：
         # 若新锚点与旧锚点完全相同、高度也没减，直接覆盖即可（每一行都会先清空）。
         # 变矮时多出来的旧行必须按模型恢复，否则会一直留着上一帧的内容。
-        if (
-            self._overlay_anchor_row != anchor
-            or self._overlay_lines > lines_needed
-        ):
-            # 让出旧位置（并入 dirty 一次写回），不重画覆盖层、不动光标
-            # —— 紧接着 print_lines 会画到新锚点
-            self.render_from_model(keep_overlay=False, leave_cursor=False)
-        lines_all, lines_cur = self._printer.print_lines(
-            text, cursor, width, anchor_row=anchor
-        )
+        with self._out.frame():
+            if (
+                self._overlay_anchor_row != anchor
+                or self._overlay_lines > lines_needed
+            ):
+                # 让出旧位置（并入 dirty 一次写回），不重画覆盖层、不动光标
+                # —— 紧接着 print_lines 会画到新锚点
+                self.render_from_model(keep_overlay=False, leave_cursor=False)
+            lines_all, lines_cur = self._printer.print_lines(
+                text, cursor, width, anchor_row=anchor
+            )
         self._overlay_anchor_row = anchor
         self._overlay_lines = lines_all
         return anchor, lines_all
@@ -726,7 +811,7 @@ class Engine:
         if self._console is None:
             return
         c = self.screen.cursor
-        self._console.write(f"\x1b[{c.y + 1};{c.x + 1}H".encode())
+        self._out.write(f"\x1b[{c.y + 1};{c.x + 1}H".encode())
 
     # ---- 行读取 ----
 

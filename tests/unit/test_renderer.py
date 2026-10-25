@@ -16,9 +16,11 @@ from lls.ui import (
 class FakeConsole:
     def __init__(self) -> None:
         self.data = bytearray()
+        self.writes = 0
 
     def write(self, data: bytes) -> None:
         self.data.extend(data)
+        self.writes += 1
 
     def snapshot(self) -> bytes:
         out = bytes(self.data)
@@ -113,8 +115,7 @@ def _overlay_engine(rows: int = 8, columns: int = 20):
         handlers={},
         initial_handler="default",
     )
-    engine._console = console
-    engine._printer = LinePrinter(console)
+    engine._attach_console(console)
     engine._loop = None
     return engine, screen, console
 
@@ -152,3 +153,52 @@ def test_backspace_clears_the_old_tail_of_a_wrapped_prompt() -> None:
     assert rows[0].rstrip() == "> abcdef"
     assert rows[1].rstrip() == "g"
 
+
+
+# ---- 一帧一笔：帧内的写攒到最外层退出时统一发出 ----
+
+def test_overlay_takes_one_write_even_when_it_also_restores_the_model() -> None:
+    """画一帧只该下发一次。
+
+    覆盖层变矮时这一帧里既有「按模型恢复旧行」，又有「按新内容画
+行」，
+    分次写终端就会看到中间态：旧内容先被擦掉、新内容过一会儿才到。
+    """
+    engine, screen, console = _overlay_engine()
+    screen.feed(b"one\r\ntwo\r\nthree")
+    engine.draw_overlay("a\nb\nc")
+    console.snapshot()
+    console.writes = 0
+
+    engine.draw_overlay("x")
+
+    assert console.writes == 1
+
+
+def test_passthrough_writes_are_not_held_back() -> None:
+    """帧外的写直接下去：透传的字节自有其时序，不该被攒着。"""
+    engine, _screen, console = _overlay_engine()
+    engine._out.write(b"raw")
+
+    assert console.data == b"raw"
+
+
+# ---- 窗口尺寸变化：覆盖层按新宽度重排 ----
+
+def test_resize_redraws_the_overlay_at_the_new_width() -> None:
+    engine, screen, console = _overlay_engine(rows=6, columns=20)
+    screen.feed(b"one")
+    text = ">" + "a" * 18  # 20 列下是一行
+    engine.draw_overlay(text)
+    assert engine._overlay_lines == 1
+    # 覆盖层只在读提示符期间存在（read_line 会登记 active_prompt）。
+    engine._active_prompt = ("", text, len(text), 1, 1)
+    console.snapshot()
+
+    screen.resize(6, 10)  # 宿主终端变窄
+    engine._relayout_overlay()
+
+    rows = _emulate(console.snapshot(), rows=6, columns=10)
+    assert engine._overlay_lines == 2
+    assert rows[0].rstrip() == ">aaaaaaaaa"
+    assert rows[1].rstrip() == "aaaaaaaaa"
