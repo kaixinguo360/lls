@@ -95,7 +95,7 @@ def _provider(port: int, **kwargs) -> OpenAIProvider:
         ProviderConfig(
             id="stub",
             type="openai",
-            base_url="http://127.0.0.1:%d/v1" % port,
+            base_url=f"http://127.0.0.1:{port}/v1",
             api_key="sk-test",
             **kwargs,
         )

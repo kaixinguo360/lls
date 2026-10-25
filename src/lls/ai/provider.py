@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, AsyncIterator, Protocol, Sequence, runtime_checkable
 
 from .types import Chunk, Message, Tool
 
@@ -26,8 +26,8 @@ class Provider(Protocol):
         model: str,
         messages: Sequence[Message],
         *,
-        tools: Optional[Sequence[Tool]] = None,
-        parallel_tool_calls: Optional[bool] = None,
+        tools: Sequence[Tool] | None = None,
+        parallel_tool_calls: bool | None = None,
         **params: Any,
     ) -> AsyncIterator[Chunk]:
         """执行一次流式 chat completion。

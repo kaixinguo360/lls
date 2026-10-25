@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
+from typing import Any, AsyncIterator, Sequence
 
 from ..types import Chunk, ChunkKind, Message, ProviderConfig, Tool
 from ._wire import finished_calls, merge_tool_fragments
@@ -32,7 +32,7 @@ class OpenAIProvider:
         api_key = self._config.api_key
         if not api_key:
             raise ProviderError(
-                "provider %r has no api_key" % self.id
+                f"provider {self.id!r} has no api_key"
             )
         try:
             from openai import AsyncOpenAI
@@ -54,8 +54,8 @@ class OpenAIProvider:
         model: str,
         messages: Sequence[Message],
         *,
-        tools: Optional[Sequence[Tool]] = None,
-        parallel_tool_calls: Optional[bool] = None,
+        tools: Sequence[Tool] | None = None,
+        parallel_tool_calls: bool | None = None,
         **params: Any,
     ) -> AsyncIterator[Chunk]:
         client = self._client()
@@ -93,11 +93,11 @@ class OpenAIProvider:
     def _request_body(
         self,
         model: str,
-        payload: List[Dict[str, Any]],
-        tools: Optional[Sequence[Tool]],
-        parallel_tool_calls: Optional[bool],
-        params: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        payload: list[dict[str, Any]],
+        tools: Sequence[Tool] | None,
+        parallel_tool_calls: bool | None,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         """拼出请求体。"""
         body = dict(self._config.params)  # type: Dict[str, Any]
         body.update(params)

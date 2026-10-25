@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
 
 from .config import AIConfig, ConfigError, load, resolve_config_path
 from .provider import Provider
@@ -15,7 +14,7 @@ from .registry import create_provider
 __all__ = ["Catalog", "default_catalog", "parse_model_spec"]
 
 
-def parse_model_spec(spec: str) -> Tuple[str, str]:
+def parse_model_spec(spec: str) -> tuple[str, str]:
     """把 ``provider/model`` 拆成 ``(provider_id, model_id)``。
 
     model id 本身可能包含 ``/``（如 ``meta-llama/llama-3``），因此只按第一个
@@ -25,7 +24,7 @@ def parse_model_spec(spec: str) -> Tuple[str, str]:
     provider_id = provider_id.strip()
     model_id = model_id.strip()
     if not sep or not provider_id or not model_id:
-        raise ConfigError("model spec must be 'provider/model', got %r" % spec)
+        raise ConfigError(f"model spec must be 'provider/model', got {spec!r}")
     return provider_id, model_id
 
 
@@ -34,9 +33,9 @@ class Catalog:
 
     def __init__(self, config: AIConfig) -> None:
         self._config = config
-        self._instances: Dict[str, Provider] = {}
+        self._instances: dict[str, Provider] = {}
 
-    def provider_ids(self) -> List[str]:
+    def provider_ids(self) -> list[str]:
         return sorted(self._config.providers)
 
     def get(self, provider_id: str) -> Provider:
@@ -47,14 +46,15 @@ class Catalog:
         conf = self._config.providers.get(provider_id)
         if conf is None:
             raise ConfigError(
-                "no such provider %r (configured: %s)"
-                % (provider_id, ", ".join(self.provider_ids()) or "<none>")
+                "no such provider {!r} (configured: {})".format(
+                        provider_id, ", ".join(self.provider_ids()) or "<none>"
+                    )
             )
         instance = create_provider(conf)
         self._instances[provider_id] = instance
         return instance
 
-    def resolve_spec(self, spec: Optional[str] = None) -> Tuple[str, str]:
+    def resolve_spec(self, spec: str | None = None) -> tuple[str, str]:
         """把 ``provider/model`` 拆成 ``(provider_id, model_id)``。
 
         省略时用配置里的 ``default_model``。调用方需要**只**拿到 id 时用它
@@ -70,7 +70,7 @@ class Catalog:
             )
         return parse_model_spec(chosen)
 
-    def resolve(self, spec: Optional[str] = None) -> Tuple[Provider, str]:
+    def resolve(self, spec: str | None = None) -> tuple[Provider, str]:
         """解析 ``provider/model``；省略时用配置里的 ``default_model``。
 
         :raises ConfigError: 无可用配置、spec 非法或没有该 provider。

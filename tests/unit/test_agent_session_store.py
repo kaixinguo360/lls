@@ -8,14 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 from lls.ai import Chunk, ChunkKind, ConfigError, Message, ToolCall
 from lls.commands.builtin import agent as agent_cmd
-from lls.commands.builtin.agent_store import (
-    SessionStore,
-    default_sessions_dir,
-    migrate_legacy_sessions,
-)
+from lls.commands.builtin.agent_store import SessionStore, default_sessions_dir
 
 # ---- 桩 ----
 
@@ -73,7 +70,7 @@ class FakeCatalog:
 
     def get(self, provider_id):
         if provider_id != self._spec[0]:
-            raise ConfigError("no such provider %r" % provider_id)
+            raise ConfigError(f"no such provider {provider_id!r}")
         return self._provider
 
 
@@ -417,36 +414,14 @@ def test_agent_continues_from_disk_after_a_restart(monkeypatch, tmp_path) -> Non
 
 
 def test_default_sessions_dir_follows_the_environment(monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setenv("LLS_SESSIONS_HOME", str(tmp_path))
 
     assert default_sessions_dir() == tmp_path / "sessions"
 
 
-def test_default_sessions_dir_is_not_under_state(monkeypatch, tmp_path) -> None:
+def test_default_sessions_dir_sits_under_dot_local(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("LLS_SESSIONS_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    # Path.home() 在 Windows 上不读 HOME，直接把它指到临时目录才能跨平台成立。
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
     assert default_sessions_dir() == tmp_path / ".local" / "lls" / "sessions"
-
-
-def test_legacy_sessions_are_copied_on_first_use(tmp_path) -> None:
-    old = tmp_path / "old"
-    old.mkdir()
-    (old / "abc123.json").write_text("{}", encoding="utf-8")
-    (old / "index.json").write_text("{}", encoding="utf-8")
-    target = tmp_path / "new" / "sessions"
-
-    assert migrate_legacy_sessions(target, source=old) == 2
-    assert sorted(p.name for p in target.glob("*.json")) == ["abc123.json", "index.json"]
-    # 旧目录只读不改。
-    assert (old / "abc123.json").exists()
-    # 只搬一次：新目录已经在就不动。
-    (target / "abc123.json").write_text("mine", encoding="utf-8")
-    assert migrate_legacy_sessions(target, source=old) == 0
-    assert (target / "abc123.json").read_text(encoding="utf-8") == "mine"
-
-
-def test_legacy_migration_skips_missing_source(tmp_path) -> None:
-    assert migrate_legacy_sessions(tmp_path / "sessions", source=tmp_path / "nope") == 0
-    assert not (tmp_path / "sessions").exists()

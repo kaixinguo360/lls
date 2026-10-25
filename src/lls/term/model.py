@@ -1,15 +1,15 @@
 """终端屏幕模型：与具体实现无关的接口契约。
 
 这一层存在的唯一目的，是把「ANSI 字节流 → 可读取的屏幕状态」变成一个可以替换、
-可以单测、可以对拍的边界。
+可以单测的边界。
 
-约定（写进 CONTRIBUTING，review 时按此卡）：
+约定：
 
 * 本模块是纯数据定义，不 import ``os`` / ``sys``，不做任何 I/O。
-* 实现方（pyte 适配器 / 自研 VT 内核 / 测试替身）只通过本模块的类型交互。
+* 实现方（pyte 适配器、测试替身）只通过本模块的类型交互。
 * 行号、列号一律 0-based；``rows`` 指可见屏幕高度，不含回滚区。
 * ``feed()`` 接受**任意切分**的字节流，分块方式不得影响最终状态
-  （由 tests/golden 的分块不变性测试守护）。
+  （由 ``tests/unit/test_screen_model.py`` 的分块不变性测试守护）。
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ __all__ = [
 ]
 
 
-# 这是赋值而非注解，``from __future__ import annotations`` 不覆盖它；
-# ``frozenset[int]`` 要 3.9 才可下标，故用 typing 的形式。
+# 赋值语句里的类型在导入时求值，``from __future__ import annotations``
+# 不覆盖它；``frozenset[int]`` 要 3.9 才能下标，因此用 typing 的形式。
 DirtyRows = FrozenSet[int]
 """自上次 ``clear_dirty()`` 以来内容发生变化的可见行号。"""
 

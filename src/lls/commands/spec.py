@@ -15,8 +15,8 @@ from lls.session.services import Services
 
 __all__ = ["CommandFn", "CommandSpec", "all_commands", "command", "get_command"]
 
-# 这是赋值而非注解，``from __future__ import annotations`` 不覆盖它，
-# 因此在 3.8 上必须用 Optional 而不是 ``str | None``。
+# 赋值而非注解：导入时求值，``from __future__ import annotations`` 不覆盖它，
+# 因此这里写 Optional 而不是 ``str | None``（后者要 3.10）。
 CommandFn = Callable[[Services, Optional[str]], Awaitable[CommandResult]]
 
 

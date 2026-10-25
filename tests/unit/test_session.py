@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from lls.ui import overlay_anchor
 
-
 # ---- overlay_anchor：覆盖层必须自己约束在屏幕内 ----
 
 def test_overlay_fits_below_cursor() -> None:
@@ -37,7 +36,7 @@ def test_overlay_shifts_up_to_stay_inside_screen() -> None:
 def test_overlay_never_exceeds_bottom() -> None:
     """穷举：任意光标行与内容高度都不越下边界。
 
-    这是「覆盖层把终端撑得滚动、物理行与模型行错位」的核心回归。
+    覆盖层把终端撑得滚动，物理行与模型行就会错位 —— 这里守住那条边界。
     """
     rows = 20
     for cursor_y in range(rows):
@@ -58,7 +57,7 @@ def test_overlay_never_scrolls_at_any_position() -> None:
     这是「按行重绘即可恢复」这条简化路径的前提，必须始终成立。
     若某天新增了「覆盖层占满全屏」之类的策略，这个测试会先失败。
     """
-    rows, columns = 24, 80
+    rows, _columns = 24, 80
     for cursor_y in range(rows):
         for lines_needed in range(1, rows + 1):
             top = overlay_anchor(cursor_y, lines_needed, rows)

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Optional
 
 import pytest
 
@@ -81,7 +80,7 @@ def _run(
     *,
     tools=(),
     history=(),
-    max_steps: Optional[int] = None,
+    max_steps: int | None = None,
     events=None,
     poll=None,
 ) -> object:
@@ -330,7 +329,7 @@ def test_max_steps_is_at_least_two() -> None:
 def test_unlimited_steps_keep_going_until_the_model_stops() -> None:
     """默认不限步数：十几轮工具调用也照常继续，不会出现收尾轮。"""
     provider = ScriptedProvider(
-        [_calls(_call("c%d" % index, "t", {})) for index in range(12)]
+        [_calls(_call(f"c{index}", "t", {})) for index in range(12)]
         + [_text("done")]
     )
 

@@ -77,7 +77,7 @@ def test_ctrl_and_meta_short_aliases() -> None:
 
 
 def test_alt_supports_any_single_character() -> None:
-    assert encode_key("alt-中") == b"\x1b" + "中".encode("utf-8")
+    assert encode_key("alt-中") == b"\x1b" + "中".encode()
 
 
 def test_multiple_keys_are_concatenated_in_order() -> None:

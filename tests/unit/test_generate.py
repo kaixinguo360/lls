@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import List
 
 import pytest
 
 from lls.ai import Message, ToolCall
 from lls.commands.builtin import generate as gen
 from lls.ui import conservative_char_width
-
 
 # ---- 桩 ----
 
@@ -246,7 +244,7 @@ def test_menu_truncates_only_when_it_exceeds_the_cap() -> None:
 LABEL = gen.THINK_LABEL
 
 
-def _block(text: str, columns: int = 40) -> List[str]:
+def _block(text: str, columns: int = 40) -> list[str]:
     return gen._preview_lines(text, columns, gen.THINK_LINES, LABEL)
 
 
@@ -370,7 +368,7 @@ def test_retry_regenerates_then_accepts(monkeypatch) -> None:
 
     async def fake(s, request, screen, history=()):
         calls.append(request)
-        made = "cmd%d" % len(calls)
+        made = f"cmd{len(calls)}"
         return made, _tool_call(made)
 
     monkeypatch.setattr(gen, "_stream_payload", fake)
@@ -692,7 +690,7 @@ def test_second_run_sends_the_first_turn_back(monkeypatch) -> None:
 
     async def fake(s, request, screen, history=()):
         seen.append(list(history))
-        made = "echo %d" % len(seen)
+        made = f"echo {len(seen)}"
         return made, _tool_call(made)
 
     monkeypatch.setattr(gen, "_stream_payload", fake)
@@ -709,6 +707,6 @@ def test_history_is_trimmed_to_the_configured_turns(monkeypatch) -> None:
     _patch_generation(monkeypatch, "ls")
 
     for index in range(gen.HISTORY_TURNS + 3):
-        _run(gen.run_generate(FakeServices(["y"]), "第%d次" % index))
+        _run(gen.run_generate(FakeServices(["y"]), f"第{index}次"))
 
     assert len(gen._CONVERSATION) == gen.HISTORY_TURNS

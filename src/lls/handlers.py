@@ -63,8 +63,8 @@ class PassthroughHandler:
                 if i + 1 < len(data):
                     s.push_keys(data[i + 1 :])
                 # 切换前让模型追上：透传模式下显示优先、模型在后追赶，
-                # 此刻模型可能还缺最后几屏输出（含子进程的光标定位）。
-                # 不排空就用模型去定位覆盖层和物理光标，位置就是旧的。
+                # 此刻模型可能还缺最后几屏输出（含子进程的光标定位），
+                # 拿它定位覆盖层就会画在过时的行列上。
                 s.flush_model()
                 s.set_handler(target)
                 return

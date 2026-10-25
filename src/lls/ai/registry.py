@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List
+from typing import Callable
 
 from .provider import Provider
 from .types import ProviderConfig
@@ -28,7 +28,7 @@ def register_type(name: str, factory: ProviderFactory) -> None:
     _TYPES[name] = factory
 
 
-def available_types() -> List[str]:
+def available_types() -> list[str]:
     """已注册的实现类型名。"""
     return sorted(_TYPES)
 
@@ -41,7 +41,8 @@ def create_provider(config: ProviderConfig) -> Provider:
     factory = _TYPES.get(config.type)
     if factory is None:
         raise KeyError(
-            "unknown provider type %r (registered: %s)"
-            % (config.type, ", ".join(available_types()) or "<none>")
+            "unknown provider type {!r} (registered: {})".format(
+                    config.type, ", ".join(available_types()) or "<none>"
+                )
         )
     return factory(config)

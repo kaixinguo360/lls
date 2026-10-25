@@ -9,7 +9,3 @@
 *.ico binary
 *.woff binary
 *.woff2 binary
-
-# 黄金样本（逐字节比对的测试数据）不得被转换
-tests/golden/** -text
-tests/corpora/** -text

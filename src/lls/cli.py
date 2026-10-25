@@ -1,4 +1,4 @@
-"""CLI 入口：参数解析、非 tty 透传、doctor / replay 子命令。"""
+"""CLI 入口：参数解析、非 tty 透传、环境诊断。"""
 
 from __future__ import annotations
 

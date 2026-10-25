@@ -26,7 +26,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Sequence
 
 from .provider import Provider
 from .types import ChunkKind, Message, Tool, ToolCall
@@ -59,7 +59,7 @@ class AgentTool:
     """
 
     tool: Tool
-    run: Callable[[Dict[str, Any]], Awaitable[str]]
+    run: Callable[[dict[str, Any]], Awaitable[str]]
 
 
 class AgentEventKind(str, Enum):
@@ -95,7 +95,7 @@ class AgentResult:
     steps: int
     """这一轮用掉的模型请求数。"""
 
-    messages: Tuple[Message, ...]
+    messages: tuple[Message, ...]
     """会话消息（不含 system、不含收尾合成提示），可直接作为下一轮 history。"""
 
 
@@ -113,10 +113,10 @@ class Agent:
         *,
         system: str,
         tools: Sequence[AgentTool],
-        max_steps: Optional[int] = None,
+        max_steps: int | None = None,
         step_limit_note: str = "",
-        on_event: Optional[Callable[[AgentEvent], None]] = None,
-        poll: Optional[Callable[[float], Awaitable[None]]] = None,
+        on_event: Callable[[AgentEvent], None] | None = None,
+        poll: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         """``poll`` 在等待模型输出时反复调用，参数是建议等待的秒数。
 
@@ -172,7 +172,7 @@ class Agent:
     # ---- 收尾 ----
 
     async def _finish_at_limit(
-        self, conversation: List[Message], step: int
+        self, conversation: list[Message], step: int
     ) -> AgentResult:
         """最后一轮：禁用工具，只让模型用文本总结。"""
         request = self._request(conversation) + [
@@ -190,11 +190,11 @@ class Agent:
         self,
         step: int,
         messages: Sequence[Message],
-        tools: Optional[Sequence[Tool]],
-    ) -> Tuple[str, List[ToolCall]]:
+        tools: Sequence[Tool] | None,
+    ) -> tuple[str, list[ToolCall]]:
         """做一次流式请求，收集正文与工具调用。"""
-        text_parts: List[str] = []
-        calls: List[ToolCall] = []
+        text_parts: list[str] = []
+        calls: list[ToolCall] = []
 
         async def consume() -> None:
             async for chunk in self._provider.chat(
@@ -238,7 +238,7 @@ class Agent:
     async def _execute(self, step: int, call: ToolCall) -> str:
         entry = self._by_name.get(call.name)
         if entry is None:
-            return "error: unknown tool %r (available: %s)" % (
+            return "error: unknown tool {!r} (available: {})".format(
                 call.name,
                 ", ".join(sorted(self._by_name)) or "<none>",
             )
@@ -246,7 +246,7 @@ class Agent:
         try:
             arguments = json.loads(call.arguments or "{}")
         except (TypeError, ValueError) as e:
-            return "error: invalid tool arguments: %s" % e
+            return f"error: invalid tool arguments: {e}"
         if not isinstance(arguments, dict):
             return "error: tool arguments must be a JSON object"
 
@@ -255,7 +255,7 @@ class Agent:
         except AgentCancelled:
             raise
         except Exception as e:  # noqa: BLE001
-            return "error: %s" % e
+            return f"error: {e}"
 
         if not isinstance(result, str):
             result = str(result)
@@ -268,7 +268,7 @@ class Agent:
 
     # ---- 辅助 ----
 
-    def _request(self, conversation: Sequence[Message]) -> List[Message]:
+    def _request(self, conversation: Sequence[Message]) -> list[Message]:
         """请求消息 = 固定 system + 会话消息。"""
         return [Message("system", self._system)] + list(conversation)
 
@@ -277,7 +277,7 @@ class Agent:
         content = (text or None) if calls else text
         return Message("assistant", content, tool_calls=tuple(calls))
 
-    def _tools_for_request(self) -> Optional[Sequence[Tool]]:
+    def _tools_for_request(self) -> Sequence[Tool] | None:
         if not self._tools:
             return None
         return [entry.tool for entry in self._tools]
@@ -287,7 +287,7 @@ class Agent:
             self._on_event(event)
 
 
-def trim_turns(messages: Sequence[Message], max_turns: int) -> List[Message]:
+def trim_turns(messages: Sequence[Message], max_turns: int) -> list[Message]:
     """只保留最近 ``max_turns`` 轮（每轮从一条 user 消息开始）。
 
     按 user 边界切分，因此 assistant 的 tool_calls 与对应的 tool 回复不会

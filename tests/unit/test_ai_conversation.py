@@ -77,7 +77,7 @@ def test_history_is_trimmed_by_whole_turns() -> None:
     conversation = Conversation(max_turns=2)
 
     for index in range(5):
-        conversation.add_turn(Message("user", "turn%d" % index), _call(), "written")
+        conversation.add_turn(Message("user", f"turn{index}"), _call(), "written")
 
     assert len(conversation) == 2
     # 保留的是最后两轮，且结构完整

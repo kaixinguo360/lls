@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import List
 
 import pytest
 
@@ -27,8 +26,12 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 BUILTIN_GENERICS = {"list", "dict", "set", "frozenset", "tuple", "type"}
 
 
-def _sources() -> List[Path]:
+def _sources() -> list[Path]:
     return sorted(SRC.rglob("*.py"))
+
+
+def _is_null_constant(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
 
 
 def _is_pep604(node: ast.AST) -> bool:
@@ -40,9 +43,7 @@ def _is_pep604(node: ast.AST) -> bool:
         current = stack.pop()
         if isinstance(current, ast.BinOp) and isinstance(current.op, ast.BitOr):
             stack.extend([current.left, current.right])
-        elif isinstance(current, ast.Constant) and current.value is None:
-            continue
-        elif isinstance(current, ast.Name):
+        elif isinstance(current, ast.Name) or _is_null_constant(current):
             continue
         else:
             return False
@@ -88,7 +89,7 @@ def test_no_pep604_or_pep585_at_import_time() -> None:
     for path in _sources():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for lineno in _runtime_types(tree):
-            offenders.append("%s:%d" % (path.relative_to(SRC.parent), lineno))
+            offenders.append(f"{path.relative_to(SRC.parent)}:{lineno}")
 
     assert not offenders, "导入时会对内置类型下标（3.9+）或使用 | 联合（3.10+）：" + ", ".join(
         offenders
@@ -123,7 +124,7 @@ def test_modern_annotations_require_future_import(path: Path) -> None:
     if not _needs_postponed(tree):
         return
     assert "from __future__ import annotations" in text, (
-        "%s 的注解用了 3.9+ 语法，但缺少 `from __future__ import annotations`" % path
+        f"{path} 的注解用了 3.9+ 语法，但缺少 `from __future__ import annotations`"
     )
 
 

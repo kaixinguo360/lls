@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
-
 from .types import Message, ToolCall
 
 __all__ = ["Conversation"]
@@ -24,17 +22,17 @@ class Conversation:
     """
 
     def __init__(self, max_turns: int = 6) -> None:
-        self._turns: List[List[Message]] = []
+        self._turns: list[list[Message]] = []
         self._max_turns = max(1, max_turns)
 
     def __len__(self) -> int:
         return len(self._turns)
 
-    def messages(self) -> List[Message]:
+    def messages(self) -> list[Message]:
         """把各轮摊平成一条消息序列。"""
         return [message for turn in self._turns for message in turn]
 
-    def add_turn(self, user: Message, call: Optional[ToolCall], result: str) -> None:
+    def add_turn(self, user: Message, call: ToolCall | None, result: str) -> None:
         """记录一轮。
 
         ``call`` 为 None 表示这轮没经过模型（例如 ``请求#内容`` 直接给出），

@@ -1,8 +1,8 @@
 """按键解析器单元测试。
 
 解析按 ECMA-48 / VT100 的转义序列语法实现，而非枚举常见序列。
-回归重点：终端应答（DSR/DA/DECRQM/OSC/…）绝不能漏成可见输入 ——
-曾因只认 ``R``/``c``/``n`` 三种终结符，导致 DECRQM 应答 ``ESC[?12;1$y``
+重点：终端应答（DSR/DA/DECRQM/OSC/…）绝不能漏成可见输入 ——
+只认 ``R``/``c``/``n`` 三种终结符时，DECRQM 应答 ``ESC[?12;1$y``
 的残余 ``y`` 被插入 line 编辑器。
 """
 
@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from lls.tty import KeyParser
-
 
 # ---- 回车：CRLF 是一个键 ----
 
@@ -128,7 +127,7 @@ def test_known_keys(raw: bytes, want: str) -> None:
         b"\x1b[>0;10;1c",               # DA2 另一种
         b"\x1b[?0u",                    # kitty 键盘协议
         b"\x1b[?1u",
-        b"\x1b[?12;1$y",                # DECRQM 模式报告（曾漏出 y）
+        b"\x1b[?12;1$y",                # DECRQM 模式报告
         b"\x1b[8;24;80t",               # 窗口大小
         b"\x1b[1 q",                    # 带中间字节
         b"\x1bP>|XTerm(370)\x1b\\",     # DCS / XTVERSION
@@ -147,7 +146,7 @@ def test_terminal_responses_never_leak(raw: bytes) -> None:
 
 
 def test_decrqm_specifically_does_not_leak_y() -> None:
-    """精确回归：``ESC[?12;1$y`` 曾在 ``$`` 处失败，残余 ``y`` 进了编辑器。"""
+    """``ESC[?12;1$y`` 必须整段吃掉，残余字节不得进入编辑器。"""
     kp = KeyParser()
     keys = kp.feed(b"\x1b[?12;1$y")
     assert [k.control for k in keys] == ["terminal_response"]

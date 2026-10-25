@@ -1,39 +1,35 @@
 # LLS
 
-基于 PTY 的终端包装器：VT100 屏幕模型 + 覆盖层界面。
+基于 PTY 的终端包装器：在真实 shell 之上提供 VT100 屏幕模型与一层浮动的
+命令界面，可以读取终端状态、生成命令、让模型直接操作终端。
 
-> 当前处于重构中。旧实现见 [`legacy/`](legacy/)，新实现见 [`src/lls/`](src/lls/)。
+- **透传优先**：默认就是普通终端，子进程独占输入输出。
+- **命令层**：`Ctrl-E` 进入命令模式，命令以 `(services, args)` 的形式实现。
+- **屏幕模型**：从字节流维护一份可读的屏幕状态（备屏、颜色、光标、回滚区），
+  供命令读取，也用于重绘。
+- **AI 可选**：`generate` 与 `agent` 通过可插拔的 provider 取模型，未配置时
+  其余功能照常可用。
 
-## 结构
+## 安装
 
+需要 Python 3.8+ 与 POSIX 终端（Linux / macOS / WSL）。
+
+```bash
+pip install -e .            # 仅核心功能
+pip install -e ".[ai]"      # 额外安装 openai 包（也可改用 openai-http，不装）
+lls --doctor                # 检查环境
 ```
-src/lls/session/    终端引擎与它对外的能力接口
-src/lls/handlers.py 输入处理器（透传 / 命令分发）
-src/lls/commands/   命令层，按类别分模块
-src/lls/ai/         AI 模块：配置、provider 抽象、会话与 agent 循环
-src/lls/term/       VT100 屏幕模型（pyte 适配）
-src/lls/ui/         显示原语（换行、覆盖层定位、按模型渲染）
-src/lls/edit/       行编辑缓冲
-src/lls/tty/        PTY 与平台终端后端（按键编解码）
+
+```bash
+lls             # 在 $SHELL 里启动
+lls bash        # 指定命令
 ```
 
-引擎不认识任何命令：主循环只反复调用当前处理器的 `step()`。新增一种输入
-方式 = 新增一个处理器；新增一条命令 = 加一个带 `@command` 的函数。
-
-`src/lls/ai/` 不认识命令和终端，只做「消息进、增量出」的协议转发；想让
-`generate` 用上别的后端，在 `ai/providers/` 加一个模块并注册即可。通用
-agent 循环（`ai/agent.py`）也只驱动「请求 → 工具 → 请求」，具体工具由命令层
-提供。
-
-## 平台
-
-Linux/macOS 原生支持；Windows 请用 WSL。判据是 `pty` / `termios` / `fcntl`
-三个模块是否真的可用，而不是平台名；`lls --doctor` 会显示 `posix tty: OK`
-或缺失原因。
+非交互环境（stdin 不是 tty）下 `lls` 不接管终端，直接执行命令。
 
 ## 命令
 
-Ctrl-E 进入命令模式，输入命令名。
+`Ctrl-E` 进入命令模式，回车或 Esc 回到透传。
 
 | 命令 | 别名 | 说明 |
 |---|---|---|
@@ -45,41 +41,53 @@ Ctrl-E 进入命令模式，输入命令名。
 | `err` | | 显示最近捕获的错误信息 |
 | `quit` | `q`, `exit` | 退出命令模式，回到透传 |
 
-`generate 请求#内容` 跳过生成，直接把 `#` 后面的内容交给确认菜单；手写的内容
-同样过一眼再发。
+命令拿到的是完整的 `Services`：读屏幕、画覆盖层、读一行、写子进程都是原语，
+命令自己决定流程。
 
-## agent 会话
+### generate
 
-Ctrl-E 后输入 `agent`（或带首个任务：`agent 把测试跑一遍`）进入交互式 Agent
-会话。每次输入一行任务，模型就在终端里自动多轮执行：调用工具、读终端、再
-决定下一步，直到它用一条**不调用工具**的回复收尾；随后回到同一个提示，继续
-安排下一个任务。历史跨任务保留（最近几轮会随请求带上）。
+`generate` 读一条请求（或直接带上：`generate 查看日志`），把最近的终端画面
+与请求交给模型，产出确认后写进子进程：
 
-会话提示里显示最近两轮的任务与答复（每轮答复最多几行，避免覆盖层过高）；
-system prompt 也会要求模型用简短纯文本答复，细节留在终端输出里。
-空行或 Ctrl-C 清掉当前输入；Esc、Ctrl-D 或 `/exit` 退出会话回到透传。执行中
-按 Ctrl-C 只中止当前任务，会话继续；半成品不会写入历史。想直接操作 shell 时
-按 Esc 退出。会话状态由 `commands/builtin/agent_store.py` 管理并落盘到
-`$LLS_SESSIONS_HOME/sessions/`（默认 `~/.local/lls/sessions/`，一条会话一个
-JSON 文件；旧版放在 `~/.local/state/lls/sessions/` 的会自动搬过来一次）：再次 `agent` 回到同一段上下文，`agent --new` 才开一条新会话；lls
-重启后也能从上次的会话继续。只有完整结束的一轮才写盘。
+```
+(gen-instruct): 找到占用 8080 的进程
+(gen-cmd): lsof -i :8080, confirm? [y/i/n/e/r]
+```
+
+`y` 写入并回车，`i` 写入但不回车，`n` 放弃，`e` 改写请求，`r` 重新生成。
+模型返回空内容同样是正常结果，会进入确认菜单。
+
+`generate 请求#内容` 跳过生成，只走确认菜单 —— 手写的内容也过一眼再发。
+
+一次 `lls` 运行就是一段会话：每轮记下当时的终端画面、请求与结果，下一次生成
+把这些一起发给模型（最近若干轮）。
+
+### agent
+
+`agent` 进入交互式会话，每行一个任务；模型在终端里反复「调用工具 → 看结果」
+直到给出文本答复，然后回到同一个提示，接着安排下一个任务。
 
 工具：
-- `read_terminal`：读取终端最近若干行，可等待输出静默；什么时候读、等多久由
-  模型决定（动作工具不会自动回显画面）。
-- `send_text`：写入文字；`enter=true` 时作为命令提交。
-- `send_keys`：具名按键（enter/tab/esc/方向键/`ctrl-c`/`f1`…/`alt-x`）。
-- `send_raw`：以 base64/hex 发送任意字节（表里没有的序列、非 UTF-8 字节）。
 
-不限制步数：任务会一直自动执行，直到模型给出文本答复，或你按 Ctrl-C 中止。
-没有固定上限的代价是长任务会持续累积上下文（每轮都带完整历史），请留意终端
-状态与模型输出。运行期间用户按键只用于 Ctrl-C，其余按键丢弃；终端对子进程查询
-（光标位置、设备属性等）的应答会照常转交给子进程，不会丢。`agent` 不弹确认，
-模型给出的输入会直接写入子进程，请在你愿意让它操作的终端里使用。
+- `read_terminal`：读取终端最近若干行，可等待输出静默；
+- `send_text`：写入文字，`enter=true` 时作为命令提交；
+- `send_keys`：具名按键（`enter`/`tab`/`esc`/方向键/`ctrl-c`/`f1`…/`alt-x`）；
+- `send_raw`：以 base64/hex 发送任意字节。
+
+空行或 `Ctrl-C` 清掉当前输入；`Esc`、`Ctrl-D` 或 `/exit` 退出回到透传。
+执行中按 `Ctrl-C` 只中止当前任务，会话继续。任务没有步数上限，随时可以
+`Ctrl-C` 中止。
+
+会话有独立身份并落盘到 `$LLS_SESSIONS_HOME`（默认 `~/.local/lls`）下的
+`sessions/`，一条会话一个 JSON 文件。再次 `agent` 回到同一段上下文，
+`agent --new` 另开一条。
+
+`agent` 不弹确认，模型给出的输入直接写入子进程 —— 请在愿意让它动手的终端里
+使用。
 
 ## 配置
 
-`generate` 和 `agent` 从 YAML 读 provider 配置，路径优先级：
+`generate` 与 `agent` 从 YAML 读 provider 配置，路径优先级：
 `LLS_CONFIG` > `$XDG_CONFIG_HOME/lls/config.yaml` > `~/.config/lls/config.yaml`。
 
 ```yaml
@@ -92,52 +100,66 @@ ai:
       api_key: sk-...
       models: [gpt-4o-mini, gpt-4o]
     local:
-      type: openai
+      type: openai-http
       base_url: http://localhost:11434/v1
       api_key: ollama
       models: [qwen3-coder]
 ```
 
-`default_model` 用 `provider_id/model_id` 寻址，模型名本身可含斜杠
-（只按第一个斜杠切分）。用 `pip install 'lls[ai]'` 装 `openai` 依赖。
+`default_model` 用 `provider_id/model_id` 寻址；模型名本身可含斜杠，只按第一个
+斜杠切分。
 
-两种 `type` 说同一种协议，区别只在传输层：
+`type` 决定传输层，两者说同一种协议：
 
 | type | 实现 | 依赖 |
 |---|---|---|
-| `openai` | 用 `openai` 包 | 需要 `pip install 'lls[ai]'` |
-| `openai-http` | 标准库直接发 HTTP/1.1、自己解 SSE | **无** |
+| `openai` | 通过 `openai` 包 | 需要 `pip install 'lls[ai]'` |
+| `openai-http` | 标准库直接发 HTTP/1.1、自己解 SSE | 无 |
 
-不想装 SDK 就把 `type` 换成 `openai-http`，其余配置不变：
+`openai-http` 走 `asyncio` 直连（http/https 皆可），流式输出期间界面照常
+刷新，`Ctrl-C` 立即断开。对后端的要求与 SDK 一致：`POST {base_url}/chat/completions`，
+流式 SSE。
 
-```yaml
-    openai:
-      type: openai-http
-      base_url: https://api.openai.com/v1
-      api_key: sk-...
-      models: [gpt-4o-mini]
-```
-
-`openai-http` 走 `asyncio` 直连（http/https 都支持），生成期间界面照常刷新、
-Ctrl-C 能立刻断开连接。对后端的要求和 SDK 一致：
-`POST {base_url}/chat/completions`，流式 SSE。
-
-`params` 里的键会原样进请求体（`temperature` 之类）：
+`params` 里的键会原样进请求体：
 
 ```yaml
       params:
         temperature: 0.2
 ```
 
+## 结构
+
+```
+src/lls/app.py           组合根：装配引擎与处理器
+src/lls/session/         终端引擎与对外的能力接口（Services）
+src/lls/handlers.py      输入处理器（透传 / 命令分发）
+src/lls/commands/        命令层，内置命令按类别分模块
+src/lls/ai/              provider 抽象、多轮对话、通用 agent 循环
+src/lls/term/            屏幕模型（pyte 适配）
+src/lls/ui/              显示原语：换行、覆盖层定位、按模型渲染、字符宽度
+src/lls/edit/            行编辑缓冲
+src/lls/tty/             PTY 与终端后端、按键编解码
+```
+
+依赖方向是单向的：引擎不认识命令；`commands` 只依赖 `Services`；`ai` 不认识
+终端。新增一种输入方式 = 一个处理器；新增一条命令 = 一个带 `@command` 的函数；
+新增一个模型后端 = `ai/providers/` 里的一个模块。
+
+## 平台
+
+判据是 `pty` / `termios` / `fcntl` 三个模块是否真的可用，而不是平台名。
+Windows 原生没有这些模块，请使用 WSL；`lls --doctor` 会给出结论。
+
 ## 开发
 
 ```bash
-# 运行测试（需先 pip install -e ".[dev]"）
-python -m pytest
+pip install -e ".[dev]"
 
-# 语料回放
-python tools/replay.py replay <corpus.raw>
-python tools/replay.py compare <corpus.raw>
+python -m pytest        # 测试
+ruff check src tests    # 静态检查
+mypy                    # 类型检查（term 与 edit 两个包为严格模式）
 ```
 
-详见 [docs/](docs/)（待补）与 [tests/corpora/README.md](tests/corpora/README.md)。
+代码需要在 3.8 上可导入：注解一律依赖 `from __future__ import annotations`，
+赋值语句里的类型则使用 `typing` 的形式（`tests/unit/test_py38_compat.py`
+会静态检查这一点）。

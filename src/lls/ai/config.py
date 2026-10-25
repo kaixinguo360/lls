@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .types import ProviderConfig
 
@@ -44,13 +44,13 @@ class ConfigError(Exception):
 class AIConfig:
     """解析后的 ``ai:`` 段。"""
 
-    providers: Dict[str, ProviderConfig] = field(default_factory=dict)
-    default_model: Optional[str] = None
-    path: Optional[Path] = None
+    providers: dict[str, ProviderConfig] = field(default_factory=dict)
+    default_model: str | None = None
+    path: Path | None = None
     """配置来源文件。"""
 
 
-def resolve_config_path(explicit: Optional[str] = None) -> Path:
+def resolve_config_path(explicit: str | None = None) -> Path:
     """按 ``--config`` > ``LLS_CONFIG`` > ``XDG_CONFIG_HOME`` > ``~/.config`` 定路径。"""
     if explicit:
         return Path(explicit).expanduser()
@@ -62,50 +62,50 @@ def resolve_config_path(explicit: Optional[str] = None) -> Path:
     return root / "lls" / DEFAULT_FILENAME
 
 
-def _as_str(value: Any, field_name: str, fallback: Optional[str] = None) -> Optional[str]:
+def _as_str(value: Any, field_name: str, fallback: str | None = None) -> str | None:
     if value is None:
         return fallback
     if not isinstance(value, str):
-        raise ConfigError("%s must be a string" % field_name)
+        raise ConfigError(f"{field_name} must be a string")
     return value
 
 
 def _parse_provider(pid: str, data: Any) -> ProviderConfig:
     if not isinstance(data, dict):
-        raise ConfigError("ai.providers.%s must be a mapping" % pid)
-    ptype = _as_str(data.get("type"), "ai.providers.%s.type" % pid)
+        raise ConfigError(f"ai.providers.{pid} must be a mapping")
+    ptype = _as_str(data.get("type"), f"ai.providers.{pid}.type")
     if not ptype:
-        raise ConfigError("ai.providers.%s.type is required" % pid)
+        raise ConfigError(f"ai.providers.{pid}.type is required")
 
     models_raw = data.get("models") or []
     if not isinstance(models_raw, list):
-        raise ConfigError("ai.providers.%s.models must be a list" % pid)
+        raise ConfigError(f"ai.providers.{pid}.models must be a list")
     models = []  # type: List[str]
     for item in models_raw:
         if not isinstance(item, str):
-            raise ConfigError("ai.providers.%s.models entries must be strings" % pid)
+            raise ConfigError(f"ai.providers.{pid}.models entries must be strings")
         models.append(item)
 
     headers_raw = data.get("headers") or {}
     if not isinstance(headers_raw, dict):
-        raise ConfigError("ai.providers.%s.headers must be a mapping" % pid)
+        raise ConfigError(f"ai.providers.{pid}.headers must be a mapping")
 
     params_raw = data.get("params") or {}
     if not isinstance(params_raw, dict):
-        raise ConfigError("ai.providers.%s.params must be a mapping" % pid)
+        raise ConfigError(f"ai.providers.{pid}.params must be a mapping")
 
     timeout_raw = data.get("timeout", 60.0)
     try:
         timeout = float(timeout_raw)
     except (TypeError, ValueError) as e:
-        raise ConfigError("ai.providers.%s.timeout must be a number" % pid) from e
+        raise ConfigError(f"ai.providers.{pid}.timeout must be a number") from e
 
     return ProviderConfig(
         id=pid,
         type=ptype,
-        name=_as_str(data.get("name"), "ai.providers.%s.name" % pid, "") or "",
-        base_url=_as_str(data.get("base_url"), "ai.providers.%s.base_url" % pid),
-        api_key=_as_str(data.get("api_key"), "ai.providers.%s.api_key" % pid),
+        name=_as_str(data.get("name"), f"ai.providers.{pid}.name", "") or "",
+        base_url=_as_str(data.get("base_url"), f"ai.providers.{pid}.base_url"),
+        api_key=_as_str(data.get("api_key"), f"ai.providers.{pid}.api_key"),
         headers={str(k): str(v) for k, v in headers_raw.items()},
         timeout=timeout,
         models=models,
@@ -113,7 +113,7 @@ def _parse_provider(pid: str, data: Any) -> ProviderConfig:
     )
 
 
-def _parse_ai(data: Dict[str, Any], path: Path) -> AIConfig:
+def _parse_ai(data: dict[str, Any], path: Path) -> AIConfig:
     section = data.get("ai") or {}
     if not isinstance(section, dict):
         raise ConfigError("ai must be a mapping")
@@ -144,8 +144,7 @@ def load(path=None):
     target = Path(path).expanduser() if path is not None else resolve_config_path()
     if not target.exists():
         raise ConfigError(
-            "config not found: %s\ncreate it with at least:\n\n%s"
-            % (target, MINIMAL_EXAMPLE)
+            f"config not found: {target}\ncreate it with at least:\n\n{MINIMAL_EXAMPLE}"
         )
     try:
         import yaml
@@ -155,7 +154,7 @@ def load(path=None):
     try:
         raw = yaml.safe_load(target.read_text(encoding="utf-8"))
     except yaml.YAMLError as e:
-        raise ConfigError("invalid YAML in %s: %s" % (target, e)) from e
+        raise ConfigError(f"invalid YAML in {target}: {e}") from e
 
     if raw is None:
         raw = {}

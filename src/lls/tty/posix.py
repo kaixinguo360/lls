@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import os
 import pty
@@ -24,7 +25,7 @@ import termios
 import time
 import tty
 
-from .backend import Console, PtySession, TerminalBackend, Winsize
+from .backend import Console, PtySession, Winsize
 
 # DSR（Device Status Report）应答：ESC [ 行 ; 列 R
 _DSR_RE = re.compile(rb"\x1b\[(\d+);(\d+)R")
@@ -51,11 +52,9 @@ class _PosixPtySession:
     def resize(self, rows: int, columns: int) -> None:
         if self.master_fd < 0:
             return
-        try:
+        # PTY 已关闭（子进程刚退出）时改尺寸没有意义
+        with contextlib.suppress(OSError):
             _apply_winsize(self.master_fd, rows, columns)
-        except OSError:
-            # PTY 已关闭（子进程刚退出）时改尺寸没有意义，忽略即可
-            pass
 
     def signal(self, signum: int) -> None:
         """把信号发给子进程所在的整个进程组。
@@ -66,18 +65,14 @@ class _PosixPtySession:
         """
         if self._pid <= 0:
             return
-        try:
+        # 子进程已退出，或已不是我们能发信号的进程组
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self._pid, signum)
-        except (ProcessLookupError, PermissionError):
-            # 子进程已退出，或已不是我们能发信号的进程组
-            pass
 
     def close(self) -> None:
         if self.master_fd >= 0:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(self.master_fd)
-            except OSError:
-                pass
             self.master_fd = -1
 
 
@@ -192,26 +187,20 @@ class PosixBackend:
         """
         if self._old_tty is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old_tty)
-        except Exception:
-            pass
 
     def resume_console(self) -> None:
         """从挂起恢复：重新进入 raw 模式。"""
         if self._old_tty is None:
             return
-        try:
+        with contextlib.suppress(Exception):
             tty.setraw(sys.stdin.fileno())
-        except Exception:
-            pass
 
     def close_console(self) -> None:
         if self._old_tty is not None:
-            try:
+            with contextlib.suppress(Exception):
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._old_tty)
-            except Exception:
-                pass
             self._old_tty = None
 
 

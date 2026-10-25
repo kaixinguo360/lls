@@ -23,7 +23,7 @@ import binascii
 import json
 import math
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from lls.ai import (
     Agent,
@@ -71,7 +71,7 @@ INPUT_PROMPT = "(agent): "
 REPLY_PREFIX = "(agent-reply) "
 NOTE_PREFIX = "(agent-note) "
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT = f"""\
 你是一个在真实终端里工作的自动化操作员。用户会连续给你任务，这是一个持续的
 会话：完成一个任务后，你会收到下一个任务。
 
@@ -86,7 +86,7 @@ SYSTEM_PROMPT = """\
   按键序列、非 UTF-8 字节或需要精确转义序列的场合。
 
 显示环境：
-- 你的最终答复显示在终端会话提示里：最多 %d 行，且只保留最近 %d 轮，更长的
+- 你的最终答复显示在终端会话提示里：最多 {REPLY_LINES} 行，且只保留最近 {LOG_ENTRIES} 轮，更长的
   内容会被截断。答复尽量短（一到三句、最多两三行），结论先行；不要空行，
   不要 Markdown 标题或代码围栏，不要贴大段日志、表格或命令输出。
 - 终端画面就是细节所在：具体输出留在终端里，答复只讲做了什么、当前状态、
@@ -101,7 +101,7 @@ SYSTEM_PROMPT = """\
 - 没有固定步数上限，但也不要空转：连续没有进展时，直接说明现状与建议。
 - 只执行与任务相关的操作；不要做用户没有要求的破坏性操作。
 - 会话历史会跨任务保留；用户的新任务可能引用之前的终端状态。
-""" % (REPLY_LINES, LOG_ENTRIES)
+"""
 
 
 class _Aborted(AgentCancelled):
@@ -245,7 +245,7 @@ def _clip(text: str, columns: int) -> str:
     if room <= 0:
         return marker if _width(marker) <= columns else ""
 
-    kept: List[str] = []
+    kept: list[str] = []
     used = 0
     for char in flat:
         char_width = conservative_char_width(char)
@@ -278,7 +278,7 @@ def _tail_line(prefix: str, text: str, columns: int) -> str:
     if room <= 0:
         return prefix + marker
 
-    kept: List[str] = []
+    kept: list[str] = []
     used = 0
     for char in reversed(flat):
         char_width = conservative_char_width(char)
@@ -289,7 +289,7 @@ def _tail_line(prefix: str, text: str, columns: int) -> str:
     return prefix + marker + "".join(reversed(kept))
 
 
-def _reply_rows(text: str, columns: int) -> List[str]:
+def _reply_rows(text: str, columns: int) -> list[str]:
     """把标签和答复拼在一起后再按终端宽度折行。
 
     续行不再缩进：悬挂缩进会白占一大块列宽（答复一半以上都是缩进就太亏了）。
@@ -369,7 +369,7 @@ class _TerminalView:
             if key.control == "terminal_response":
                 self._s.write(key.raw)
 
-    async def read(self, lines: int, wait_seconds: float) -> Tuple[str, str]:
+    async def read(self, lines: int, wait_seconds: float) -> tuple[str, str]:
         """读屏幕；``wait_seconds`` 内静默就提前返回，否则到点返回。"""
         text = self.snapshot(lines)
         if wait_seconds <= 0:
@@ -427,7 +427,7 @@ class _RepeatGuard:
         self._last = None
         self._count = 0
 
-    def after(self, name: str, args: Dict[str, Any], result: str) -> str:
+    def after(self, name: str, args: dict[str, Any], result: str) -> str:
         try:
             encoded = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
@@ -440,8 +440,8 @@ class _RepeatGuard:
             self._count = 1
         if self._count >= self._remind_at and self._count % self._remind_at == 0:
             return result + (
-                "\n\n（提醒）你已经连续 %d 次完全相同地调用 %s；先分析上次结果，"
-                "若没有进展请换一种做法或结束本轮。" % (self._count, name)
+                f"\n\n（提醒）你已经连续 {self._count} 次完全相同地调用 {name}；"
+                "先分析上次结果，若没有进展请换一种做法或结束本轮。"
             )
         return result
 
@@ -467,16 +467,16 @@ def _as_float(value: Any, default: float) -> float:
 
 def _build_tools(
     services: Services, view: _TerminalView, guard: _RepeatGuard
-) -> List[AgentTool]:
+) -> list[AgentTool]:
     """构造四个终端工具（动作只写，读取留在 read_terminal）。"""
 
-    async def read_terminal(args: Dict[str, Any]) -> str:
+    async def read_terminal(args: dict[str, Any]) -> str:
         lines = _as_int(args.get("lines"), DEFAULT_READ_LINES)
         wait = _as_float(args.get("wait_seconds"), 0.0)
         text, status = await view.read(lines, wait)
         return guard.after("read_terminal", args, view.observe(text, status))
 
-    async def send_text(args: Dict[str, Any]) -> str:
+    async def send_text(args: dict[str, Any]) -> str:
         text = args.get("text")
         if not isinstance(text, str):
             raise ValueError("'text' must be a string")
@@ -490,11 +490,11 @@ def _build_tools(
         return guard.after(
             "send_text",
             args,
-            "已写入 %d 字节%s。用 read_terminal 查看结果。"
-            % (len(data) + (1 if appended else 0), "（末尾已回车）" if appended else ""),
+            f"已写入 {len(data) + (1 if appended else 0)} 字节"
+            f"{'（末尾已回车）' if appended else ''}。用 read_terminal 查看结果。",
         )
 
-    async def send_keys(args: Dict[str, Any]) -> str:
+    async def send_keys(args: dict[str, Any]) -> str:
         names = args.get("keys")
         if not isinstance(names, list) or not names:
             raise ValueError("'keys' must be a non-empty array of key names")
@@ -505,11 +505,10 @@ def _build_tools(
         return guard.after(
             "send_keys",
             args,
-            "已发送 %d 个按键（%d 字节）：%s"
-            % (len(cleaned), len(data), " ".join(cleaned)),
+            f"已发送 {len(cleaned)} 个按键（{len(data)} 字节）：{' '.join(cleaned)}",
         )
 
-    async def send_raw(args: Dict[str, Any]) -> str:
+    async def send_raw(args: dict[str, Any]) -> str:
         encoded = args.get("data")
         encoding = args.get("encoding")
         if not isinstance(encoded, str) or not encoded:
@@ -524,13 +523,13 @@ def _build_tools(
             else:
                 data = bytes.fromhex(encoded)
         except (binascii.Error, ValueError) as e:
-            raise ValueError("invalid %s data: %s" % (encoding, e)) from e
+            raise ValueError(f"invalid {encoding} data: {e}") from e
         if not data:
             raise ValueError("decoded data is empty")
 
         services.write(data)
         return guard.after(
-            "send_raw", args, "已发送 %d 字节（%s）" % (len(data), encoding)
+            "send_raw", args, f"已发送 {len(data)} 字节（{encoding}）"
         )
 
     return [
@@ -577,7 +576,7 @@ class _Painter:
         columns = max(1, self._s.screen.columns)
         lines = [
             _line(
-                "(agent %d) " % self._step,
+                f"(agent {self._step}) ",
                 self._action or "waiting...",
                 columns,
             )
@@ -597,7 +596,7 @@ class _Session:
         services: Services,
         provider: Any,
         model: str,
-        state: Optional[SessionState] = None,
+        state: SessionState | None = None,
     ) -> None:
         self._s = services
         self._provider = provider
@@ -608,10 +607,10 @@ class _Session:
         self._view = _TerminalView(services)
         self._guard = _RepeatGuard()
         self._tools = _build_tools(services, self._view, self._guard)
-        self._history: List[Message] = list(self._state.history)
-        self._log: List[Tuple[str, str, str]] = list(self._state.log)
+        self._history: list[Message] = list(self._state.history)
+        self._log: list[tuple[str, str, str]] = list(self._state.log)
 
-    async def run(self, first_task: Optional[str]) -> bool:
+    async def run(self, first_task: str | None) -> bool:
         """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。"""
         task: Any = first_task.strip() if first_task else None
         while True:
@@ -681,7 +680,7 @@ class _Session:
             self._record(task, "", str(e))
             return
         except Exception as e:  # noqa: BLE001
-            self._record(task, "", "error: %s" % e)
+            self._record(task, "", f"error: {e}")
             return
         finally:
             self._s.restore_context()
@@ -709,7 +708,7 @@ class _Session:
 
     def _prompt_text(self) -> str:
         columns = max(1, self._s.screen.columns)
-        rows: List[str] = []
+        rows: list[str] = []
         for task, reply, note in self._log:
             rows.append(_line("(agent) ", task, columns))
             if reply:
@@ -730,7 +729,7 @@ class _Session:
 _NEW = "--new"
 
 
-def _parse_args(args: Optional[str]) -> Tuple[bool, Optional[str]]:
+def _parse_args(args: str | None) -> tuple[bool, str | None]:
     """拆出 ``--new``（其余原样作为首个任务）。"""
     text = (args or "").strip()
     if text == _NEW:
@@ -740,7 +739,7 @@ def _parse_args(args: Optional[str]) -> Tuple[bool, Optional[str]]:
     return False, text or None
 
 
-def _open_session(fresh: bool) -> Tuple[Any, str, SessionState]:
+def _open_session(fresh: bool) -> tuple[Any, str, SessionState]:
     """取回（或新建）要进入的会话。
 
     会话身份就靠这里延续：不加 ``--new`` 时总是回到 ``store().current()``，
@@ -759,20 +758,19 @@ def _open_session(fresh: bool) -> Tuple[Any, str, SessionState]:
         provider = catalog.get(state.provider_id)
     except ConfigError as e:
         raise ConfigError(
-            "%s（会话 %s 的 provider 已不存在；用 agent --new 开新会话）"
-            % (e, state.id)
+            f"{e}（会话 {state.id} 的 provider 已不存在；用 agent --new 开新会话）"
         ) from e
     return provider, state.model_id, state
 
 
 @command("agent", aliases=("a",), category="ai")
-async def cmd_agent(s: Services, args: Optional[str]) -> CommandResult:
+async def cmd_agent(s: Services, args: str | None) -> CommandResult:
     """进入交互式 Agent 会话，按任务自动多轮执行"""
     fresh, task = _parse_args(args)
     try:
         provider, model, state = _open_session(fresh)
     except Exception as e:  # noqa: BLE001
-        await s.show_message("error: %s" % e)
+        await s.show_message(f"error: {e}")
         return CommandResult()
 
     exited = await _Session(s, provider, model, state).run(task)

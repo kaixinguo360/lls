@@ -122,7 +122,7 @@ def _provider(port: int, **kwargs) -> HttpProvider:
         ProviderConfig(
             id="stub",
             type="openai-http",
-            base_url="http://127.0.0.1:%d/v1" % port,
+            base_url=f"http://127.0.0.1:{port}/v1",
             api_key="sk-test",
             **kwargs,
         )
@@ -177,7 +177,7 @@ def test_request_line_and_headers(stub) -> None:
     _chat(_provider(stub))
 
     headers = {k.lower(): v for k, v in _Stub.requests[-1]["headers"].items()}
-    assert headers["host"] == "127.0.0.1:%d" % stub
+    assert headers["host"] == f"127.0.0.1:{stub}"
     assert headers["content-type"] == "application/json"
     assert headers["accept"] == "text/event-stream"
     assert headers["authorization"] == "Bearer sk-test"

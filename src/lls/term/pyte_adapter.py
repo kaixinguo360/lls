@@ -69,7 +69,10 @@ class _Screen(pyte.Screen):
 
     def _row_to_text(self, row: int) -> str:
         line = self.buffer[row]
-        return "".join(line[x].data if x in line else " " for x in range(self.columns)).rstrip() if line else ""
+        if not line:
+            return ""
+        cells = (line[x].data if x in line else " " for x in range(self.columns))
+        return "".join(cells).rstrip()
 
     def history_lines(self) -> list[str]:
         return list(self._history)

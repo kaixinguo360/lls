@@ -8,12 +8,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from lls.ai import Chunk, ChunkKind, Message, ProviderConfig, Tool, ToolCall
 from lls.ai.providers._wire import merge_tool_fragments
 from lls.ai.providers.openai import OpenAIProvider
-
 
 # ---- 请求体 ----
 

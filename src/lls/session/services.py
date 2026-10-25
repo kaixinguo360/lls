@@ -36,7 +36,7 @@ class Handler(Protocol):
 
     passthrough: bool
 
-    async def step(self, services: "Services") -> None:
+    async def step(self, services: Services) -> None:
         """处理一轮输入。可以长时间等待，也可以立即返回。"""
         ...
 
@@ -46,7 +46,7 @@ class Services:
 
     __slots__ = ("_engine",)
 
-    def __init__(self, engine: "Engine") -> None:
+    def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
     # ---- 屏幕模型 ----

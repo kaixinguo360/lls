@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
-from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
+from typing import Any, AsyncIterator, Sequence
 from urllib.parse import urlsplit
 
 from ..types import Chunk, ChunkKind, Message, ProviderConfig, Tool
@@ -42,11 +42,11 @@ class HttpProvider:
     def _request_body(
         self,
         model: str,
-        payload: List[Dict[str, Any]],
-        tools: Optional[Sequence[Tool]],
-        parallel_tool_calls: Optional[bool],
-        params: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        payload: list[dict[str, Any]],
+        tools: Sequence[Tool] | None,
+        parallel_tool_calls: bool | None,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         body = dict(self._config.params)  # type: Dict[str, Any]
         body.update(params)
         body["model"] = model
@@ -62,29 +62,29 @@ class HttpProvider:
         base = (self._config.base_url or _DEFAULT_BASE_URL).rstrip("/")
         return base + "/chat/completions"
 
-    def _headers(self, length: int) -> List[str]:
+    def _headers(self, length: int) -> list[str]:
         url = urlsplit(self._endpoint())
         host = url.netloc
         lines = [
             "POST %s HTTP/1.1" % (url.path or "/"),
-            "Host: %s" % host,
+            f"Host: {host}",
             "Content-Type: application/json",
             "Accept: text/event-stream",
-            "Content-Length: %d" % length,
+            f"Content-Length: {length}",
             # 不用分块传输，读到连接关闭即为结束；省掉客户端侧的 chunked 解码。
             "Connection: close",
         ]
         api_key = self._config.api_key
         if api_key:
-            lines.append("Authorization: Bearer %s" % api_key)
+            lines.append(f"Authorization: Bearer {api_key}")
         for name, value in self._config.headers.items():
-            lines.append("%s: %s" % (name, value))
+            lines.append(f"{name}: {value}")
         return lines
 
     async def _connect(self):
         url = urlsplit(self._endpoint())
         if url.scheme not in ("http", "https") or not url.hostname:
-            raise ProviderError("unsupported base_url: %s" % self._endpoint())
+            raise ProviderError(f"unsupported base_url: {self._endpoint()}")
         secure = url.scheme == "https"
         context = ssl.create_default_context() if secure else None
         port = url.port or (443 if secure else 80)
@@ -100,11 +100,10 @@ class HttpProvider:
             )
         except asyncio.TimeoutError:
             raise ProviderError(
-                "connect to %s timed out after %ss"
-                % (self._endpoint(), self._config.timeout)
+                f"connect to {self._endpoint()} timed out after {self._config.timeout}s"
             ) from None
         except OSError as e:
-            raise ProviderError("cannot reach %s: %s" % (self._endpoint(), e)) from e
+            raise ProviderError(f"cannot reach {self._endpoint()}: {e}") from e
 
     @staticmethod
     async def _read_head(reader: asyncio.StreamReader):
@@ -115,7 +114,7 @@ class HttpProvider:
         lines = raw.decode("iso-8859-1").split("\r\n")
         status_parts = lines[0].split(" ", 2)
         if len(status_parts) < 2 or not status_parts[1].isdigit():
-            raise ProviderError("malformed status line: %r" % lines[0])
+            raise ProviderError(f"malformed status line: {lines[0]!r}")
         status = int(status_parts[1])
         headers = {}
         for line in lines[1:]:
@@ -127,7 +126,7 @@ class HttpProvider:
 
     @staticmethod
     async def _iter_body(
-        reader: asyncio.StreamReader, headers: Dict[str, str]
+        reader: asyncio.StreamReader, headers: dict[str, str]
     ) -> AsyncIterator[bytes]:
         """按传输方式交出响应体的原始字节。"""
         if headers.get("transfer-encoding", "").lower() == "chunked":
@@ -146,7 +145,7 @@ class HttpProvider:
                 yield data
 
     @staticmethod
-    async def _iter_sse(body: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
+    async def _iter_sse(body: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
         """把响应体切成一条条 SSE 事件并解析成对象。"""
         pending = b""
         async for chunk in body:
@@ -164,7 +163,7 @@ class HttpProvider:
                 try:
                     yield json.loads(data)
                 except json.JSONDecodeError as e:
-                    raise ProviderError("malformed stream chunk: %s" % e) from e
+                    raise ProviderError(f"malformed stream chunk: {e}") from e
 
     # ---- 协议 ----
 
@@ -173,8 +172,8 @@ class HttpProvider:
         model: str,
         messages: Sequence[Message],
         *,
-        tools: Optional[Sequence[Tool]] = None,
-        parallel_tool_calls: Optional[bool] = None,
+        tools: Sequence[Tool] | None = None,
+        parallel_tool_calls: bool | None = None,
         **params: Any,
     ) -> AsyncIterator[Chunk]:
         body = self._request_body(
@@ -195,9 +194,8 @@ class HttpProvider:
             status, headers = await self._read_head(reader)
             if status < 200 or status >= 300:
                 detail = await reader.read(_MAX_ERROR_BODY)
-                raise ProviderError(
-                    "HTTP %d: %s" % (status, detail.decode("utf-8", "replace").strip())
-                )
+                body = detail.decode("utf-8", "replace").strip()
+                raise ProviderError(f"HTTP {status}: {body}")
 
             pending = {}  # type: Dict[int, Dict[str, str]]
             async for event in self._iter_sse(self._iter_body(reader, headers)):
@@ -219,6 +217,6 @@ class HttpProvider:
         except ProviderError:
             raise
         except (asyncio.IncompleteReadError, ConnectionError) as e:
-            raise ProviderError("connection lost while streaming: %s" % e) from e
+            raise ProviderError(f"connection lost while streaming: {e}") from e
         finally:
             writer.close()

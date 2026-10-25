@@ -6,7 +6,7 @@ SDK 交出来的是对象，直接发 HTTP 拿到的则是 dict；归并规则�
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Iterator, Optional
+from typing import Any, Dict, Iterable, Iterator
 
 from ..types import ToolCall
 
@@ -23,7 +23,7 @@ def field(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
-def merge_tool_fragments(pending: Dict[int, Slot], fragments: Optional[Iterable[Any]]) -> None:
+def merge_tool_fragments(pending: dict[int, Slot], fragments: Iterable[Any] | None) -> None:
     """把一次 delta 里的工具调用分片按 ``index`` 归并进 ``pending``。"""
     for fragment in fragments or ():
         index = field(fragment, "index", 0) or 0
@@ -42,14 +42,14 @@ def merge_tool_fragments(pending: Dict[int, Slot], fragments: Optional[Iterable[
             slot["arguments"] += arguments
 
 
-def finished_calls(pending: Dict[int, Slot]) -> Iterator[ToolCall]:
+def finished_calls(pending: dict[int, Slot]) -> Iterator[ToolCall]:
     """流结束后，把归并好的调用按 index 顺序交出来。"""
     for index in sorted(pending):
         slot = pending[index]
         if not slot["name"]:
             continue
         yield ToolCall(
-            id=slot["id"] or "call_%d" % index,
+            id=slot["id"] or f"call_{index}",
             name=slot["name"],
             arguments=slot["arguments"],
         )

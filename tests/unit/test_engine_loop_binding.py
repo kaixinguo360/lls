@@ -1,13 +1,10 @@
 """引擎不得在构造函数里创建 asyncio 原语。
 
-``app.run_interactive`` 是在 ``asyncio.run()`` **之前**构造 ``Engine`` 的。在
-Python 3.8 里，``asyncio.Event`` / ``asyncio.Queue`` 会在构造时就绑定当前事件
-循环（``events.get_event_loop()``），3.10 才改成惰性绑定。于是 3.8 上这些原语
-绑在默认循环上，``asyncio.run`` 又新建一个循环，一 await 就报：
+``app.run_interactive`` 在 ``asyncio.run()`` **之前**构造 ``Engine``。Python 3.8
+上 ``asyncio.Event`` / ``asyncio.Queue`` 构造时即绑定当前事件循环，而
+``asyncio.run`` 随后另起一个循环，两者一旦相遇就无法 await。
 
-    RuntimeError: ... got Future <Future pending> attached to a different loop
-
-两者都必须等循环跑起来再创建。这个测试守的就是「别把它们放回 __init__」。
+因此这些原语必须等循环跑起来再创建 —— 本测试守住这一点。
 """
 
 from __future__ import annotations
@@ -35,11 +32,11 @@ def test_construction_creates_no_asyncio_primitives() -> None:
 
     bound = [name for name, value in vars(engine).items() if isinstance(value, PRIMITIVES)]
 
-    assert bound == [], "构造时创建了 asyncio 原语（3.8 会绑定到错误的循环）：%s" % bound
+    assert bound == [], f"构造函数里创建了 asyncio 原语：{bound}"
 
 
 def test_construction_does_not_touch_the_event_loop() -> None:
-    """连 get_event_loop() 都不该碰：它会让「默认循环」被提前创建出来。"""
+    """连 ``get_event_loop()`` 都不该碰：那会提前创建出默认循环。"""
     calls = []
     original = asyncio.get_event_loop
 

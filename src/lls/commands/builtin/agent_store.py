@@ -17,15 +17,16 @@
 
 from __future__ import annotations
 
+import builtins
+import contextlib
 import json
 import os
 import re
 import secrets
-import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Tuple, Union
 
 from lls.ai import Message, ToolCall
 
@@ -35,8 +36,6 @@ __all__ = [
     "SessionState",
     "SessionStore",
     "default_sessions_dir",
-    "legacy_sessions_dir",
-    "migrate_legacy_sessions",
     "new_session_id",
     "store",
 ]
@@ -68,44 +67,11 @@ def new_session_id() -> str:
 def default_sessions_dir() -> Path:
     """会话目录：``$LLS_SESSIONS_HOME`` > ``~/.local``；会话在它下面的 ``sessions``。
 
-    刻意不挂在 ``~/.local/state`` 上：路径短一点、少一层 ``state``，
-    与工具自己的 ``~/.config/lls`` 对称。
+    与配置的 ``~/.config/lls`` 对称：路径短，一层就够。
     """
     base = os.environ.get("LLS_SESSIONS_HOME")
     root = Path(base).expanduser() if base else Path.home() / ".local" / "lls"
     return root / "sessions"
-
-
-def legacy_sessions_dir() -> Path:
-    """上一版的位置：``$XDG_STATE_HOME/lls/sessions``（默认 ``~/.local/state``）。
-
-    只用来把旧会话搬到新目录；搬完就不再读它。
-    """
-    base = os.environ.get("XDG_STATE_HOME")
-    root = Path(base).expanduser() if base else Path.home() / ".local" / "state"
-    return root / "lls" / "sessions"
-
-
-def migrate_legacy_sessions(target: Path, source: Optional[Path] = None) -> int:
-    """把旧目录里的会话文件复制到 ``target``，返回搬了几条。
-
-    只在 ``target`` 还不存在时动手（升级后的第一次）；复制而不移动，旧文件
-    留着也不影响，删不删由用户决定。任何 OSError 都吞掉：搬家失败不该让
-    ``agent`` 起不来。
-    """
-    source = legacy_sessions_dir() if source is None else source
-    try:
-        if target.exists() or not source.is_dir():
-            return 0
-        files = [path for path in source.glob("*.json") if path.is_file()]
-        if not files:
-            return 0
-        target.mkdir(parents=True, exist_ok=True)
-        for path in files:
-            shutil.copy2(path, target / path.name)
-        return len(files)
-    except OSError:
-        return 0
 
 
 @dataclass
@@ -119,15 +85,15 @@ class SessionState:
     id: str = ""
     provider_id: str = ""
     model_id: str = ""
-    history: List[Message] = field(default_factory=list)
-    log: List[LogEntry] = field(default_factory=list)
+    history: list[Message] = field(default_factory=list)
+    log: list[LogEntry] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
     @property
     def model(self) -> str:
         """``provider/model`` 形式，用于展示。"""
-        return "%s/%s" % (self.provider_id, self.model_id)
+        return f"{self.provider_id}/{self.model_id}"
 
     @property
     def turns(self) -> int:
@@ -143,19 +109,23 @@ class SessionStore:
     """
 
     def __init__(
-        self, keep: int = MAX_SESSIONS, root: Optional[PathLike] = None
+        self, keep: int = MAX_SESSIONS, root: PathLike | None = None
     ) -> None:
-        self._sessions: Dict[str, SessionState] = {}
-        self._current: Optional[str] = None
+        self._sessions: dict[str, SessionState] = {}
+        # 「最近使用」的次序。时间戳在同一 tick 内可能并列，只按它排序会让
+        # 淘汰逻辑删掉刚建的那条，因此再记一个单调序号兜底。
+        self._order: dict[str, int] = {}
+        self._counter = 0
+        self._current: str | None = None
         self._keep = max(1, int(keep))
         self._root = Path(root).expanduser() if root is not None else None
         # 最近一次落盘失败的原因（不影响会话本身）；命令层可用来提示。
-        self.last_error: Optional[str] = None
+        self.last_error: str | None = None
         if self._root is not None:
             self._load()
 
     @property
-    def root(self) -> Optional[Path]:
+    def root(self) -> Path | None:
         """落盘目录；``None`` 表示纯内存。"""
         return self._root
 
@@ -171,19 +141,25 @@ class SessionStore:
             model_id=model_id,
         )
         if not _ID_RE.match(state.id):
-            raise ValueError("bad session id: %r" % (state.id,))
+            raise ValueError(f"bad session id: {state.id!r}")
         self._sessions[state.id] = state
         self._current = state.id
+        self._touch(state.id)
         self.save(state)
         return state
 
-    def get(self, session_id: str) -> Optional[SessionState]:
+    def get(self, session_id: str) -> SessionState | None:
         return self._sessions.get(session_id)
 
-    def list(self) -> List[SessionState]:
-        """全部会话，最近使用的在前。"""
+    def list(self) -> builtins.list[SessionState]:
+        """全部会话，最近使用的在前。
+
+        时间戳并列时按登记次序决出先后，保证排序与淘汰都是确定的。
+        """
         return sorted(
-            self._sessions.values(), key=lambda state: state.updated_at, reverse=True
+            self._sessions.values(),
+            key=lambda state: (state.updated_at, self._order.get(state.id, 0)),
+            reverse=True,
         )
 
     def __len__(self) -> int:
@@ -200,13 +176,14 @@ class SessionStore:
         """
         if self._sessions.get(state.id) is not state:
             self._sessions[state.id] = state
+        self._touch(state.id)
         self._write_state(state)
         self._write_index()
         self.trim()
 
     # ---- 当前会话 ----
 
-    def current(self) -> Optional[SessionState]:
+    def current(self) -> SessionState | None:
         if self._current is None:
             return None
         return self._sessions.get(self._current)
@@ -224,9 +201,14 @@ class SessionStore:
             return False
         if self._current == session_id:
             self._current = None
+        self._order.pop(session_id, None)
         self._unlink(session_id)
         self._write_index()
         return True
+
+    def _touch(self, session_id: str) -> None:
+        self._counter += 1
+        self._order[session_id] = self._counter
 
     def trim(self) -> None:
         """超出上限时丢掉最久未用的会话（磁盘上的文件一起删）。"""
@@ -246,7 +228,7 @@ class SessionStore:
         except FileNotFoundError:
             return
         except OSError as e:
-            self.last_error = "%s: %s" % (root, e)
+            self.last_error = f"{root}: {e}"
             return
         for path in entries:
             if path.suffix != SESSION_SUFFIX or path.name == INDEX_NAME:
@@ -260,7 +242,7 @@ class SessionStore:
         self._read_index()
         self.trim()
 
-    def _read_state(self, path: Path, session_id: str) -> Optional[SessionState]:
+    def _read_state(self, path: Path, session_id: str) -> SessionState | None:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -308,9 +290,9 @@ class SessionStore:
         except FileNotFoundError:
             pass
         except OSError as e:
-            self.last_error = "%s: %s" % (root, e)
+            self.last_error = f"{root}: {e}"
 
-    def _atomic_write(self, path: Path, payload: Dict[str, Any]) -> None:
+    def _atomic_write(self, path: Path, payload: dict[str, Any]) -> None:
         """临时文件 + ``os.replace``；失败只记录，不打断会话。"""
         root = self._root
         if root is None:
@@ -318,24 +300,18 @@ class SessionStore:
         tmp = path.with_name(path.name + _TMP_SUFFIX)
         try:
             root.mkdir(parents=True, exist_ok=True)
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(str(root), 0o700)
-            except OSError:
-                pass
             data = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
             with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(data)
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(str(tmp), 0o600)
-            except OSError:
-                pass
             os.replace(str(tmp), str(path))
         except OSError as e:
-            self.last_error = "%s: %s" % (path, e)
-            try:
+            self.last_error = f"{path}: {e}"
+            with contextlib.suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
 
     # ---- 内部：id ----
 
@@ -348,7 +324,7 @@ class SessionStore:
 
 # ---- 序列化 ----
 
-def _encode_state(state: SessionState) -> Dict[str, Any]:
+def _encode_state(state: SessionState) -> dict[str, Any]:
     return {
         "version": SCHEMA_VERSION,
         "id": state.id,
@@ -361,8 +337,8 @@ def _encode_state(state: SessionState) -> Dict[str, Any]:
     }
 
 
-def _encode_message(message: Message) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"role": message.role}
+def _encode_message(message: Message) -> dict[str, Any]:
+    payload: dict[str, Any] = {"role": message.role}
     if message.content is not None:
         payload["content"] = message.content
     if message.tool_calls:
@@ -379,7 +355,7 @@ def _decode_state(raw: Any, session_id: str) -> SessionState:
     if not isinstance(raw, dict):
         raise TypeError("session is not an object")
     if raw.get("version") != SCHEMA_VERSION:
-        raise ValueError("unsupported session version: %r" % (raw.get("version"),))
+        raise ValueError("unsupported session version: {!r}".format(raw.get("version")))
     provider_id = raw.get("provider_id")
     model_id = raw.get("model_id")
     if not isinstance(provider_id, str) or not isinstance(model_id, str):
@@ -453,14 +429,12 @@ def _number(value: Any) -> float:
     return 0.0
 
 
-_STORE: Optional[SessionStore] = None
+_STORE: SessionStore | None = None
 
 
 def store() -> SessionStore:
     """进程内单例：跨多次 ``agent`` 调用共享同一份会话，并落盘续命。"""
     global _STORE
     if _STORE is None:
-        root = default_sessions_dir()
-        migrate_legacy_sessions(root)
-        _STORE = SessionStore(root=root)
+        _STORE = SessionStore(root=default_sessions_dir())
     return _STORE

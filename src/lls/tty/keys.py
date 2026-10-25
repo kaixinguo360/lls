@@ -30,7 +30,7 @@ r"""按键编解码：字节流 ↔ Key 事件。
 from __future__ import annotations
 
 import codecs
-from typing import Dict, Sequence
+from typing import Sequence
 
 from .backend import Key
 
@@ -296,12 +296,12 @@ _CONTROL_SYMBOLS = {
 }
 
 
-def _build_key_names() -> Dict[str, bytes]:
+def _build_key_names() -> dict[str, bytes]:
     """构造「名字 → 字节」表（含 c- 简写）。"""
     keys = dict(_SYMBOL_KEYS)
     keys.update({"f1": b"\x1bOP", "f2": b"\x1bOQ", "f3": b"\x1bOR", "f4": b"\x1bOS"})
     for number, code in _FUNCTION_CODES.items():
-        keys["f%d" % number] = ("\x1b[%d~" % code).encode()
+        keys[f"f{number}"] = f"\x1b[{code}~".encode()
     for index in range(26):
         letter = chr(ord("a") + index)
         keys["ctrl-" + letter] = bytes([index + 1])
@@ -343,7 +343,7 @@ def encode_key(name: str) -> bytes:
         if len(rest) == 1:
             return b"\x1b" + rest.encode("utf-8")
     raise KeyNameError(
-        "unknown key %r (try enter, tab, esc, up, ctrl-c, alt-x, f5)" % name
+        f"unknown key {name!r} (try enter, tab, esc, up, ctrl-c, alt-x, f5)"
     )
 
 

@@ -36,7 +36,7 @@ class FakeScreen:
         self.limits.append(kwargs.get("limit"))
         self._calls += 1
         if self._increment:
-            return "line-%d" % self._calls
+            return f"line-{self._calls}"
         if self._texts is not None:
             index = min(self._calls - 1, len(self._texts) - 1)
             return self._texts[index]
@@ -356,9 +356,9 @@ def test_long_task_is_not_cut_off(monkeypatch) -> None:
     rounds = [
         _calls(
             _call(
-                "c%d" % index,
+                f"c{index}",
                 "send_text",
-                {"text": "step-%d" % index, "enter": False},
+                {"text": f"step-{index}", "enter": False},
             )
         )
         for index in range(20)
@@ -486,8 +486,8 @@ def test_painter_previews_the_latest_reasoning() -> None:
 def test_system_prompt_matches_the_display_budget() -> None:
     prompt = agent_cmd.SYSTEM_PROMPT
 
-    assert ("最多 %d 行" % agent_cmd.REPLY_LINES) in prompt
-    assert ("最近 %d 轮" % agent_cmd.LOG_ENTRIES) in prompt
+    assert f"最多 {agent_cmd.REPLY_LINES} 行" in prompt
+    assert f"最近 {agent_cmd.LOG_ENTRIES} 轮" in prompt
     assert "不要空行" in prompt
     assert "终端画面就是细节所在" in prompt
 

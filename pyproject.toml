@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lls"
-version = "0.2.0"
+dynamic = ["version"]
 description = "基于 PTY 的终端包装器：VT100 屏幕模型 + 覆盖层界面"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -17,10 +17,14 @@ dependencies = [
 
 [project.optional-dependencies]
 ai = ["openai>=1.0"]
-dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "ruff>=0.1", "mypy>=1.0"]
+dev = ["pytest>=7.0", "ruff>=0.1", "mypy>=1.0"]
 
 [project.scripts]
 lls = "lls.cli:main"
+
+# 版本号只在 lls/__init__.py 里写一次
+[tool.hatch.version]
+path = "src/lls/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lls"]
@@ -28,13 +32,14 @@ packages = ["src/lls"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+# 代码必须能在 3.8 上导入：注解靠 from __future__ import annotations，
+# 赋值语句里的类型用 typing 的形式。
 [tool.ruff]
 line-length = 100
 target-version = "py38"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
-ignore = ["E501"]
 
 [tool.mypy]
 python_version = "3.8"

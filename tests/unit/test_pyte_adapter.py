@@ -2,7 +2,7 @@
 
 pyte 对 ``ESC [ ? … <final>`` 一律以 ``private=True`` 派发，而 ``Stream.csi``
 里二十多个处理函数并没有这个参数。终端真会发这类序列（``?m``、``?6n``、
-``?1;2c``），以前一个就让 ``feed()`` 抛 ``TypeError``，整个会话中断。
+``?1;2c``），任何一个都足以让 ``feed()`` 抛 ``TypeError``、中断整个会话。
 """
 
 from __future__ import annotations

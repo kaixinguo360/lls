@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import List, NamedTuple, Optional, Sequence, Tuple
+from typing import NamedTuple, Sequence
 
 from lls.ai import (
     ChunkKind,
@@ -93,7 +93,7 @@ def build_user_text(request: str, screen: str) -> str:
 
 def build_messages(
     request: str, screen: str, history: Sequence[Message] = ()
-) -> List[Message]:
+) -> list[Message]:
     """构造请求消息：固定 system + 历史轮次 + 本轮 user。"""
     return [
         Message("system", SYSTEM_PROMPT),
@@ -165,7 +165,7 @@ def _fit(text: str, limit: int) -> str:
     return "".join(kept) + marker
 
 
-def _wrap(text: str, columns: int) -> List[str]:
+def _wrap(text: str, columns: int) -> list[str]:
     """把整段内容当成**一行**，按保守宽度折成若干行。
 
     换行与回车一律拍平成空格：思考内容里的换行是模型自己的排版，直接搬进
@@ -179,7 +179,7 @@ def _wrap(text: str, columns: int) -> List[str]:
     )[0].split("\n")
 
 
-def _preview_lines(text: str, columns: int, limit: int, label: str) -> List[str]:
+def _preview_lines(text: str, columns: int, limit: int, label: str) -> list[str]:
     """思考预览：整行拼好再折行，只保留末尾 ``limit`` 行。"""
     return _wrap(label + text, columns)[-limit:]
 
@@ -193,7 +193,7 @@ def _menu_text(payload: str, hint: str, columns: int) -> str:
     """
     flat = _flat(payload)
 
-    def render(text: str) -> List[str]:
+    def render(text: str) -> list[str]:
         return _wrap(MENU_PREFIX + text + hint + MENU_SUFFIX, columns)
 
     rows = render(flat)
@@ -212,7 +212,7 @@ def _menu_text(payload: str, hint: str, columns: int) -> str:
 
 def _paint(s: Services, label: str, text: str) -> None:
     """画一行状态。"""
-    s.draw_overlay(_fit("(%s): %s" % (label, text), s.screen.columns))
+    s.draw_overlay(_fit(f"({label}): {text}", s.screen.columns))
 
 
 def _paint_thinking(s: Services, text: str) -> None:
@@ -230,7 +230,7 @@ class _Cancelled(Exception):
 
 async def _stream_payload(
     s: Services, request: str, screen: str, history: Sequence[Message] = ()
-) -> Tuple[str, ToolCall]:
+) -> tuple[str, ToolCall]:
     """调用 provider 生成 payload；期间可被 Ctrl-C 中断。
 
     返回 ``(payload, call)`` —— 调用本身也要留下，它是这一轮的 assistant 消息。
@@ -278,7 +278,7 @@ async def _stream_payload(
     try:
         arguments = json.loads(call.arguments)
     except json.JSONDecodeError as e:
-        raise RuntimeError("invalid tool arguments: %s" % e) from e
+        raise RuntimeError(f"invalid tool arguments: {e}") from e
 
     value = arguments.get("input")
     if not isinstance(value, str):
@@ -286,7 +286,7 @@ async def _stream_payload(
     return value, call
 
 
-async def _read_request(s: Services, value: str = "") -> Optional[str]:
+async def _read_request(s: Services, value: str = "") -> str | None:
     line = await s.read_line(
         "(gen-instruct): ",
         include_last=False,
@@ -306,10 +306,10 @@ class _Outcome(NamedTuple):
     这种没经过模型的轮次为 None。
     """
 
-    payload: Optional[str] = None
+    payload: str | None = None
     enter: bool = True
-    note: Optional[str] = None
-    call: Optional[ToolCall] = None
+    note: str | None = None
+    call: ToolCall | None = None
 
 
 async def _produce(
@@ -368,7 +368,7 @@ async def _produce(
         hint = ", please input 'y' or 'n':"
 
 
-async def run_generate(s: Services, request: Optional[str] = None) -> bool:
+async def run_generate(s: Services, request: str | None = None) -> bool:
     """完整流程：读请求 → 生成 → 确认 → 写入子进程。
 
     返回是否**真的写入了内容**。没写就说明这次什么都没发生，调用方据此决定
@@ -414,12 +414,12 @@ async def run_generate(s: Services, request: Optional[str] = None) -> bool:
         )
         return True
     except Exception as e:  # noqa: BLE001
-        await s.show_message("error: %s" % e)
+        await s.show_message(f"error: {e}")
         return False
 
 
 @command("generate", aliases=("g", "gen"), category="ai")
-async def cmd_generate(s: Services, args: Optional[str]) -> CommandResult:
+async def cmd_generate(s: Services, args: str | None) -> CommandResult:
     """由终端状态与请求生成一段输入，确认后写入子进程"""
     wrote = await run_generate(s, args)
     # 写入了才回透传（要看到命令生效）；没写入就留在命令模式，让用户重来。
