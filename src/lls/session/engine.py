@@ -56,7 +56,8 @@ OVERLAY_REDRAW_DELAY = 0.05
 # 因为追赶轮次增多，每轮固定开销占了上风。
 _FEED_SLICE = 2048           # 单次喂给模型的最大字节数
 _FEED_BUDGET = 0.004         # 单轮解析的时间预算（秒）
-_BACKLOG_LIMIT = 256 * 1024  # 积压上限：超过就一次喂完，避免无限增长
+_BACKLOG_LIMIT = 256 * 1024  # 积压上限：超过就丢弃最老的一段，避免无限增长
+_BACKLOG_KEEP = 64 * 1024    # 丢完保留的尾部长度（够重画一屏所依赖的最近输出）
 
 # 每次 master 可读时，一口气读走全部可用数据（合并成一笔写出）。
 #
@@ -342,14 +343,22 @@ class Engine:
             self.screen.feed(data)
             return
         if self._passthrough():
-            # 透传：立刻写终端，模型排队追赶（见 _pump_backlog）。
+            # 透传：模型排队追赶（见 _pump_backlog），终端由子进程的字节直接
+            # 画。顺序是「喂一小片模型 → 一笔写出子进程字节 + 覆盖层」。
             #
-            # 解析是纯 Python，一次整屏重绘约 10ms；若在写终端前同步解析，
-            # 事件循环就被占住、读不到下一批输出，画面只能一顿一顿地刷新。
-            # 模型只是影子，晚几百毫秒无妨 —— 需要它时先排空积压。
-            self._out.write(data)
+            # 先喂模型，是为了让覆盖层贴住子进程当前光标；喂的是**有预算**的
+            # 一小片（解析是纯 Python，整屏重绘约 10ms，不许在写终端前同步
+            # 追平，否则事件循环被占住、读不到下一批输出，画面一顿一顿）。
+            # 追不平（积压非空）时 _redraw_overlay_now 会退回静默兜底，绝不按
+            # 过时光标定锚。
+            #
+            # 不补画的话，子进程的字节会把覆盖层冲掉 —— 持续输出下几乎看不到
+            # 它（实测 10ms/行时可见率仅 22%，改成同帧补画后 100%）。
             self._backlog += data
             self._pump_backlog()
+            with self._out.frame():
+                self._out.write(data)
+                self._redraw_overlay_now()
         else:
             # 渲染模式：不写子进程字节，终端内容一律由模型投影而来。
             # 透传会让「子进程画的」与「覆盖层画的」争用同一个终端。
@@ -431,7 +440,7 @@ class Engine:
         每收到一批输出顺带解析一片，解析速度因此与产出速度挂钩。
         不做 `call_soon` 式的连续追赶：那会让事件循环排满解析回调，反而挤占
         读 pty 的时机，比同步解析还慢。落后太多时由 :data:`_BACKLOG_LIMIT`
-        兜底一次喂完，保证模型不会无限期落后于子进程。
+        兜底丢历史，保证积压有界，同时**不**让任何一轮卡住事件循环。
         """
         self._feed_backlog_slice()
 
@@ -444,11 +453,14 @@ class Engine:
         if not self._backlog:
             return
         if len(self._backlog) > _BACKLOG_LIMIT:
-            # 积压过多：一次喂完。宁可卡一下，也不让模型与子进程脱节。
-            self.screen.feed(bytes(self._backlog))
-            self._backlog.clear()
-            self.screen.clear_dirty()
-            return
+            # 积压过多：丢掉最老的一段，只留最近的一截继续追。
+            #
+            # 旧做法是「一次喂完」，它保证模型立刻追上，代价是把整个积压
+            # 一次性塞进 pyte（实测 256KB 约 0.4s），事件循环在这 0.4s 里
+            # 读不到 pty、也不理按键 —— 表现就是洪流输出时画面停顿半秒。
+            # 模型只是影子：丢历史比卡住整条通路划算，最近一截足以让光标
+            # 和覆盖层定位保持可信。
+            del self._backlog[:-_BACKLOG_KEEP]
         started = time.perf_counter()
         cut = 0
         total = len(self._backlog)
@@ -470,8 +482,14 @@ class Engine:
         还压在 backlog 里，提示符因此会落在随机的旧行上。
 
         已排空时是空操作，可以随手调用。
+
+        积压超过 :data:`_BACKLOG_LIMIT` 时先丢掉最老的一段：已经落在
+        后面的历史对定位毫无用处，而把 1MB+ 一次性塞进 pyte 要两秒，
+        那两秒里按键、画面全停 —— 用户按 Ctrl-E 就是按了个空。
         """
         if self._backlog:
+            if len(self._backlog) > _BACKLOG_LIMIT:
+                del self._backlog[:-_BACKLOG_KEEP]
             self.screen.feed(bytes(self._backlog))
             self._backlog.clear()
             self.screen.clear_dirty()
@@ -508,8 +526,10 @@ class Engine:
         self._overlay_lines = 0
         self.screen.clear_dirty()
 
-        if dirty:
-            with self._out.frame():
+        if not dirty and not leave_cursor and not keep_overlay:
+            return
+        with self._out.frame():
+            if dirty:
                 out = []
                 for row in sorted(dirty):
                     if not 0 <= row < self.screen.rows:
@@ -519,12 +539,12 @@ class Engine:
                     out.append("\x1b[0K")
                 if out:
                     self._out.write("".join(out).encode())
-                if leave_cursor:
-                    self._place_physical_cursor()
-        elif leave_cursor:
-            self._place_physical_cursor()
-        if keep_overlay:
-            self._schedule_overlay_redraw()
+            if leave_cursor:
+                self._place_physical_cursor()
+            if keep_overlay:
+                # 与「铺模型行」同一笔写下去：留到下一帧再画，中间那一次
+                # 刷新就会露出没有覆盖层的半帧。
+                self._redraw_overlay_now()
 
     def _schedule_overlay_redraw(self) -> None:
         """输出到达后（重新）安排一次覆盖层重绘，等输出静默才真正执行。"""
@@ -538,8 +558,30 @@ class Engine:
             OVERLAY_REDRAW_DELAY, self._flush_overlay_redraw
         )
 
+    def _redraw_overlay_now(self) -> None:
+        """立刻把覆盖层补回画面（与刚铺的画面合并成一笔写）。
+
+        模型还没追上子进程时（积压非空，说明洪流正打到一半）不敢用它的光标
+        定锚：那会把覆盖层画到过时的行列上。这种情况退回
+        :meth:`_schedule_overlay_redraw`，等输出静默再补一次 —— 洪流下宁可
+        少画几帧，也不可画错位置。
+
+        其余情况（交互命令、慢速输出）一律当场画：旧做法统一等
+        ``OVERLAY_REDRAW_DELAY`` 静默，而每来一批输出都会把定时器取消重排，
+        间隔短于该延迟就永远轮不到重画，覆盖层于是只在间隙里闪一下。
+        """
+        if self._active_prompt is None or self._console is None:
+            return
+        if self._backlog:
+            self._schedule_overlay_redraw()
+            return
+        if self._overlay_timer is not None:
+            self._overlay_timer.cancel()
+            self._overlay_timer = None
+        self._flush_overlay_redraw()
+
     def _flush_overlay_redraw(self) -> None:
-        """输出静默后重画覆盖层，让它浮在最新画面上。
+        """重画覆盖层，让它浮在最新画面上（静默兜底路径也走这里）。
 
         基准直接取模型光标 —— 那就是子进程当前所在的位置，覆盖层贴着它显示。
         覆盖层的绘制不写模型，模型光标始终代表子进程的真实位置。
