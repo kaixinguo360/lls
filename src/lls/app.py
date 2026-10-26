@@ -10,6 +10,7 @@ import asyncio
 import os
 import sys
 
+from .edit import history_from_env
 from .handlers import CommandHandler, PassthroughHandler
 from .session.engine import Engine
 from .session.services import Handler
@@ -23,6 +24,18 @@ _KEY_COMMAND = 0x05
 
 # 命令模式读行时按 Esc 的返回哨兵
 _ESCAPE = object()
+
+
+def _current_session_id() -> str:
+    """当前 AI 会话 id，供 AI 类输入历史分作用域用。
+
+    没有会话（还没用过 agent、或会话被删了）时返回空串，历史就落到
+    ``global`` 里 —— 宁可共用，也不要因为查不到会话就把输入丢了。
+    """
+    from .commands.builtin.agent_store import store
+
+    state = store().current()
+    return state.id if state is not None else ""
 
 
 def build_handlers() -> dict[str, Handler]:
@@ -48,7 +61,14 @@ def run_interactive(command: list[str]) -> int:
     screen = PyteScreenModel(rows=size.lines, columns=size.columns)
 
     backend = make_backend()
-    engine = Engine(backend, command, screen, build_handlers(), "default")
+    engine = Engine(
+        backend,
+        command,
+        screen,
+        build_handlers(),
+        "default",
+        history=history_from_env(_current_session_id),
+    )
 
     try:
         return asyncio.run(engine.run())

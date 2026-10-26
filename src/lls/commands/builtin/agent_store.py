@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Tuple, Union
 
 from lls.ai import Message, ToolCall
+from lls.edit import forget_session
 
 __all__ = [
     "MAX_SESSIONS",
@@ -203,6 +204,8 @@ class SessionStore:
             self._current = None
         self._order.pop(session_id, None)
         self._unlink(session_id)
+        # 会话没了，它专属的输入历史也该跟着走，否则留在盘上没人能召回。
+        forget_session(session_id)
         self._write_index()
         return True
 

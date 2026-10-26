@@ -85,6 +85,21 @@ lls bash        # 指定命令
 `agent` 不弹确认，模型给出的输入直接写入子进程 —— 请在愿意让它动手的终端里
 使用。
 
+## 输入历史
+
+提示行里按 `↑`/`↓` 可以召回以前敲过的内容，重启后仍在。历史是 JSONL，
+按 `history_id` 分文件：命令行、`exec`/`input` 这些是本机共用的一份
+（`global/`），agent 的任务描述、`generate` 的指令跟着当前会话走
+（`session-<id>/`，换会话换一份，会话删掉一起删）。文件权限 0600、目录
+0700。
+
+- `LLS_HISTORY=off`：不落盘，`↑` 只在本次进程里有效；
+- `LLS_HISTORY_HOME`：历史根目录，默认与 `LLS_SESSIONS_HOME` 同一个根下的
+  `history/`；
+- `LLS_HISTORY_LIMIT`：载入进 `↑` 的条数上限，默认 200。
+
+写不进去（家目录只读、磁盘满）只是不再落盘，不影响继续输入。
+
 ## 配置
 
 `generate` 与 `agent` 从 YAML 读 provider 配置，路径优先级：

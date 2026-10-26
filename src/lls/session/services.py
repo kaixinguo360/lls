@@ -93,6 +93,7 @@ class Services:
         cancel: str | None = None,
         exit: str | None = None,
         history_id: str = "_default",
+        history_scope: str = "global",
         escape: Any = None,
         keep_history: bool = True,
     ) -> Any:
@@ -101,6 +102,7 @@ class Services:
         返回：输入内容；Ctrl-C → ``cancel``；Ctrl-D → ``exit``；
         Esc 且 ``escape`` 非 None → ``escape``；子进程退出 → None。
 
+        ``history_scope="session"`` 表示这份 ↑ 历史跟着当前 AI 会话走。
         ``keep_history`` 为 False 时该行不进入此 ``history_id`` 的历史。
         """
         return await self._engine.read_line(
@@ -110,6 +112,7 @@ class Services:
             cancel=cancel,
             exit=exit,
             history_id=history_id,
+            history_scope=history_scope,
             escape=escape,
             keep_history=keep_history,
         )

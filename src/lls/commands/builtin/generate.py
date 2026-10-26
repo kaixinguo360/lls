@@ -292,6 +292,7 @@ async def _read_request(s: Services, value: str = "") -> str | None:
         include_last=False,
         value=value,
         history_id="instruct",
+        history_scope="session",
     )
     return line
 

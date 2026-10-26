@@ -23,7 +23,7 @@ import sys
 import time
 from typing import Any
 
-from lls.edit import LineEditor
+from lls.edit import HistoryStore, LineEditor
 from lls.term import ScreenModel
 from lls.tty import Console, Key, KeyParser, PtySession, TerminalBackend, Winsize
 from lls.ui import (
@@ -40,6 +40,9 @@ __all__ = ["Engine"]
 # 收到 ESC 后等待后续字节的时间。方向键等序列几乎立刻到达，
 # 超过这个时间仍未收全就判定为独立 Esc 键（readline / tmux 的做法）。
 ESC_PENDING_TIMEOUT = 0.05
+
+#: 没有持久化时给编辑器用的作用域名，占位而已，不落盘。
+_GLOBAL_SCOPE = "global"
 
 # 子进程输出后，等这么久没有新输出才重绘覆盖层。
 # 目的是让程序（尤其全屏程序）的整屏重绘完整落地，避免覆盖层插在中间。
@@ -131,6 +134,7 @@ class Engine:
         screen: ScreenModel,
         handlers: dict[str, Handler],
         initial_handler: str,
+        history: HistoryStore | None = None,
     ) -> None:
         self._backend = backend
         self._argv = argv
@@ -152,7 +156,12 @@ class Engine:
         self._exit_status: int | None = None
         self._exit_code: int | None = None
 
-        self._editors: dict[str, LineEditor] = {}
+        # 键是 (history_id, 作用域)：同一个 id 在 global 和某个会话里是
+        # 两份互不相干的 ↑ 历史，会话一换自然就换了一个键。
+        self._editors: dict[tuple[str, str], LineEditor] = {}
+
+        # 输入历史落盘；None 表示不持久化（只在本次进程里召回）。
+        self._history = history
 
         # 覆盖层几何：位置由模型实时光标推导，只记录当前帧的实际占用。
         self._active_prompt: tuple[str, str, int, int, int] | None = None
@@ -857,6 +866,29 @@ class Engine:
 
     # ---- 行读取 ----
 
+    def _editor_for(self, history_id: str, *, session: bool = False) -> LineEditor:
+        """取某个 ``history_id`` 的行编辑器，首次用到时把磁盘历史载进来。
+
+        每个 id 一个编辑器：命令行的 ↑ 和 agent 任务的 ↑ 各记各的，互不污染。
+        ``session=True`` 的 id 按当前会话分桶，换了会话就是一个新编辑器，
+        上一条会话的输入不会带到 ↑ 里。
+        """
+        if self._history is not None:
+            scope = self._history.scope(history_id, session=session)
+        else:
+            scope = "session" if session else _GLOBAL_SCOPE
+        key = (history_id, scope)
+        editor = self._editors.get(key)
+        if editor is None:
+            past = (
+                self._history.load(history_id, session=session)
+                if self._history is not None
+                else None
+            )
+            editor = LineEditor(past)
+            self._editors[key] = editor
+        return editor
+
     async def read_line(
         self,
         prompt: str = ":",
@@ -866,6 +898,7 @@ class Engine:
         cancel: str | None = None,
         exit: str | None = None,
         history_id: str = "_default",
+        history_scope: str = "global",
         escape: Any = None,
         keep_history: bool = True,
     ) -> Any:
@@ -874,12 +907,12 @@ class Engine:
         返回：输入内容；Ctrl-C → ``cancel``；Ctrl-D → ``exit``；
         Esc 且 ``escape`` 非 None → ``escape``；子进程退出 → None。
 
+        ``history_scope`` 为 ``"session"`` 时这份 ↑ 历史跟着当前 AI 会话走
+        （换会话就换一份，会话删掉一起删）；``"global"`` 是本机共用的一份。
         ``keep_history`` 为 False 时，这一行不进入该 ``history_id`` 的历史。
         """
-        editor = self._editors.get(history_id)
-        if editor is None:
-            editor = LineEditor()
-            self._editors[history_id] = editor
+        session = history_scope == "session"
+        editor = self._editor_for(history_id, session=session)
         editor.reset(value)
 
         assert self._printer is not None
@@ -927,7 +960,10 @@ class Engine:
                             line += "\x04"
                         return line
                     if key.control == "enter":
-                        return editor.submit(keep=keep_history)
+                        line = editor.submit(keep=keep_history)
+                        if keep_history:
+                            self._remember(history_id, line, session=session)
+                        return line
                     return escape  # Esc
                 if key.control == "backspace":
                     editor.backspace()
@@ -965,17 +1001,22 @@ class Engine:
             # 覆盖层不再显示，后续输出无需再绕过它。
             self._active_prompt = None
 
-    def record_history(self, value: str, history_id: str) -> None:
+    def record_history(
+        self, value: str, history_id: str, *, history_scope: str = "global"
+    ) -> None:
         """把一条内容记入某 ``history_id`` 的历史，供之后用 ↑ 召回。
 
         只写历史，不改变当前编辑状态。给那些不是经提示行输入、却需要事后
-        召回的内容使用。
+        召回的内容使用。``history_scope`` 的取值与 ``read_line`` 一致。
         """
-        editor = self._editors.get(history_id)
-        if editor is None:
-            editor = LineEditor()
-            self._editors[history_id] = editor
-        editor.record(value)
+        session = history_scope == "session"
+        self._editor_for(history_id, session=session).record(value)
+        self._remember(history_id, value, session=session)
+
+    def _remember(self, history_id: str, value: str, *, session: bool = False) -> None:
+        """把一行写进磁盘历史；没开持久化时什么也不做。"""
+        if self._history is not None and value:
+            self._history.append(history_id, value, session=session)
 
     def requeue_pending_keys(self) -> None:
         """把尚在键缓冲里的按键回填到输入队列。

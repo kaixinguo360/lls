@@ -633,6 +633,7 @@ class _Session:
             cancel=_CANCEL,
             exit=_EXIT,
             history_id="agent_task",
+            history_scope="session",
             escape=_ESCAPE,
         )
         if line is None:
