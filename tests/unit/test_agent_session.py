@@ -406,9 +406,48 @@ def test_prompt_shows_the_last_reply_and_stays_within_bounds(monkeypatch) -> Non
 
     assert "答复" in prompt
     rows = prompt.split("\n")
-    assert len(rows) <= agent_cmd.LOG_LINES + 2
+    # 高度只受屏幕限制：给子进程画面留几行，其余都可给提示用。
+    assert len(rows) <= services.screen.rows - agent_cmd.MODEL_ROWS_KEPT + 1
+    assert len(rows) <= services.screen.rows
     for row in rows:
         assert agent_cmd._width(row) <= services.screen.columns
+
+def test_prompt_height_follows_the_screen_instead_of_a_fixed_cap() -> None:
+    """屏幕越高，提示能用的行越多 —— 不再有 16 行的固定上限。
+
+    上限固定时，长答复在 60 行的终端上也只留 16 行，白白浪费空间；
+    现在只按实际行数收紧。
+    """
+    tall = FakeServices([], screen=FakeScreen())
+    tall.screen.rows = 60
+    short = FakeServices([], screen=FakeScreen())
+    short.screen.rows = 24
+    heavy = [("任务一", "答复" * 1000, "")]
+    rows_tall = agent_cmd._Session(tall, ScriptedProvider([]), "m")
+    rows_tall._log = list(heavy)
+    rows_short = agent_cmd._Session(short, ScriptedProvider([]), "m")
+    rows_short._log = list(heavy)
+
+    tall_rows = len(rows_tall._prompt_text().split("\n"))
+    short_rows = len(rows_short._prompt_text().split("\n"))
+
+    assert tall_rows > short_rows, "高屏没有用满"
+    assert tall_rows <= tall.screen.rows
+    assert short_rows <= short.screen.rows
+
+
+def test_prompt_never_exceeds_the_screen_on_a_short_terminal() -> None:
+    """再矮的终端也不能越界：越界会让终端滚动，物理行与模型行错位。"""
+    services = FakeServices([], screen=FakeScreen())
+    services.screen.rows = 8
+    session = agent_cmd._Session(services, ScriptedProvider([]), "m")
+    session._log = [("任务" * 40, "答复" * 60, "")]
+
+    rows = session._prompt_text().split("\n")
+
+    assert len(rows) <= services.screen.rows
+    assert rows[-1].startswith(agent_cmd.INPUT_PROMPT)
+
 
 
 def test_log_keeps_only_the_last_entries() -> None:
@@ -526,7 +565,7 @@ def test_painter_previews_the_latest_reasoning() -> None:
 def test_system_prompt_matches_the_display_budget() -> None:
     prompt = agent_cmd.SYSTEM_PROMPT
 
-    assert f"最多 {agent_cmd.REPLY_LINES} 行" in prompt
+    assert f"最多 {agent_cmd.SUGGESTED_REPLY_LINES} 行" in prompt
     assert f"最近 {agent_cmd.LOG_ENTRIES} 轮" in prompt
     assert "不要空行" in prompt
     assert "终端画面就是细节所在" in prompt

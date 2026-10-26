@@ -63,8 +63,8 @@ READ_QUIET = 0.25         # 画面多久不变算静默
 MAX_WAIT = 60.0           # read_terminal 的 wait_seconds 上限
 PAINT_INTERVAL = 0.1      # 状态覆盖层刷新间隔
 LOG_ENTRIES = 2           # 会话提示里显示最近几条
-LOG_LINES = 16            # 会话提示里日志最多几行
-REPLY_LINES = 6           # 每条答复最多显示几行
+MODEL_ROWS_KEPT = 6       # 会话提示上方至少留几行给子进程画面
+SUGGESTED_REPLY_LINES = 6 # 只用于提示词：建议的答复长度，显示层不再按行截断
 REPEAT_REMIND_AT = 3      # 连续相同调用第几次开始提醒
 
 INPUT_PROMPT = "(agent): "
@@ -87,7 +87,7 @@ SYSTEM_PROMPT = f"""\
   按键序列、非 UTF-8 字节或需要精确转义序列的场合。
 
 显示环境：
-- 你的最终答复显示在终端会话提示里：最多 {REPLY_LINES} 行，且只保留最近 {LOG_ENTRIES} 轮，更长的
+- 你的最终答复显示在终端会话提示里：最多 {SUGGESTED_REPLY_LINES} 行，且只保留最近 {LOG_ENTRIES} 轮，更长的
   内容会被截断。答复尽量短（一到三句、最多两三行），结论先行；不要空行，
   不要 Markdown 标题或代码围栏，不要贴大段日志、表格或命令输出。
 - 终端画面就是细节所在：具体输出留在终端里，答复只讲做了什么、当前状态、
@@ -715,8 +715,12 @@ class _Session:
                 rows.extend(_reply_rows(reply, columns, bold=index == latest))
             if note:
                 rows.append(_line(NOTE_PREFIX, note, columns))
-        # 日志不能高到把覆盖层顶出屏幕；矮终端上再收紧。
-        limit = max(3, min(LOG_LINES, self._s.screen.rows - 6))
+        # 高度只由屏幕实际行数决定，不再有固定上限：覆盖层比屏幕高就会贴
+        # 顶，多出来的行被挤到屏幕外，终端随之滚动 —— 物理行与模型行错位。
+        # 所以约束只有两条：上面留几行给子进程画面，以及（连同行尾的提示
+        # 符）整体不越过屏幕。矮终端上这两条自然把预算收紧。
+        limit = max(3, self._s.screen.rows - MODEL_ROWS_KEPT)
+        limit = min(limit, max(1, self._s.screen.rows - 1))
         if len(rows) > limit:
             rows = rows[-limit:]
         if not rows:
