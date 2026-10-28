@@ -32,10 +32,9 @@ def _current_session_id() -> str:
     没有会话（还没用过 agent、或会话被删了）时返回空串，历史就落到
     ``global`` 里 —— 宁可共用，也不要因为查不到会话就把输入丢了。
     """
-    from .commands.builtin.agent_store import store
+    from .ai.sessions import store
 
-    state = store().current()
-    return state.id if state is not None else ""
+    return store().current_id() or ""
 
 
 def build_handlers() -> dict[str, Handler]:

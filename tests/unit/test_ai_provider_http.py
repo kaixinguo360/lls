@@ -273,3 +273,33 @@ def test_malformed_chunk_is_reported(stub) -> None:
         _chat(_provider(stub))
 
     assert "malformed" in str(caught.value)
+
+
+# ---- 用量 ----
+
+
+def test_stream_options_ask_for_usage(stub) -> None:
+    _chat(_provider(stub))
+
+    body = _Stub.requests[-1]["body"]
+    assert body["stream_options"] == {"include_usage": True}
+
+
+def test_a_usage_frame_becomes_a_usage_chunk(stub) -> None:
+    _Stub.body_frames = [
+        _frame({"content": "hi"}),
+        b"data: "
+        + json.dumps(
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 5},
+            }
+        ).encode()
+        + b"\n\n",
+        b"data: [DONE]\n\n",
+    ]
+
+    chunks = _chat(_provider(stub))
+
+    usage = [c for c in chunks if c.kind is ChunkKind.USAGE]
+    assert usage and usage[0].usage == {"prompt": 11, "completion": 5}

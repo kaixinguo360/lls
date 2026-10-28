@@ -15,7 +15,7 @@ from lls.ai import Chunk, ChunkKind, ConfigError, ToolCall
 from lls.commands import get_command
 from lls.commands.builtin import agent as agent_cmd
 from lls.ui import strip_sgr
-from lls.commands.builtin.agent_store import SessionStore
+from lls.ai.sessions import SessionStore
 from lls.tty import KeyNameError
 
 # ---- 桩 ----
@@ -89,10 +89,11 @@ class FakeServices:
 
 
 class FakeCatalog:
-    def __init__(self, provider) -> None:
+    def __init__(self, provider, context_window: int = 128_000) -> None:
         self._provider = provider
+        self._window = context_window
 
-    def resolve_spec(self):
+    def resolve_spec(self, spec=None):
         return "stub", "stub-model"
 
     def get(self, provider_id):
@@ -100,6 +101,15 @@ class FakeCatalog:
 
     def resolve(self):
         return self._provider, "stub-model"
+
+    def provider_config(self, provider_id):
+        class _Conf:
+            context_window = self._window
+
+        return _Conf()
+
+    def context_limit(self):
+        return 0
 
 
 class ScriptedProvider:
@@ -375,23 +385,50 @@ def test_long_task_is_not_cut_off(monkeypatch) -> None:
     assert result.handler == "default"
 
 
-def test_history_is_trimmed_to_the_configured_turns(monkeypatch) -> None:
-    monkeypatch.setattr(agent_cmd, "HISTORY_TURNS", 2)
-    provider = ScriptedProvider([_text("a1"), _text("a2"), _text("a3")])
-
-    services, result = _session(
-        monkeypatch, provider, ["任务1", "任务2", "任务3", "/exit"]
+def test_history_is_trimmed_by_the_token_budget(monkeypatch) -> None:
+    """预算按 token 算：装不下的旧轮次整轮丢掉，当前任务一定带上。"""
+    provider = ScriptedProvider(
+        [_text("答" * 300), _text("答" * 300), _text("答" * 300)]
     )
-
-    assert result.handler == "default"
-    for request in provider.requests:
-        users = [m for m in request["messages"] if m.role == "user"]
-        assert len(users) <= 2
-    assert all(
-        "任务1" not in (message.content or "")
-        for message in provider.requests[2]["messages"]
-        if message.role == "user"
+    monkeypatch.setattr(
+        agent_cmd, "default_catalog", lambda: FakeCatalog(provider, 200)
     )
+    keeper = SessionStore()
+    monkeypatch.setattr(agent_cmd, "store", lambda: keeper)
+
+    services = FakeServices(["任务1", "任务2", "任务3", "/exit"])
+    asyncio.run(agent_cmd.cmd_agent(services, None))
+
+    last = provider.requests[-1]["messages"]
+    users = [message for message in last if message.role == "user"]
+    assert len(users) <= 2
+    assert "任务3" in (users[-1].content or "")
+    assert all("任务1" not in (message.content or "") for message in users)
+
+
+def test_a_huge_tool_output_is_trimmed_out_of_the_next_request(monkeypatch) -> None:
+    provider = ScriptedProvider(
+        [
+            _calls(_call("c1", "read_terminal", {"lines": 10})),
+            _text("看完了"),
+            _text("第二轮"),
+        ]
+    )
+    monkeypatch.setattr(
+        agent_cmd, "default_catalog", lambda: FakeCatalog(provider, 400)
+    )
+    keeper = SessionStore()
+    monkeypatch.setattr(agent_cmd, "store", lambda: keeper)
+    services = FakeServices(["读一屏", "再读一屏", "/exit"])
+    services.screen = FakeScreen("x" * 4000)
+
+    asyncio.run(agent_cmd.cmd_agent(services, None))
+
+    sent = provider.requests[-1]["messages"]
+    assert sent[0].role == "system"
+    # 巨型的工具输出已经被裁掉，只剩当前这一条任务消息还带着画面。
+    assert sum(1 for message in sent if len(message.content or "") > 3000) == 1
+    assert sent[-1].role == "user"
 
 
 # ---- 提示构造 ----

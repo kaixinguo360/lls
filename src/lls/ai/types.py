@@ -92,6 +92,9 @@ class ChunkKind(str, Enum):
     TOOL_CALL = "tool_call"
     """一次**归并完成**的工具调用（分片已在传输层合并）。"""
 
+    USAGE = "usage"
+    """本轮的 token 用量（``prompt`` / ``completion``）。"""
+
     DONE = "done"
     """本轮结束。"""
 
@@ -103,6 +106,7 @@ class Chunk:
     kind: ChunkKind
     text: str = ""
     call: ToolCall | None = None
+    usage: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -124,3 +128,5 @@ class ProviderConfig:
     timeout: float = 60.0
     models: list[str] = field(default_factory=list)
     params: dict[str, Any] = field(default_factory=dict)
+    context_window: int = 128_000
+    """模型的上下文窗口（token）；预算按它的 0.6 算。"""

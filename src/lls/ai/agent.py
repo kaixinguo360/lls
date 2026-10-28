@@ -13,7 +13,7 @@
 
 一次 :meth:`Agent.run` 就是一轮独立任务：``[system] + history + [user]``。
 返回的 ``messages`` 不含 system，可以直接作为下一轮的 ``history``；跨轮保留
-多少由调用方用 :func:`trim_turns` 决定。
+多少由调用方按 token 预算决定（见 :mod:`lls.ai.sessions.window`）。
 
 ``max_steps`` 默认 ``None``：不限制步数，直到模型不再调用工具。调用方也可以
 给一个上限：到达时按 opencode 的做法收尾 —— 最后一轮禁用工具，并要求模型
@@ -39,7 +39,6 @@ __all__ = [
     "AgentResult",
     "AgentTool",
     "STOP_POLL",
-    "trim_turns",
 ]
 
 # 等模型流式输出时，多久检查一次中断回调
@@ -98,6 +97,9 @@ class AgentResult:
     messages: tuple[Message, ...]
     """会话消息（不含 system、不含收尾合成提示），可直接作为下一轮 history。"""
 
+    usage: dict | None = None
+    """最后一次模型请求的 token 用量；provider 没给就是 None。"""
+
 
 class AgentCancelled(Exception):
     """外部要求中断（Ctrl-C、会话结束等）。"""
@@ -117,6 +119,7 @@ class Agent:
         step_limit_note: str = "",
         on_event: Callable[[AgentEvent], None] | None = None,
         poll: Callable[[float], Awaitable[None]] | None = None,
+        on_message: Callable[[Message, dict | None], None] | None = None,
     ) -> None:
         """``poll`` 在等待模型输出时反复调用，参数是建议等待的秒数。
 
@@ -133,13 +136,17 @@ class Agent:
         self._step_limit_note = step_limit_note
         self._on_event = on_event
         self._poll = poll
+        # 每条进入会话的消息都回调一次（附带该轮的 usage）：调用方据此
+        # 增量落盘，崩溃或中断时也不会丢掉已经发生的部分。
+        self._on_message = on_message
+        self._usage: dict | None = None
 
     # ---- 公开 ----
 
     async def run(self, task: str, history: Sequence[Message] = ()) -> AgentResult:
         """执行一轮任务，直到模型不再调用工具（或达到可选的上限）。"""
         conversation = list(history)
-        conversation.append(Message("user", task))
+        self._push(conversation, Message("user", task), None)
 
         step = 0
         while True:
@@ -151,11 +158,13 @@ class Agent:
             text, calls = await self._round(
                 step, self._request(conversation), self._tools_for_request()
             )
-            conversation.append(self._assistant(text, calls))
+            self._push(conversation, self._assistant(text, calls), self._usage)
 
             if not calls:
                 # 没有工具调用 = 正常结束；文本就是最终答复（空文本也照常结束）。
-                return AgentResult("completed", text, step, tuple(conversation))
+                return AgentResult(
+                    "completed", text, step, tuple(conversation), self._usage
+                )
 
             for call in calls:
                 self._emit(
@@ -167,7 +176,9 @@ class Agent:
                     )
                 )
                 result = await self._execute(step, call)
-                conversation.append(Message("tool", result, tool_call_id=call.id))
+                self._push(
+                    conversation, Message("tool", result, tool_call_id=call.id), None
+                )
 
     # ---- 收尾 ----
 
@@ -181,8 +192,10 @@ class Agent:
         text, _calls = await self._round(step, request, None)
 
         # 合成提示只用于这次请求：conversation 里从未出现它，最终总结照常保留。
-        conversation.append(Message("assistant", text))
-        return AgentResult("step_limit", text, step, tuple(conversation))
+        self._push(conversation, Message("assistant", text), self._usage)
+        return AgentResult(
+            "step_limit", text, step, tuple(conversation), self._usage
+        )
 
     # ---- 一次模型请求 ----
 
@@ -192,7 +205,8 @@ class Agent:
         messages: Sequence[Message],
         tools: Sequence[Tool] | None,
     ) -> tuple[str, list[ToolCall]]:
-        """做一次流式请求，收集正文与工具调用。"""
+        """做一次流式请求，收集正文、工具调用与用量。"""
+        self._usage = None
         text_parts: list[str] = []
         calls: list[ToolCall] = []
 
@@ -214,6 +228,8 @@ class Agent:
                     )
                 elif chunk.kind is ChunkKind.TOOL_CALL and chunk.call is not None:
                     calls.append(chunk.call)
+                elif chunk.kind is ChunkKind.USAGE:
+                    self._usage = dict(chunk.usage or {})
                 elif chunk.kind is ChunkKind.DONE:
                     return
 
@@ -282,23 +298,14 @@ class Agent:
             return None
         return [entry.tool for entry in self._tools]
 
+    def _push(
+        self, conversation: list[Message], message: Message, usage: dict | None
+    ) -> None:
+        """消息进会话的唯一入口：入列表，并把增量交给调用方。"""
+        conversation.append(message)
+        if self._on_message is not None:
+            self._on_message(message, usage)
+
     def _emit(self, event: AgentEvent) -> None:
         if self._on_event is not None:
             self._on_event(event)
-
-
-def trim_turns(messages: Sequence[Message], max_turns: int) -> list[Message]:
-    """只保留最近 ``max_turns`` 轮（每轮从一条 user 消息开始）。
-
-    按 user 边界切分，因此 assistant 的 tool_calls 与对应的 tool 回复不会
-    被拆散。``max_turns <= 0`` 返回空列表；不够 ``max_turns`` 轮时原样返回。
-    """
-    limit = int(max_turns)
-    if limit <= 0:
-        return []
-    starts = [
-        index for index, message in enumerate(messages) if message.role == "user"
-    ]
-    if len(starts) <= limit:
-        return list(messages)
-    return list(messages[starts[-limit]:])

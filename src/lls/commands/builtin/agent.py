@@ -31,19 +31,24 @@ from lls.ai import (
     AgentEvent,
     AgentEventKind,
     AgentTool,
+    ChunkKind,
     ConfigError,
     Message,
     Tool,
     default_catalog,
-    trim_turns,
+)
+from lls.ai.sessions import (
+    SessionError,
+    default_budget,
+    fit,
+    last_turns,
+    store,
 )
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.session.services import Services
 from lls.tty import KeyParser, encode_keys
 from lls.ui import SGR_RESET, conservative_char_width, strip_sgr, wrap_multi_lines
-
-from .agent_store import SessionState, store
 
 __all__ = ["cmd_agent"]
 
@@ -54,7 +59,15 @@ _ESCAPE = object()
 _CANCEL = object()
 _EXIT = object()
 
-HISTORY_TURNS = 4         # 每轮请求里最多包含几轮对话（含当前任务）
+HISTORY_TURNS = 0         # 兜底的轮数上限；0 = 只按 token 预算裁
+COMPACT_SOURCE_CHARS = 40000  # 摘要请求里最多带多少字符原文
+COMPACT_PROMPT = """\
+把下面这段对话压缩成要点，供后续接着做同一件事时使用。
+
+保留：已经确认的事实（路径、命令、结论）、做过的决定及理由、还没做完的
+事项与下一步；丢掉寒暄、重复的尝试和可以重新读到的原始输出。
+
+用中文、不超过 400 字、不要标题，直接给内容。"""
 TASK_LINES = 80           # 每轮任务消息里带多少行终端画面
 DEFAULT_READ_LINES = 120  # read_terminal 未给 lines 时的取值
 MAX_LINES = 2000
@@ -63,6 +76,9 @@ READ_QUIET = 0.25         # 画面多久不变算静默
 MAX_WAIT = 60.0           # read_terminal 的 wait_seconds 上限
 PAINT_INTERVAL = 0.1      # 状态覆盖层刷新间隔
 LOG_ENTRIES = 2           # 会话提示里显示最近几条
+# 丢掉的上下文少于这个量就不值得压：摘要请求本身也要花 token，压掉的
+# 还没摘要贵，不如直接截断。
+MIN_COMPACT_TOKENS = 1024
 MODEL_ROWS_KEPT = 6       # 会话提示上方至少留几行给子进程画面
 SUGGESTED_REPLY_LINES = 6 # 只用于提示词：建议的答复长度，显示层不再按行截断
 REPEAT_REMIND_AT = 3      # 连续相同调用第几次开始提醒
@@ -585,26 +601,31 @@ class _Painter:
 # ---- 会话 ----
 
 class _Session:
-    """一个持续的 Agent 会话：多轮任务共享历史，每轮内部自动多步执行。"""
+    """一个持续的 Agent 会话：多轮任务共享历史，每轮内部自动多步执行。
+
+    历史来自 ``Session``（事件流折叠出来的视图）；本轮发生的每条消息都立刻
+    追加成事件，因此中断、崩溃都只影响「还没说的那部分」。
+    """
 
     def __init__(
         self,
         services: Services,
         provider: Any,
         model: str,
-        state: SessionState | None = None,
+        session: Any = None,
+        *,
+        budget: int = 0,
     ) -> None:
         self._s = services
         self._provider = provider
         self._model = model
-        # 会话状态由外部持有（见 agent_store）：本对象只是它的一次「运行」。
-        # 不传 state 时就地新建一份，退出即丢弃（测试与一次性调用用得上）。
-        self._state = state if state is not None else SessionState(model_id=model)
+        self._session = session
+        self._budget = max(0, int(budget))
         self._view = _TerminalView(services)
         self._guard = _RepeatGuard()
         self._tools = _build_tools(services, self._view, self._guard)
-        self._history: list[Message] = list(self._state.history)
-        self._log: list[tuple[str, str, str]] = list(self._state.log)
+        self._log = session.log(LOG_ENTRIES) if session is not None else []
+        self._window = None
 
     async def run(self, first_task: str | None) -> bool:
         """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。"""
@@ -647,10 +668,58 @@ class _Session:
             return _CANCEL
         if text.lower() in ("/exit", "/quit", "exit", "quit"):
             return _EXIT
+        if text.startswith("/"):
+            return await self._slash(text)
         return text
 
+    async def _slash(self, text: str) -> Any:
+        """会话内的斜杠命令：只影响本地状态，不交给模型。"""
+        name, _, rest = text.partition(" ")
+        name = name.lower()
+        if name in ("/exit", "/quit"):
+            return _EXIT
+        if name == "/context":
+            await self._s.show_message(self._context_text())
+            return _CANCEL
+        if name == "/title":
+            if self._session is None:
+                await self._s.show_message("本次会话不落盘，改不了标题")
+            elif not rest.strip():
+                await self._s.show_message("用法：/title <文字>")
+            else:
+                self._session.set_title(rest)
+                await self._s.show_message("标题已改为 " + self._session.meta.title)
+            return _CANCEL
+        await self._s.show_message(
+            "未知命令：{}（可用 /context、/title <文字>、/exit）".format(name)
+        )
+        return _CANCEL
+
+    def _context_text(self) -> str:
+        """``/context``：这次请求送了多少、丢了什么、用掉多少。"""
+        if self._session is None:
+            return "本次会话不落盘，没有可报告的上下文"
+        meta = self._session.meta
+        window = self._window or self._session.window(self._budget)
+        rows = [
+            "会话 {}（{}）".format(meta.id, meta.title or "无标题"),
+            "模型 {} · {} 轮 · {} 字节".format(meta.model or "-", meta.turns, meta.size),
+            "窗口 {}".format(window.describe()),
+        ]
+        usage = self._session.usage()
+        if usage:
+            rows.append(
+                "上次用量 prompt {} / completion {}".format(
+                    usage.get("prompt", 0), usage.get("completion", 0)
+                )
+            )
+        last = self._session.last_turn_end()
+        if last is not None and last.note:
+            rows.append("最近一轮：" + last.note)
+        return "\n".join(rows)
+
     async def _one(self, task: str) -> None:
-        """执行一轮任务。异常路径只影响本轮，不影响会话历史。"""
+        """执行一轮任务。异常路径只影响本轮，不影响已经写下的事件。"""
         # 提交任务时同批到达的按键还留在键盘缓冲里；转回原始队列，
         # 否则本轮的中断检测看不到它们（两个队列不互通）。
         self._s.requeue_pending_keys()
@@ -658,6 +727,14 @@ class _Session:
         self._view.mark(screen)
         self._guard.reset()
 
+        message = _task_message(task, screen)
+        window = self._prepare_window(message)
+        if await self._compact(window):
+            window = self._prepare_window(message)
+        if self._session is not None:
+            self._session.append_user(task, source="typed")
+
+        started = time.monotonic()
         painter = _Painter(self._s)
         agent = Agent(
             self._provider,
@@ -666,46 +743,134 @@ class _Session:
             tools=self._tools,
             on_event=painter.on_event,
             poll=self._view.poll,
+            on_message=self._on_message,
         )
         try:
-            keep = max(0, HISTORY_TURNS - 1)
-            history = trim_turns(self._history, keep)
-            result = await agent.run(_task_message(task, screen), history)
+            result = await agent.run(message, window.messages)
         except _SessionEnded:
+            self._finish_turn("aborted", "子进程退出", started, window, None)
             raise
         except _Aborted as e:
+            self._finish_turn("aborted", str(e), started, window, None)
             self._record(task, "", str(e))
             return
         except Exception as e:  # noqa: BLE001
-            self._record(task, "", f"error: {e}")
+            note = "error: {}".format(e)
+            self._finish_turn("error", note, started, window, None)
+            self._record(task, "", note)
             return
         finally:
             self._s.restore_context()
 
         summary = result.summary if result.summary.strip() else "（无文本答复）"
-        self._history = trim_turns(result.messages, keep)
+        self._finish_turn("ok", "", started, window, result.usage)
         self._record(task, summary)
-        self._save()
 
-    def _save(self) -> None:
-        """把已完成的一轮写回会话状态。
+    # ---- 记录 ----
 
-        只有走到这里的轮次才会写：中断（Ctrl-C）、异常、子进程退出都保留原
-        状态 —— 与「半成品不入历史」一致，下次进来看不到失败的半轮。
+    def _prepare_window(self, message: str = "") -> Any:
+        """本轮要带上的上下文：按预算从事件里裁出来。
+
+        当前任务作为 ``pending`` 一起算预算：它还没进历史，但一定会随请求
+        发出去，不把它算进去就会「裁完仍然超窗」。
         """
-        self._state.history = list(self._history)
-        self._state.log = list(self._log)
-        self._state.updated_at = time.time()
-        # 写回存储：内存单例之外还会落盘，lls 重启后仍能接着这段会话。
-        store().save(self._state)
+        messages = self._session.history() if self._session is not None else []
+        if HISTORY_TURNS > 0:
+            messages = last_turns(messages, HISTORY_TURNS)
+        pending = [Message("user", message)] if message else []
+        window = fit(messages, self._budget, pending)
+        self._window = window
+        return window
+
+    async def _compact(self, window: Any) -> bool:
+        """裁掉的部分先试一次摘要；失败就退回硬截断。
+
+        ``keep_from`` 是输入里第一个被保留的下标，据此得到「裁到哪一条事件」；
+        摘要本身还在头部，不能拿消息条数相减来算，否则每次都会少裁一条，
+        第二次以后 cutoff 不前进，压缩就只剩第一次生效。
+        """
+        if self._session is None or not window.dropped or window.budget <= 0:
+            return False
+        if window.dropped_tokens < MIN_COMPACT_TOKENS:
+            return False
+        messages, marks = self._session.history_marks()
+        cut = window.keep_from
+        if cut <= 0 or cut > len(marks):
+            return False
+        cutoff = marks[cut - 1]
+        if cutoff <= 0 or cutoff <= self._session.compacted_upto():
+            return False
+        summary = await self._summarize(messages[:cut])
+        if not summary:
+            self._window = window
+            return False
+        self._session.append_compact(summary, cutoff)
+        return True
+
+    async def _summarize(self, messages: Any) -> str:
+        """让模型把要丢掉的那段压成要点；失败返回空串（调用方退回截断）。"""
+        body = _transcript(messages)
+        if not body.strip():
+            return ""
+        request = [Message("system", COMPACT_PROMPT), Message("user", body)]
+        parts: list = []
+        try:
+            async for chunk in self._provider.chat(self._model, request):
+                if chunk.kind is ChunkKind.TEXT:
+                    parts.append(chunk.text)
+                elif chunk.kind is ChunkKind.DONE:
+                    break
+        except Exception:  # noqa: BLE001 - 摘要失败不影响本轮
+            return ""
+        return "".join(parts).strip()
+
+    def _on_message(self, message: Any, usage: Any) -> None:
+        """Agent 的每条消息 → 一条事件；user 由本命令自己记，跳过。"""
+        if self._session is None:
+            return
+        if message.role == "assistant":
+            self._session.append_assistant(
+                message.content or "", message.tool_calls, self._model, usage
+            )
+        elif message.role == "tool":
+            text = message.content or ""
+            status = "error" if text.startswith("error:") else "ok"
+            self._session.append_tool(message.tool_call_id or "", text, status)
+
+    def _finish_turn(self, status: str, note: str, started: float, window: Any,
+                     usage: Any) -> None:
+        """收尾：写 turn_end（带窗口说明与用量），并刷新覆盖层的任务列表。"""
+        if self._session is None:
+            return
+        detail = "；".join(
+            part
+            for part in (
+                note,
+                window.describe() if window else "",
+                "{:.1f}s".format(time.monotonic() - started),
+            )
+            if part
+        )
+        extra = {"usage": usage} if usage else {}
+        self._session.append_turn_end(
+            status=status,
+            note=detail,
+            model=self._model,
+            **extra,
+        )
+        self._log = self._session.log(LOG_ENTRIES)
 
     def _record(self, task: str, reply: str, note: str = "") -> None:
+        """覆盖层用的两行；有会话时它就是事件流折出来的最后两条。"""
+        if self._session is not None:
+            self._log = self._session.log(LOG_ENTRIES)
+            return
         self._log.append((task, reply, note))
         self._log = self._log[-max(1, LOG_ENTRIES):]
 
     def _prompt_text(self) -> str:
         columns = max(1, self._s.screen.columns)
-        rows: list[str] = []
+        rows: list = []
         latest = -1
         for index, (_, reply, _) in enumerate(self._log):
             if reply:
@@ -729,54 +894,180 @@ class _Session:
         return "\n".join(rows) + "\n" + INPUT_PROMPT
 
 
+def _transcript(messages: Any) -> str:
+    """把要被压缩掉的消息摊成纯文本，供摘要请求使用。"""
+    rows: list = []
+    for message in messages:
+        if message.role == "user":
+            rows.append("用户：" + (message.content or ""))
+        elif message.role == "assistant":
+            if message.content:
+                rows.append("助手：" + message.content)
+            for call in message.tool_calls:
+                rows.append("调用 {} {}".format(call.name, call.arguments))
+        elif message.role == "tool":
+            rows.append("结果：" + (message.content or ""))
+    text = "\n".join(rows)
+    return text[-COMPACT_SOURCE_CHARS:]
+
+
 # ---- 命令 ----
 
-_NEW = "--new"
+class _Options:
+    """``agent`` 的参数：与命令行风格一致，但由命令自己解析。"""
+
+    def __init__(self) -> None:
+        self.new = False
+        self.list_only = False
+        self.all = False
+        self.resume: str | None = None
+        self.title: str | None = None
+        self.model: str | None = None
+        self.task: str | None = None
 
 
-def _parse_args(args: str | None) -> tuple[bool, str | None]:
-    """拆出 ``--new``（其余原样作为首个任务）。"""
-    text = (args or "").strip()
-    if text == _NEW:
-        return True, None
-    if text.startswith(_NEW + " "):
-        return True, text[len(_NEW):].strip() or None
-    return False, text or None
+def _parse_args(args: str | None) -> _Options:
+    """拆出 ``--new`` / ``--list`` / ``--resume`` / ``--title`` / ``--model``。"""
+    opts = _Options()
+    rest = (args or "").strip()
+    while rest.startswith("--"):
+        head, _, tail = rest.partition(" ")
+        if head == "--new":
+            opts.new = True
+            rest = tail.strip()
+        elif head == "--list":
+            opts.list_only = True
+            rest = tail.strip()
+        elif head == "--all":
+            opts.list_only = True
+            opts.all = True
+            rest = tail.strip()
+        elif head in ("--resume", "--model"):
+            value, _, tail = tail.strip().partition(" ")
+            if not value:
+                raise ValueError("{} 需要一个值".format(head))
+            if head == "--resume":
+                opts.resume = value
+            else:
+                opts.model = value
+            rest = tail.strip()
+        elif head == "--title":
+            # 标题可能带空格：整行剩下的都算标题。
+            if not tail.strip():
+                raise ValueError("--title 需要一段文字")
+            opts.title = tail.strip()
+            rest = ""
+        else:
+            raise ValueError("未知参数 {}".format(head))
+    opts.task = rest or None
+    return opts
 
 
-def _open_session(fresh: bool) -> tuple[Any, str, SessionState]:
-    """取回（或新建）要进入的会话。
+def _session_rows(keeper: Any, include_archived: bool = False) -> str:
+    """``sessions`` 的表格：id、标题、模型、轮数、大小、更新时间。"""
+    metas = keeper.list(include_archived=include_archived)
+    if not metas:
+        return "还没有会话；直接 agent 会新开一条"
+    current = keeper.current_id()
+    rows = ["会话（* 为当前）："]
+    for meta in metas:
+        mark = "*" if meta.id == current else " "
+        title = meta.title or "（无标题）"
+        rows.append(
+            "{} {}  {}  {}  {} 轮  {:.0f}KB  {}".format(
+                mark,
+                meta.id,
+                title[:28],
+                meta.model or "-",
+                meta.turns,
+                meta.size / 1024.0,
+                _stamp(meta.updated_at),
+            )
+        )
+    if not include_archived:
+        rows.append("（--all 含已归档）")
+    return "\n".join(rows)
 
-    会话身份就靠这里延续：不加 ``--new`` 时总是回到 ``store().current()``，
-    因此退出 ``agent`` 再从命令模式进来，看到的是同一段上下文。
-    """
-    catalog = default_catalog()
-    keeper = store()
-    state = None if fresh else keeper.current()
-    if state is None:
-        provider_id, model_id = catalog.resolve_spec()
-        state = keeper.new(provider_id, model_id)
-    else:
-        keeper.set_current(state.id)
-    # provider 可能已经从配置里删掉：这里报错，状态本身仍然留着。
+
+def _stamp(value: float) -> str:
     try:
-        provider = catalog.get(state.provider_id)
-    except ConfigError as e:
-        raise ConfigError(
-            f"{e}（会话 {state.id} 的 provider 已不存在；用 agent --new 开新会话）"
-        ) from e
-    return provider, state.model_id, state
+        return time.strftime("%m-%d %H:%M", time.localtime(value))
+    except (OverflowError, OSError, ValueError):
+        return "-"
+
+
+def _open_or_create(opts: _Options, catalog: Any, keeper: Any) -> Any:
+    """按参数取回（或新建）要进入的会话。"""
+    session = None
+    if not opts.new:
+        spec = opts.resume if opts.resume else None
+        session = keeper.open(spec)
+    provider_id = model_id = ""
+    if opts.model:
+        provider_id, model_id = catalog.resolve_spec(opts.model)
+    if session is None:
+        if not provider_id:
+            provider_id, model_id = catalog.resolve_spec()
+        return keeper.create(provider_id, model_id, title=opts.title or "")
+    if opts.model and (session.meta.provider_id, session.meta.model_id) != (
+        provider_id,
+        model_id,
+    ):
+        session.meta.provider_id = provider_id
+        session.meta.model_id = model_id
+        session.append_model_switch("{}".format(session.meta.model))
+        keeper.write_meta(session.meta)
+    if opts.title:
+        session.set_title(opts.title)
+    keeper.set_current(session.id)
+    return session
+
+
+def _budget_for(catalog: Any, provider_id: str) -> int:
+    try:
+        conf = catalog.provider_config(provider_id)
+    except Exception:  # noqa: BLE001 - 配置缺失时用默认窗口
+        return default_budget(128_000)
+    return default_budget(conf.context_window, catalog.context_limit())
 
 
 @command("agent", aliases=("a",), category="ai")
 async def cmd_agent(s: Services, args: str | None) -> CommandResult:
     """进入交互式 Agent 会话，按任务自动多轮执行"""
-    fresh, task = _parse_args(args)
     try:
-        provider, model, state = _open_session(fresh)
-    except Exception as e:  # noqa: BLE001
-        await s.show_message(f"error: {e}")
+        opts = _parse_args(args)
+    except ValueError as e:
+        await s.show_message("error: {}".format(e))
         return CommandResult()
 
-    exited = await _Session(s, provider, model, state).run(task)
+    keeper = store()
+    if opts.list_only:
+        await s.show_message(_session_rows(keeper, include_archived=opts.all))
+        return CommandResult()
+
+    try:
+        catalog = default_catalog()
+        session = _open_or_create(opts, catalog, keeper)
+    except (SessionError, ConfigError) as e:
+        await s.show_message("error: {}".format(e))
+        return CommandResult()
+
+    try:
+        provider = catalog.get(session.meta.provider_id)
+    except ConfigError as e:
+        session.close()
+        await s.show_message(
+            "error: {}（会话 {} 的 provider 已不存在；用 agent --new 开新会话）".format(
+                e, session.id
+            )
+        )
+        return CommandResult()
+
+    budget = _budget_for(catalog, session.meta.provider_id)
+    try:
+        exited = await _Session(
+            s, provider, session.meta.model_id, session, budget=budget
+        ).run(opts.task)
+    finally:
+        session.close()
     return CommandResult(handler="default" if exited else None)

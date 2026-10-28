@@ -1,0 +1,828 @@
+"""会话落盘：一个会话一个目录，``events.jsonl`` 是唯一事实来源。
+
+布局::
+
+    <root>/<id>/meta.json      list 只读这个
+    <root>/<id>/events.jsonl   追加写，一行一事件
+    <root>/<id>/blobs/<sha1>   大块工具输出，事件里只留指针
+    <root>/<id>/lock           fcntl 排他锁，内容是占用者的 pid
+
+写事件不重写文件：崩溃最多丢最后一行，不会把整条会话弄坏。``index.json``
+只是「当前会话」的缓存，丢了按目录重扫即可。
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import tempfile
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Union
+
+from ...edit import forget_session
+from ..types import Message, ToolCall
+from .events import Event, decode, encode, fold, log_entries
+from .window import Window, fit
+
+try:  # 只有 POSIX 有；没有就退化成无锁，单人使用仍能跑。
+    import fcntl
+except ImportError:  # pragma: no cover - 非 POSIX
+    fcntl = None  # type: ignore[assignment]
+
+__all__ = [
+    "ARCHIVE_DIR",
+    "BLOB_BYTES",
+    "MAX_SESSIONS",
+    "Session",
+    "SessionBusy",
+    "SessionError",
+    "SessionMeta",
+    "SessionStore",
+    "default_sessions_dir",
+    "new_session_id",
+    "store",
+]
+
+META_NAME = "meta.json"
+EVENTS_NAME = "events.jsonl"
+BLOB_DIR = "blobs"
+LOCK_NAME = "lock"
+INDEX_NAME = "index.json"
+ARCHIVE_DIR = "_archive"
+
+#: 超过这个条数的新会话会把最久未用的移到 ``_archive/``：不删，只是不再
+#: 出现在默认列表里。
+MAX_SESSIONS = 20
+
+#: 工具输出超过这么多字节就落 blobs/，事件里只留 sha1 与字节数。
+BLOB_BYTES = 8 * 1024
+
+#: 自动标题的长度。
+TITLE_CHARS = 40
+
+#: 会话 id 会直接做目录名：只接受生成器产出的形状，杜绝路径穿越。
+_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{4}-[0-9a-f]{6}$")
+
+PathLike = Union[str, os.PathLike]
+
+
+class SessionError(Exception):
+    """会话不存在、无法解析或状态不对。"""
+
+
+class SessionBusy(SessionError):
+    """另一个进程正开着这条会话。"""
+
+    def __init__(self, session_id: str, pid: str = "") -> None:
+        self.session_id = session_id
+        self.pid = pid
+        where = "pid {}".format(pid) if pid else "另一个进程"
+        super().__init__(
+            "会话 {} 正被 {} 占用；用 --new 新开一条，或 --resume 换一条".format(
+                session_id, where
+            )
+        )
+
+
+def new_session_id() -> str:
+    """``20251028-1052-7d1075``：可读、按名排序即时间序。"""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    return "{}-{}".format(stamp, secrets.token_hex(3))
+
+
+def default_sessions_dir() -> Path:
+    """会话目录：配置里的 ``paths.sessions_dir``（默认 ``~/.local/lls/sessions``）。"""
+    from lls.config import load
+
+    return load().paths.sessions_dir
+
+
+@dataclass
+class SessionMeta:
+    """``meta.json`` 的内容：列表、续会、标题都只看它。"""
+
+    id: str
+    provider_id: str = ""
+    model_id: str = ""
+    title: str = ""
+    cwd: str = ""
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    parent_id: str = ""
+    turns: int = 0
+    last_seq: int = 0
+    size: int = 0
+    archived: bool = False
+
+    @property
+    def model(self) -> str:
+        if not self.provider_id:
+            return self.model_id
+        return "{}/{}".format(self.provider_id, self.model_id)
+
+    def to_json(self) -> dict:
+        return {
+            "version": 1,
+            "id": self.id,
+            "provider_id": self.provider_id,
+            "model_id": self.model_id,
+            "title": self.title,
+            "cwd": self.cwd,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "parent_id": self.parent_id,
+            "turns": self.turns,
+            "last_seq": self.last_seq,
+            "size": self.size,
+        }
+
+
+def _meta_from_json(raw: Any, session_id: str) -> SessionMeta:
+    if not isinstance(raw, dict):
+        raise ValueError("meta is not an object")
+    if raw.get("id") not in (None, session_id):
+        raise ValueError("meta id mismatch")
+    return SessionMeta(
+        id=session_id,
+        provider_id=_text(raw.get("provider_id")),
+        model_id=_text(raw.get("model_id")),
+        title=_text(raw.get("title")),
+        cwd=_text(raw.get("cwd")),
+        created_at=_number(raw.get("created_at")),
+        updated_at=_number(raw.get("updated_at")),
+        parent_id=_text(raw.get("parent_id")),
+        turns=_integer(raw.get("turns")),
+        last_seq=_integer(raw.get("last_seq")),
+        size=_integer(raw.get("size")),
+    )
+
+
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _number(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
+
+
+def _integer(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    """写满整笔：``os.write`` 在管道上也可能短写。"""
+    view = memoryview(payload)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def _title_of(text: str) -> str:
+    """首条 user 消息的开头做标题：压缩空白、截断。"""
+    flat = " ".join(text.split())
+    return flat[:TITLE_CHARS]
+
+
+class Session:
+    """一条已打开的会话：持有事件文件的写句柄与排他锁。"""
+
+    def __init__(
+        self,
+        store: "SessionStore",
+        path: Path,
+        meta: SessionMeta,
+        lock_fd: int,
+        writable: bool = True,
+    ) -> None:
+        self.path = path
+        self.meta = meta
+        self._store = store
+        self._writable = writable
+        self._lock_fd = lock_fd
+        # 只读打开（list/export）既不建锁也不开写句柄：不占用会话，也不碰盘。
+        self._events_fd = _open_append(path / EVENTS_NAME) if writable else -1
+        self.last_error: Optional[str] = None
+        self.bad_lines = 0
+        self._closed = False
+
+    # ---- 元信息 ----
+
+    @property
+    def id(self) -> str:
+        return self.meta.id
+
+    @property
+    def model(self) -> str:
+        return self.meta.model
+
+    def set_title(self, title: str) -> None:
+        self.meta.title = " ".join(title.split())[:TITLE_CHARS]
+        self.meta.updated_at = time.time()
+        self._store.write_meta(self.meta)
+
+    # ---- 追加 ----
+
+    def append(self, kind: str, **fields: Any) -> Optional[Event]:
+        """追加一条事件；写失败只记 ``last_error``，不打断本轮。
+
+        失败时不推进 ``seq``，下次写入会补上同一个序号。
+        """
+        if not self._writable:
+            raise SessionError("会话 {} 是只读打开的".format(self.id))
+        if self._closed:
+            raise SessionError("会话 {} 已关闭".format(self.id))
+        event = Event(type=kind, seq=self.meta.last_seq + 1, ts=time.time(), **fields)
+        line = (encode(event) + "\n").encode("utf-8")
+        try:
+            _write_all(self._events_fd, line)
+        except OSError as e:
+            self.last_error = "{}: {}".format(self.path / EVENTS_NAME, e)
+            self._store.last_error = self.last_error
+            return None
+        self.meta.last_seq = event.seq
+        self.meta.size += len(line)
+        self.meta.updated_at = event.ts
+        if kind == "turn_end":
+            self.meta.turns += 1
+        if kind == "user" and not self.meta.title:
+            self.meta.title = _title_of(event.content)
+        self._store.write_meta(self.meta)
+        return event
+
+    def append_user(self, text: str, source: str = "typed") -> Optional[Event]:
+        return self.append("user", content=text, source=source)
+
+    def append_assistant(
+        self,
+        content: str,
+        calls: Iterable[ToolCall] = (),
+        model: str = "",
+        usage: Optional[dict] = None,
+    ) -> Optional[Event]:
+        return self.append(
+            "assistant",
+            content=content,
+            tool_calls=tuple(calls),
+            model=model,
+            usage=usage,
+        )
+
+    def append_tool(self, call_id: str, text: str, status: str = "ok") -> Optional[Event]:
+        """记录一次工具输出；大的正文落 blobs，事件里只留指针。"""
+        blob, size = "", 0
+        payload = text
+        if len(text.encode("utf-8")) > BLOB_BYTES:
+            blob = self._write_blob(text)
+            if blob:
+                payload, size = "", len(text.encode("utf-8"))
+        return self.append(
+            "tool",
+            content=payload,
+            tool_call_id=call_id,
+            status=status,
+            blob=blob,
+            size=size,
+        )
+
+    def append_turn_end(self, status: str = "ok", note: str = "", **extra: Any) -> None:
+        self.append("turn_end", status=status, note=note, **extra)
+
+    def append_compact(self, summary: str, upto_seq: int) -> None:
+        self.append("compact", content=summary, upto_seq=upto_seq)
+
+    def append_model_switch(self, model: str) -> None:
+        self.append("model_switch", model=model)
+
+    def append_fork(self, parent_id: str, upto_seq: int) -> None:
+        self.append("fork", parent_id=parent_id, upto_seq=upto_seq)
+
+    # ---- 读取 ----
+
+    def events(self, from_seq: int = 0) -> List[Event]:
+        """读出 ``seq > from_seq`` 的事件；坏行（半行、格式不对）只计数。"""
+        path = self.path / EVENTS_NAME
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return []
+        except OSError as e:
+            self.last_error = "{}: {}".format(path, e)
+            return []
+        events: List[Event] = []
+        for line in data.split(b"\n"):
+            if not line.strip():
+                continue
+            try:
+                event = decode(json.loads(line))
+            except (TypeError, ValueError):
+                self.bad_lines += 1
+                continue
+            if event.seq > from_seq:
+                events.append(event)
+        return events
+
+    def history(self) -> List[Message]:
+        """折成送模型的消息；配对不全的 tool_calls 已由 fold 清理。"""
+        return fold(self.events(), self._read_blob)
+
+    def log(self, keep: int = 2) -> List[tuple]:
+        return log_entries(self.events(), keep)
+
+    def history_marks(self) -> tuple:
+        """消息 + 每条来自的 ``seq``；压缩时按它算裁到哪一条。"""
+        marks: List[int] = []
+        messages = fold(self.events(), self._read_blob, marks)
+        return messages, marks
+
+    def compacted_upto(self) -> int:
+        """已经写下的压缩覆盖到哪一条 seq。"""
+        upto = 0
+        for event in self.events():
+            if event.type == "compact" and event.upto_seq > upto:
+                upto = event.upto_seq
+        return upto
+
+    def window(self, budget: int) -> Window:
+        return fit(self.history(), budget)
+
+    def usage(self) -> Optional[dict]:
+        """最近一次 ``assistant`` 记下的 usage。"""
+        latest = None
+        for event in self.events():
+            if event.type == "assistant" and event.usage:
+                latest = dict(event.usage)
+        return latest
+
+    def last_turn_end(self) -> Optional[Event]:
+        latest = None
+        for event in self.events():
+            if event.type == "turn_end":
+                latest = event
+        return latest
+
+    def transcript(self) -> str:
+        """Markdown 导出：只读，不写盘。"""
+        lines = [
+            "# 会话 {}".format(self.id),
+            "",
+            "- 模型：{}".format(self.model or "-"),
+            "- 标题：{}".format(self.meta.title or "-"),
+            "- 轮数：{}".format(self.meta.turns),
+            "",
+        ]
+        for message in self.history():
+            if message.role == "user":
+                lines.extend(["## 任务", "", message.content or "", ""])
+            elif message.role == "assistant":
+                if message.content:
+                    lines.extend(["## 答复", "", message.content, ""])
+                for call in message.tool_calls:
+                    lines.extend(
+                        [
+                            "## 调用 `{}`".format(call.name),
+                            "",
+                            "```json",
+                            call.arguments or "{}",
+                            "```",
+                            "",
+                        ]
+                    )
+            elif message.role == "tool":
+                lines.extend(["### 结果", "", "```", message.content or "", "```", ""])
+        return "\n".join(lines)
+
+    def jsonl(self) -> str:
+        return "".join(encode(event) + "\n" for event in self.events())
+
+    # ---- 内部 ----
+
+    def _write_blob(self, text: str) -> str:
+        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+        directory = self.path / BLOB_DIR
+        path = directory / digest
+        if path.exists():
+            return digest
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                os.chmod(str(directory), 0o700)
+            tmp = directory / (digest + ".tmp")
+            with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+            with contextlib.suppress(OSError):
+                os.chmod(str(tmp), 0o600)
+            os.replace(str(tmp), str(path))
+        except OSError as e:
+            self.last_error = "{}: {}".format(directory, e)
+            return ""
+        return digest
+
+    def _read_blob(self, event: Event) -> Optional[str]:
+        path = self.path / BLOB_DIR / event.blob
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._events_fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(self._events_fd)
+            self._events_fd = -1
+        if self._lock_fd >= 0:
+            with contextlib.suppress(OSError):
+                if fcntl is not None:
+                    fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                os.close(self._lock_fd)
+            self._lock_fd = -1
+        if self._writable:
+            self._store.forget(self.id)
+
+
+class SessionStore:
+    """会话目录的入口：开、建、列、删、分叉、导出。
+
+    ``root`` 为 None 时用一个临时目录：命令层的测试不必碰用户家目录。
+    """
+
+    def __init__(self, root: Optional[PathLike] = None, keep: int = MAX_SESSIONS) -> None:
+        if root is None:
+            self._root = Path(tempfile.mkdtemp(prefix="lls-sessions-"))
+            self.temporary = True
+        else:
+            self._root = Path(root).expanduser()
+            self.temporary = False
+        self._keep = max(1, int(keep))
+        self._open: Dict[str, Session] = {}
+        self.last_error: Optional[str] = None
+        self._index: Dict[str, Any] = {}
+        self._read_index()
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    # ---- 打开与创建 ----
+
+    def create(
+        self,
+        provider_id: str,
+        model_id: str,
+        *,
+        title: str = "",
+        parent_id: str = "",
+    ) -> Session:
+        """新建一条会话并设为当前会话。"""
+        session_id = self._unused_id()
+        path = self._root / session_id
+        path.mkdir(parents=True, exist_ok=False)
+        with contextlib.suppress(OSError):
+            os.chmod(str(path), 0o700)
+        meta = SessionMeta(
+            id=session_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            title=title,
+            cwd=os.getcwd(),
+            created_at=time.time(),
+            updated_at=time.time(),
+            parent_id=parent_id,
+        )
+        self.write_meta(meta)
+        session = self._open_dir(path, meta)
+        session.append(
+            "session_start",
+            model=meta.model,
+            content="lls {}".format(_version()),
+            note=meta.cwd,
+        )
+        self.set_current(session_id)
+        # 建完再归档：先归档的话，刚建好的这一条会把列表撑到 keep + 1。
+        self.archive_overflow()
+        return session
+
+    def open(self, spec: Optional[str] = None) -> Optional[Session]:
+        """打开一条会话：``None`` 取当前会话，否则按 id / 前缀 / 标题片段。"""
+        if spec is None or not spec.strip():
+            session_id = self.current_id()
+            if session_id is None:
+                return None
+            spec = session_id
+        meta = self.resolve(spec)
+        cached = self._open.get(meta.id)
+        if cached is not None:
+            return cached
+        return self._open_dir(self._path_of(meta), meta)
+
+    def get(self, spec: Optional[str]) -> Optional[Session]:
+        try:
+            return self.open(spec)
+        except SessionError:
+            return None
+
+    def resolve(self, spec: str) -> SessionMeta:
+        """按 id、唯一前缀或标题片段找一条会话。"""
+        metas = self.list(include_archived=True)
+        needle = spec.strip()
+        for meta in metas:
+            if meta.id == needle:
+                return meta
+        by_prefix = [meta for meta in metas if meta.id.startswith(needle)]
+        if len(by_prefix) == 1:
+            return by_prefix[0]
+        by_title = [meta for meta in metas if needle.lower() in meta.title.lower()]
+        if len(by_title) == 1:
+            return by_title[0]
+        if len(by_prefix) > 1:
+            raise SessionError(
+                "前缀 {} 匹配到多条会话：{}".format(
+                    needle, ", ".join(meta.id for meta in by_prefix)
+                )
+            )
+        if len(by_title) > 1:
+            raise SessionError(
+                "标题匹配到多条会话：{}".format(", ".join(meta.id for meta in by_title))
+            )
+        raise SessionError("没有匹配 {!r} 的会话".format(needle))
+
+    # ---- 列表与当前 ----
+
+    def list(self, include_archived: bool = False) -> List[SessionMeta]:
+        """会话列表，最近更新的在前。"""
+        metas: List[SessionMeta] = []
+        for base, archived in self._roots(include_archived):
+            try:
+                entries = list(base.iterdir())
+            except OSError:
+                continue
+            for path in entries:
+                if not path.is_dir() or not _ID_RE.match(path.name):
+                    continue
+                meta = self._read_meta(path, archived)
+                if meta is not None:
+                    metas.append(meta)
+        metas.sort(key=lambda meta: meta.updated_at, reverse=True)
+        return metas
+
+    def current_id(self) -> Optional[str]:
+        current = self._index.get("current")
+        if not isinstance(current, str) or not current:
+            return None
+        if not self._path_of_id(current).is_dir():
+            return None
+        return current
+
+    def current(self) -> Optional[Session]:
+        return self.open(None)
+
+    def set_current(self, session_id: str) -> None:
+        self._index = {"version": 1, "current": session_id}
+        self._write_index()
+
+    # ---- 删除、归档 ----
+
+    def drop(self, spec: str) -> SessionMeta:
+        meta = self.resolve(spec)
+        session = self._open.pop(meta.id, None)
+        if session is not None:
+            session.close()
+        shutil.rmtree(self._path_of(meta), ignore_errors=True)
+        if self.current_id() == meta.id:
+            self._index = {"version": 1, "current": ""}
+            self._write_index()
+        forget_session(meta.id)
+        return meta
+
+    def archive_overflow(self) -> List[str]:
+        """超出 ``keep`` 的会话移到 ``_archive/``：不删，``list --all`` 仍在。"""
+        metas = self.list()
+        if len(metas) <= self._keep:
+            return []
+        archive = self._root / ARCHIVE_DIR
+        archived: List[str] = []
+        try:
+            archive.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.last_error = "{}: {}".format(archive, e)
+            return []
+        for meta in metas[self._keep:]:
+            source = self._path_of(meta)
+            target = archive / meta.id
+            if target.exists():
+                continue
+            session = self._open.pop(meta.id, None)
+            if session is not None:
+                session.close()
+            try:
+                shutil.move(str(source), str(target))
+            except OSError as e:
+                self.last_error = "{}: {}".format(source, e)
+                continue
+            if self.current_id() == meta.id:
+                self._index = {"version": 1, "current": ""}
+                self._write_index()
+            archived.append(meta.id)
+        return archived
+
+    # ---- 分叉与导出 ----
+
+    def fork(self, spec: str, at_seq: int = 0) -> Session:
+        """把 ``spec`` 在 ``at_seq`` 之前的事件复制成一条新会话；0 表示到末尾。"""
+        source = self.open(spec)
+        if source is None:
+            raise SessionError("没有匹配 {!r} 的会话".format(spec))
+        cutoff = at_seq if at_seq > 0 else source.meta.last_seq
+        keep = [
+            event
+            for event in source.events()
+            if event.seq <= cutoff
+            and event.type in ("user", "assistant", "tool", "compact")
+        ]
+        new = self.create(
+            source.meta.provider_id, source.meta.model_id, parent_id=source.id
+        )
+        new.append_fork(source.id, cutoff)
+        # 指针跟着事件走：正文留在源会话的 blobs 里，读的历史就只剩占位。
+        target_blobs = new.path / BLOB_DIR
+        for event in keep:
+            if not event.blob:
+                continue
+            blob = source.path / BLOB_DIR / event.blob
+            try:
+                if blob.is_file():
+                    target_blobs.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(str(blob), str(target_blobs / event.blob))
+            except OSError as e:
+                self.last_error = "{}: {}".format(blob, e)
+        for event in keep:
+            new.append(
+                event.type,
+                content=event.content,
+                tool_calls=event.tool_calls,
+                tool_call_id=event.tool_call_id,
+                status=event.status,
+                model=event.model,
+                usage=event.usage,
+                source=event.source,
+                blob=event.blob,
+                size=event.size,
+                upto_seq=event.upto_seq,
+            )
+        return new
+
+    def export(self, spec: Optional[str], fmt: str = "md") -> str:
+        """导出 transcript：只读打开，因此会话正被 agent 占着也能导。"""
+        session = self.read(spec)
+        return session.jsonl() if fmt == "jsonl" else session.transcript()
+
+    def read(self, spec: Optional[str] = None) -> Session:
+        """只读打开：不建锁、不建写句柄，不修改磁盘上的任何东西。"""
+        session_id = spec
+        if session_id is None or not session_id.strip():
+            session_id = self.current_id()
+            if session_id is None:
+                raise SessionError("还没有会话")
+        meta = self.resolve(session_id)
+        return Session(self, self._path_of(meta), meta, -1, writable=False)
+
+    # ---- 内部 ----
+
+    def forget(self, session_id: str) -> None:
+        self._open.pop(session_id, None)
+
+    def write_meta(self, meta: SessionMeta) -> None:
+        path = self._path_of(meta) / META_NAME
+        try:
+            _atomic_write(path, json.dumps(meta.to_json(), ensure_ascii=False))
+        except OSError as e:
+            self.last_error = "{}: {}".format(path, e)
+            session = self._open.get(meta.id)
+            if session is not None:
+                session.last_error = self.last_error
+
+    def _open_dir(self, path: Path, meta: SessionMeta) -> Session:
+        session = Session(self, path, meta, _lock(path / LOCK_NAME, meta.id))
+        self._open[meta.id] = session
+        return session
+
+    def _roots(self, include_archived: bool) -> List[tuple]:
+        roots: List[tuple] = [(self._root, False)]
+        if include_archived:
+            roots.append((self._root / ARCHIVE_DIR, True))
+        return roots
+
+    def _path_of(self, meta: SessionMeta) -> Path:
+        base = self._root / ARCHIVE_DIR if meta.archived else self._root
+        return base / meta.id
+
+    def _path_of_id(self, session_id: str) -> Path:
+        path = self._root / session_id
+        if path.is_dir():
+            return path
+        return self._root / ARCHIVE_DIR / session_id
+
+    def _read_meta(self, path: Path, archived: bool = False) -> Optional[SessionMeta]:
+        try:
+            raw = json.loads((path / META_NAME).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        try:
+            meta = _meta_from_json(raw, path.name)
+        except (TypeError, ValueError):
+            return None
+        meta.archived = archived
+        return meta
+
+    def _unused_id(self) -> str:
+        for _ in range(100):
+            candidate = new_session_id()
+            if not (self._root / candidate).exists():
+                return candidate
+        raise SessionError("无法生成唯一的会话 id")
+
+    def _read_index(self) -> None:
+        try:
+            raw = json.loads((self._root / INDEX_NAME).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(raw, dict):
+            self._index = raw
+
+    def _write_index(self) -> None:
+        try:
+            self._root.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                os.chmod(str(self._root), 0o700)
+            _atomic_write(
+                self._root / INDEX_NAME, json.dumps(self._index, ensure_ascii=False)
+            )
+        except OSError as e:
+            self.last_error = "{}: {}".format(self._root / INDEX_NAME, e)
+
+
+# ---- 文件 ----
+
+def _open_append(path: Path) -> int:
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with contextlib.suppress(OSError):
+        os.chmod(str(path), 0o600)
+    return fd
+
+
+def _lock(path: Path, session_id: str) -> int:
+    """取排他锁；已被占用时抛 :class:`SessionBusy`（带对方的 pid）。"""
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    if fcntl is None:
+        return fd
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        pid = ""
+        with contextlib.suppress(OSError):
+            pid = os.read(fd, 32).decode("ascii", "replace").strip()
+        os.close(fd)
+        raise SessionBusy(session_id, pid) from None
+    with contextlib.suppress(OSError):
+        os.ftruncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode("ascii"))
+    return fd
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text + "\n")
+    with contextlib.suppress(OSError):
+        os.chmod(str(tmp), 0o600)
+    os.replace(str(tmp), str(path))
+
+
+def _version() -> str:
+    from lls import __version__
+
+    return __version__
+
+
+_STORE: Optional[SessionStore] = None
+
+
+def store() -> SessionStore:
+    """进程内单例：跨多次 ``agent`` 调用共享同一份会话。"""
+    global _STORE
+    if _STORE is None:
+        _STORE = SessionStore(root=default_sessions_dir())
+    return _STORE

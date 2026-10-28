@@ -22,7 +22,6 @@ from lls.ai import (
     Message,
     Tool,
     ToolCall,
-    trim_turns,
 )
 
 SYSTEM = "system prompt"
@@ -445,55 +444,50 @@ def test_history_is_inserted_after_system() -> None:
     ]
 
 
-# ---- 历史裁剪 ----
+# ---- 增量回调与用量 ----
 
 
-def test_trim_turns_keeps_whole_turns() -> None:
-    messages = [
-        Message("user", "t1"),
-        Message("assistant", None, tool_calls=(ToolCall("a", "t"),)),
-        Message("tool", "r", tool_call_id="a"),
-        Message("assistant", "a1"),
-        Message("user", "t2"),
-        Message("assistant", "a2"),
-    ]
+def test_each_message_reaches_on_message_with_its_usage() -> None:
+    seen = []
+    provider = ScriptedProvider(
+        [
+            [
+                Chunk(ChunkKind.TEXT, "先看看"),
+                Chunk(ChunkKind.TOOL_CALL, call=ToolCall("c1", "shell", "{}")),
+                Chunk(ChunkKind.USAGE, usage={"prompt": 10, "completion": 2}),
+                Chunk(ChunkKind.DONE),
+            ],
+            [Chunk(ChunkKind.TEXT, "好了"), Chunk(ChunkKind.DONE)],
+        ]
+    )
+    agent = Agent(
+        provider,
+        "m",
+        system=SYSTEM,
+        tools=[_tool("shell", _noop)],
+        on_message=lambda message, usage: seen.append((message.role, usage)),
+    )
 
-    trimmed = trim_turns(messages, 1)
+    asyncio.run(agent.run("任务"))
 
-    assert [message.role for message in trimmed] == ["user", "assistant"]
-    assert trimmed[0].content == "t2"
-
-
-def test_trim_turns_returns_everything_when_under_the_limit() -> None:
-    messages = [Message("user", "t1"), Message("assistant", "a1")]
-
-    assert trim_turns(messages, 4) == messages
+    assert [role for role, _ in seen] == ["user", "assistant", "tool", "assistant"]
+    assert seen[0][1] is None
+    assert seen[1][1] == {"prompt": 10, "completion": 2}
+    assert seen[3][1] is None
 
 
-def test_trim_turns_with_zero_drops_history() -> None:
-    messages = [Message("user", "t1"), Message("assistant", "a1")]
+def test_result_carries_the_last_usage() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                Chunk(ChunkKind.TEXT, "答复"),
+                Chunk(ChunkKind.USAGE, usage={"prompt": 7, "completion": 3}),
+                Chunk(ChunkKind.DONE),
+            ]
+        ]
+    )
+    agent = Agent(provider, "m", system=SYSTEM, tools=[])
 
-    assert trim_turns(messages, 0) == []
+    result = asyncio.run(agent.run("任务"))
 
-
-def test_trim_turns_never_starts_with_a_tool_message() -> None:
-    messages = [
-        Message("user", "t1"),
-        Message("assistant", None, tool_calls=(ToolCall("a", "t"),)),
-        Message("tool", "r", tool_call_id="a"),
-        Message("assistant", "a1"),
-        Message("user", "t2"),
-        Message("assistant", None, tool_calls=(ToolCall("b", "t"),)),
-        Message("tool", "r", tool_call_id="b"),
-        Message("assistant", "a2"),
-    ]
-
-    trimmed = trim_turns(messages, 1)
-
-    assert trimmed[0].role == "user"
-    assert [message.role for message in trimmed] == [
-        "user",
-        "assistant",
-        "tool",
-        "assistant",
-    ]
+    assert result.usage == {"prompt": 7, "completion": 3}

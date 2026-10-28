@@ -34,6 +34,10 @@ lls bash        # 指定命令
 | 命令 | 别名 | 说明 |
 |---|---|---|
 | `agent` | `a` | 进入交互式 Agent 会话，按任务在终端里自动多轮执行 |
+| `sessions` | `ls` | 列出会话（`--all` 含已归档） |
+| `export` | | 导出会话 transcript：`export [id] [--md\|--jsonl]` |
+| `fork` | | 从某条会话的某个位置分叉：`fork <id> [--at <seq>]` |
+| `rm` | | 删除一条会话（连同它的输入历史） |
 | `generate` | `g`, `gen` | 由终端状态与请求生成一段输入，确认后写入子进程 |
 | `exec` | `e` | 执行一条命令，末尾附加回车 |
 | `input` | `i` | 写入内容但不附加回车 |
@@ -78,8 +82,37 @@ lls bash        # 指定命令
 执行中按 `Ctrl-C` 只中止当前任务，会话继续。任务没有步数上限，随时可以
 `Ctrl-C` 中止。
 
-会话有独立身份并落盘到配置的 `paths.sessions_dir`（默认 `~/.local/lls/sessions`），
-一条会话一个 JSON 文件。再次 `agent` 回到同一段上下文，`agent --new` 另开一条。
+会话有独立身份，落盘到配置的 `paths.sessions_dir`（默认 `~/.local/lls/sessions`）。
+一条会话一个目录，`events.jsonl` 是唯一事实来源：一行一事件，只追加，
+`meta.json` 只放列表要用的元信息。崩溃最多丢最后一行，不会把整条会话弄坏。
+
+```
+sessions/
+  index.json                  当前会话的缓存，丢了按目录重扫
+  20251028-1052-7d1075/
+    meta.json                 标题、模型、cwd、轮数、大小、更新时间
+    events.jsonl              session_start / user / assistant / tool / turn_end / compact
+    blobs/<sha1>              超过 8KB 的工具输出正文，事件里只留指针
+    lock                      占用者的 fcntl 排他锁
+```
+
+送进模型的上下文是**按预算从事件里派生**的只读视图，与磁盘上留了多少无关：
+
+- 预算 = `min(context_window * 0.6, ai.context_limit)`，按 token 估算，
+  优先用 provider 返回的 `usage`；
+- 从尾部向前装，按 `user` 边界切分，`tool_calls` 与对应 `tool` 回复不拆；
+- 要丢掉的整段先让模型压成一段摘要（`compact` 事件，原文仍在 events 里），
+  摘要失败才退回硬截断；压掉的不够多就不压 —— 摘要请求本身也要花钱。
+
+`/context` 打印这次实际送了多少、丢了哪些、上轮用量；`/title <文字>` 改标题。
+
+再次 `agent` 回到同一段上下文；`agent --new [任务]` 另开一条；
+`agent --resume <id|前缀|标题片段>` 显式恢复；`agent --list [--all]` 列会话；
+`agent --title <文字>`、`agent --model <spec>` 换标题与模型（换模型记一条
+`model_switch`）。另一进程正开着同一条会话时不会硬抢，会提示换一条。
+
+超过 `MAX_SESSIONS`（20）条的会话不删，移到 `sessions/_archive/`，`--all` 仍可见；
+真删要 `rm <id>`。
 
 `agent` 不弹确认，模型给出的输入直接写入子进程 —— 请在愿意让它动手的终端里
 使用。
@@ -128,6 +161,7 @@ ai:
       base_url: https://api.openai.com/v1
       api_key: sk-...
       models: [gpt-4o-mini, gpt-4o]
+      context_window: 128000   # 窗口预算按它算，默认 128000
     local:
       type: openai-http
       base_url: http://localhost:11434/v1
@@ -144,6 +178,9 @@ ai:
 |---|---|---|
 | `openai` | 通过 `openai` 包 | 需要 `pip install 'lls[ai]'` |
 | `openai-http` | 标准库直接发 HTTP/1.1、自己解 SSE | 无 |
+
+`ai.context_limit` 给整台机器一个硬上限（token），0 表示不设：
+实际预算取 `min(context_window * 0.6, context_limit)`。
 
 `openai-http` 走 `asyncio` 直连（http/https 皆可），流式输出期间界面照常
 刷新，`Ctrl-C` 立即断开。对后端的要求与 SDK 一致：`POST {base_url}/chat/completions`，
@@ -164,6 +201,7 @@ src/lls/session/         终端引擎与对外的能力接口（Services）
 src/lls/handlers.py      输入处理器（透传 / 命令分发）
 src/lls/commands/        命令层，内置命令按类别分模块
 src/lls/ai/              provider 抽象、多轮对话、通用 agent 循环
+src/lls/ai/sessions/     会话落盘（事件流）、窗口裁剪与压缩
 src/lls/term/            屏幕模型（pyte 适配）
 src/lls/ui/              显示原语：换行、覆盖层定位、按模型渲染、字符宽度
 src/lls/edit/            行编辑缓冲

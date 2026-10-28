@@ -153,6 +153,40 @@ def test_timeout_must_be_number(tmp_path: Path) -> None:
     assert "timeout" in str(caught.value)
 
 
+def test_context_window_defaults_and_parses(tmp_path: Path) -> None:
+    default = load(_write(tmp_path, "ai:\n  providers:\n    p:\n      type: openai\n"))
+    assert default.providers["p"].context_window == 128_000
+    assert default.context_limit == 0
+
+    small = load(
+        _write(
+            tmp_path,
+            "ai:\n  context_limit: 9000\n  providers:\n    p:\n      type: openai\n      context_window: 32000\n",
+        )
+    )
+    assert small.providers["p"].context_window == 32_000
+    assert small.context_limit == 9000
+
+
+def test_context_window_must_be_a_positive_int(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load(
+            _write(
+                tmp_path,
+                "ai:\n  providers:\n    p:\n      type: openai\n      context_window: 0\n",
+            )
+        )
+
+    assert "context_window" in str(caught.value)
+
+
+def test_context_limit_must_be_non_negative(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load(_write(tmp_path, "ai:\n  context_limit: -1\n"))
+
+    assert "context_limit" in str(caught.value)
+
+
 # ---- 路径解析 ----
 
 

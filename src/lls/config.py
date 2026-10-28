@@ -99,7 +99,7 @@ def configure(
 ) -> None:
     """记录命令行给出的 ``--config`` / ``--set``。
 
-    放在模块级而不是层层传参，是为了让 ``agent_store``、``catalog`` 这些
+    放在模块级而不是层层传参，是为了让 ``ai.sessions``、``catalog`` 这些
     深处模块拿到同一份配置；进程内只在 CLI 入口调用一次。
     """
     global _CLI_PATH, _CLI_OVERRIDES

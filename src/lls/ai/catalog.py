@@ -10,6 +10,7 @@ from functools import lru_cache
 from ..config import ConfigError, load_ai, resolve_config_path
 from .config import AIConfig
 from .provider import Provider
+from .types import ProviderConfig
 from .registry import create_provider
 
 __all__ = ["Catalog", "default_catalog", "parse_model_spec"]
@@ -70,6 +71,17 @@ class Catalog:
                 % (self._config.path or "config")
             )
         return parse_model_spec(chosen)
+
+    def provider_config(self, provider_id: str) -> ProviderConfig:
+        """取 provider 的配置（窗口、超时这些预算参数都在这里）。"""
+        conf = self._config.providers.get(provider_id)
+        if conf is None:
+            raise ConfigError("no such provider {!r}".format(provider_id))
+        return conf
+
+    def context_limit(self) -> int:
+        """配置里的单次请求上限；0 表示不设。"""
+        return self._config.context_limit
 
     def resolve(self, spec: str | None = None) -> tuple[Provider, str]:
         """解析 ``provider/model``；省略时用配置里的 ``default_model``。

@@ -30,6 +30,16 @@ _MAX_LINE = 1024 * 1024
 _MAX_ERROR_BODY = 64 * 1024
 
 
+def _usage(raw: dict[str, Any]) -> dict[str, int]:
+    """把 OpenAI 的 usage 收成 ``prompt`` / ``completion`` 两个数。"""
+    prompt = raw.get("prompt_tokens")
+    completion = raw.get("completion_tokens")
+    return {
+        "prompt": int(prompt) if isinstance(prompt, int) else 0,
+        "completion": int(completion) if isinstance(completion, int) else 0,
+    }
+
+
 class HttpProvider:
     """直接发 HTTP/1.1 请求的流式实现。"""
 
@@ -52,6 +62,8 @@ class HttpProvider:
         body["model"] = model
         body["messages"] = payload
         body["stream"] = True
+        # 让对端在流末尾补一个 usage 事件：预算要靠它才对得准。
+        body.setdefault("stream_options", {"include_usage": True})
         if tools:
             body["tools"] = [tool.to_payload() for tool in tools]
         if parallel_tool_calls is not None:
@@ -199,6 +211,9 @@ class HttpProvider:
 
             pending = {}  # type: Dict[int, Dict[str, str]]
             async for event in self._iter_sse(self._iter_body(reader, headers)):
+                usage = event.get("usage")
+                if isinstance(usage, dict):
+                    yield Chunk(ChunkKind.USAGE, usage=_usage(usage))
                 choices = event.get("choices") or ()
                 if not choices:
                     continue

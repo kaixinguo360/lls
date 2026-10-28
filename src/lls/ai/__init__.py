@@ -15,7 +15,6 @@ from .agent import (
     AgentEventKind,
     AgentResult,
     AgentTool,
-    trim_turns,
 )
 from .catalog import Catalog, default_catalog, parse_model_spec
 from ..config import ConfigError, load_ai, resolve_config_path
@@ -52,7 +51,6 @@ __all__ = [
     "providers",
     "register_type",
     "resolve_config_path",
-    "trim_turns",
 ]
 
 # 兼容旧调用：lls.ai.load 现在等同严格解析 AI 段。

@@ -68,6 +68,9 @@ class OpenAIProvider:
         try:
             response = await client.chat.completions.create(**body)
             async for piece in response:
+                usage = getattr(piece, "usage", None)
+                if usage is not None:
+                    yield Chunk(ChunkKind.USAGE, usage=_usage(usage))
                 delta = self._delta(piece)
                 if delta is None:
                     continue
@@ -104,6 +107,8 @@ class OpenAIProvider:
         body["model"] = model
         body["messages"] = payload
         body["stream"] = True
+        # 流末尾补一个 usage 事件：预算要靠它才对得准。
+        body.setdefault("stream_options", {"include_usage": True})
 
         if tools:
             body["tools"] = [tool.to_payload() for tool in tools]
@@ -117,3 +122,10 @@ class OpenAIProvider:
         if not choices:
             return None
         return getattr(choices[0], "delta", None)
+
+
+def _usage(raw: Any) -> dict[str, int]:
+    """把 SDK 的 usage 收成 ``prompt`` / ``completion`` 两个数。"""
+    prompt = getattr(raw, "prompt_tokens", 0) or 0
+    completion = getattr(raw, "completion_tokens", 0) or 0
+    return {"prompt": int(prompt), "completion": int(completion)}

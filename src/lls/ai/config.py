@@ -22,6 +22,8 @@ class AIConfig:
 
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     default_model: str | None = None
+    context_limit: int = 0
+    """单次请求的 token 上限；0 表示只按模型的 context window 算。"""
     path: Path | None = None
     """配置来源文件。"""
 
@@ -60,6 +62,7 @@ def _parse_provider(
             "timeout",
             "models",
             "params",
+            "context_window",
         },
         f"ai.providers.{pid}.",
         notes,
@@ -85,6 +88,12 @@ def _parse_provider(
     if not isinstance(params_raw, dict):
         raise ConfigError(f"ai.providers.{pid}.params must be a mapping")
 
+    window_raw = data.get("context_window", 128_000)
+    if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+        raise ConfigError(f"ai.providers.{pid}.context_window must be an int")
+    if window_raw <= 0:
+        raise ConfigError(f"ai.providers.{pid}.context_window must be positive")
+
     timeout_raw = data.get("timeout", 60.0)
     try:
         timeout = float(timeout_raw)
@@ -101,6 +110,7 @@ def _parse_provider(
         timeout=timeout,
         models=models,
         params=dict(params_raw),
+        context_window=window_raw,
     )
 
 
@@ -117,7 +127,7 @@ def parse_ai(
     section = data.get("ai") or {}
     if not isinstance(section, dict):
         raise ConfigError("ai must be a mapping")
-    _unknown(section, {"default_model", "providers"}, "ai.", notes)
+    _unknown(section, {"default_model", "providers", "context_limit"}, "ai.", notes)
 
     providers_raw = section.get("providers") or {}
     if not isinstance(providers_raw, dict):
@@ -129,8 +139,13 @@ def parse_ai(
 
     default_model = _as_str(section.get("default_model"), "ai.default_model")
 
+    limit_raw = section.get("context_limit", 0)
+    if isinstance(limit_raw, bool) or not isinstance(limit_raw, int) or limit_raw < 0:
+        raise ConfigError("ai.context_limit must be a non-negative int")
+
     return AIConfig(
         providers=providers,
         default_model=default_model,
+        context_limit=limit_raw,
         path=path,
     )
