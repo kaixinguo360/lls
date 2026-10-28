@@ -121,14 +121,18 @@ def test_a_completed_turn_writes_events_with_usage(monkeypatch, tmp_path) -> Non
     events = session.events()
     assert [event.type for event in events] == [
         "session_start",
+        "screen",
         "user",
         "assistant",
         "turn_end",
     ]
-    assert events[2].usage == {"prompt": 9, "completion": 4}
-    assert events[3].status == "ok"
+    # 画面先落盘，任务那条指向它：重放时才有当时发出去的那段正文。
+    assert events[1].content == "screen"
+    assert events[2].screen == events[1].seq
+    assert events[3].usage == {"prompt": 9, "completion": 4}
+    assert events[4].status == "ok"
     # 常规一轮不写备注：条数与预算由 /context 算，耗时由前后两条 ts 相减。
-    assert events[3].note == ""
+    assert events[4].note == ""
     assert session.meta.turns == 1
     session.close()
 
@@ -175,9 +179,28 @@ def test_an_aborted_turn_stays_in_context_marked_as_interrupted(monkeypatch, tmp
     # 中断的一轮留在上下文里，后面跟一行标记：下一轮不会当它没发生过。
     sent = provider.requests[-1]
     user_texts = [message.content or "" for message in sent if message.role == "user"]
-    assert any(text.startswith("任务一") for text in user_texts)
+    assert any(text.endswith("<task>\n任务一\n</task>") for text in user_texts)
     assert INTERRUPT_MARKER in user_texts
     session.close()
+
+
+def test_what_was_sent_is_what_replays(monkeypatch, tmp_path) -> None:
+    """送出去的那条消息，重放时逐字相同：缓存的前缀才连得上。"""
+    first = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复一")])
+    _run(monkeypatch, provider, ["/exit"], first, args="任务一")
+    sent = provider.requests[0][-1].content or ""
+    first.current().close()
+
+    reopened = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复二")])
+    _run(monkeypatch, provider, ["/exit"], reopened, args="任务二")
+
+    replayed = provider.requests[0]
+    assert replayed[1].role == "user"
+    assert replayed[1].content == sent
+    assert sent.startswith("<terminal_state>\nscreen\n</terminal_state>\n\n<task>\n")
+    assert sent.endswith("<task>\n任务一\n</task>")
 
 
 def test_an_interrupted_reply_keeps_what_was_already_shown(monkeypatch, tmp_path) -> None:

@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from ...edit import forget_session
 from ..types import Message, ToolCall
@@ -260,8 +260,15 @@ class Session:
         self._store.write_meta(self.meta)
         return event
 
-    def append_user(self, text: str, source: str = "typed") -> Optional[Event]:
-        return self.append("user", content=text, source=source)
+    def append_screen(self, text: str) -> Optional[Event]:
+        """记下这一轮随任务发出去的画面；大的画面落 blobs，与工具输出同一套。"""
+        return self.append("screen", **self._spill(text))
+
+    def append_user(
+        self, text: str, screen: int = 0, source: str = "typed"
+    ) -> Optional[Event]:
+        """记下这一轮的任务。``screen`` 是随它发出的那条画面事件的 seq。"""
+        return self.append("user", content=text, screen=screen, source=source)
 
     def append_assistant(
         self,
@@ -280,20 +287,19 @@ class Session:
 
     def append_tool(self, call_id: str, text: str, status: str = "ok") -> Optional[Event]:
         """记录一次工具输出；大的正文落 blobs，事件里只留指针。"""
-        blob, size = "", 0
-        payload = text
-        if len(text.encode("utf-8")) > BLOB_BYTES:
-            blob = self._write_blob(text)
-            if blob:
-                payload, size = "", len(text.encode("utf-8"))
         return self.append(
-            "tool",
-            content=payload,
-            tool_call_id=call_id,
-            status=status,
-            blob=blob,
-            size=size,
+            "tool", tool_call_id=call_id, status=status, **self._spill(text)
         )
+
+    def _spill(self, text: str) -> dict:
+        """正文超过阈值就落 blobs，返回事件字段；写不了盘就留在行里。"""
+        data = text.encode("utf-8")
+        if len(data) <= BLOB_BYTES:
+            return {"content": text}
+        blob = self._write_blob(text)
+        if not blob:
+            return {"content": text}
+        return {"content": "", "blob": blob, "size": len(data)}
 
     def append_turn_end(self, status: str = "ok", note: str = "", **extra: Any) -> None:
         self.append("turn_end", status=status, note=note, **extra)
@@ -309,8 +315,37 @@ class Session:
 
     # ---- 读取 ----
 
-    def events(self, from_seq: int = 0) -> List[Event]:
-        """读出 ``seq > from_seq`` 的事件；坏行（半行、格式不对）只计数。"""
+    def events(self) -> List[Event]:
+        """整份事件流；坏行（半行、格式不对）只计数，不打断读取。"""
+        events: List[Event] = []
+        for raw in self._lines():
+            event = self._decode(raw)
+            if event is not None:
+                events.append(event)
+        return events
+
+    def recent(self) -> List[Event]:
+        """上下文那一段：最近一次压缩覆盖到的位置之后，含那条摘要本身。
+
+        压缩之后，前面的行只给 ``jsonl`` / 分叉这类要原文的地方；每轮的
+        上下文只由这一段派生，代价不随会话变长。摘要也可能写在它覆盖的位置
+        之后（分叉就是这样），所以边界取 ``upto_seq`` 而不是摘要自己的 seq。
+        """
+        events: List[Event] = []
+        compact: Optional[Event] = None
+        for raw in reversed(self._lines()):
+            event = self._decode(raw)
+            if event is None:
+                continue
+            if compact is not None and event.seq <= compact.upto_seq:
+                break
+            events.append(event)
+            if compact is None and event.type == "compact" and event.upto_seq > 0:
+                compact = event
+        events.reverse()
+        return events
+
+    def _lines(self) -> List[bytes]:
         path = self.path / EVENTS_NAME
         try:
             data = path.read_bytes()
@@ -319,57 +354,74 @@ class Session:
         except OSError as e:
             self.last_error = "{}: {}".format(path, e)
             return []
+        return [line for line in data.split(b"\n") if line.strip()]
+
+    def _decode(self, raw: bytes) -> Optional[Event]:
+        try:
+            return decode(json.loads(raw))
+        except (TypeError, ValueError):
+            self.bad_lines += 1
+            return None
+
+    def _from_end(self, stop: Callable[[Event], bool]) -> List[Event]:
+        """从尾部往回读，停在 ``stop`` 命中的那条（含它）。
+
+        覆盖层要的那两行、上一次用量、最近一轮的收尾，都只在尾部：从后往前
+        读，代价与真正要用的部分相当。
+        """
         events: List[Event] = []
-        for line in data.split(b"\n"):
-            if not line.strip():
+        for raw in reversed(self._lines()):
+            event = self._decode(raw)
+            if event is None:
                 continue
-            try:
-                event = decode(json.loads(line))
-            except (TypeError, ValueError):
-                self.bad_lines += 1
-                continue
-            if event.seq > from_seq:
-                events.append(event)
+            events.append(event)
+            if stop(event):
+                break
+        events.reverse()
         return events
 
     def history(self) -> List[Message]:
         """折成送模型的消息；配对不全的 tool_calls 已由 fold 清理。"""
-        return fold(self.events(), self._read_blob)
+        return fold(self.recent(), self._read_blob)
 
     def log(self, keep: int = 2) -> List[tuple]:
-        return log_entries(self.events(), keep)
+        """覆盖层的最近 ``keep`` 条：从尾部往回找到够数的轮次为止。"""
+        wanted = max(1, keep)
+        tasks = 0
+
+        def enough(event: Event) -> bool:
+            nonlocal tasks
+            if event.type == "user":
+                tasks += 1
+            return tasks > wanted
+
+        return log_entries(self._from_end(enough), keep)
 
     def history_marks(self) -> tuple:
         """消息 + 每条来自的 ``seq``；压缩时按它算裁到哪一条。"""
         marks: List[int] = []
-        messages = fold(self.events(), self._read_blob, marks)
+        messages = fold(self.recent(), self._read_blob, marks)
         return messages, marks
 
     def compacted_upto(self) -> int:
-        """已经写下的压缩覆盖到哪一条 seq。"""
-        upto = 0
-        for event in self.events():
-            if event.type == "compact" and event.upto_seq > upto:
-                upto = event.upto_seq
-        return upto
+        """最近一次压缩覆盖到哪一条 seq。"""
+        tail = self._from_end(lambda event: event.type == "compact")
+        return tail[0].upto_seq if tail else 0
 
     def window(self, budget: int) -> Window:
         return fit(self.history(), budget)
 
     def usage(self) -> Optional[dict]:
         """最近一次 ``assistant`` 记下的 usage。"""
-        latest = None
-        for event in self.events():
-            if event.type == "assistant" and event.usage:
-                latest = dict(event.usage)
-        return latest
+        tail = self._from_end(
+            lambda event: event.type == "assistant" and bool(event.usage)
+        )
+        return dict(tail[0].usage or {}) if tail else None
 
     def last_turn_end(self) -> Optional[Event]:
-        latest = None
-        for event in self.events():
-            if event.type == "turn_end":
-                latest = event
-        return latest
+        """最近一条收尾记录。"""
+        tail = self._from_end(lambda event: event.type == "turn_end")
+        return tail[0] if tail else None
 
     def transcript(self) -> str:
         """Markdown 导出：只读，不写盘。"""
@@ -650,7 +702,7 @@ class SessionStore:
             event
             for event in source.events()
             if event.seq <= cutoff
-            and event.type in ("user", "assistant", "tool", "compact")
+            and event.type in ("user", "screen", "assistant", "tool", "compact")
         ]
         new = self.create(
             source.meta.provider_id, source.meta.model_id, parent_id=source.id
@@ -668,8 +720,14 @@ class SessionStore:
                     shutil.copyfile(str(blob), str(target_blobs / event.blob))
             except OSError as e:
                 self.last_error = "{}: {}".format(blob, e)
+        # seq 在新会话里重排，引用它们的字段跟着改号：画面的 seq 指回源会话
+        # 就是空号，摘要覆盖到的位置在新会话里也不一样。
+        screens: Dict[int, int] = {}
         for event in keep:
-            new.append(
+            upto = event.upto_seq
+            if event.type == "compact":
+                upto = new.meta.last_seq + 1
+            copied = new.append(
                 event.type,
                 content=event.content,
                 tool_calls=event.tool_calls,
@@ -678,10 +736,13 @@ class SessionStore:
                 model=event.model,
                 usage=event.usage,
                 source=event.source,
+                screen=screens.get(event.screen, 0),
                 blob=event.blob,
                 size=event.size,
-                upto_seq=event.upto_seq,
+                upto_seq=upto,
             )
+            if event.type == "screen" and copied is not None:
+                screens[event.seq] = copied.seq
         return new
 
     def export(self, spec: Optional[str], fmt: str = "md") -> str:

@@ -24,14 +24,18 @@ __all__ = [
     "encode",
     "fold",
     "log_entries",
+    "task_message",
 ]
 
 #: 事件类型。``session_start`` / ``turn_end`` / ``model_switch`` / ``fork``
-#: 是过程记录，不进上下文；``compact`` 替换某段区间。
+#: 是过程记录，不进上下文；``compact`` 替换某段区间。``screen`` 是某一轮
+#: 随任务一起发出去的终端画面，由那条 ``user`` 的 ``screen`` 指过来 —— 它自己
+#: 不是消息，只是那条消息的一部分。
 EVENT_TYPES = frozenset(
     {
         "session_start",
         "user",
+        "screen",
         "assistant",
         "tool",
         "turn_end",
@@ -80,7 +84,9 @@ class Event:
     usage: Optional[dict] = None
     # user：typed / piped
     source: str = ""
-    # tool：正文落在 blobs/ 时记摘要与字节数
+    # user：随任务发出去的那条画面事件的 seq（0 = 没留）
+    screen: int = 0
+    # tool / screen：正文落在 blobs/ 时记摘要与字节数
     blob: str = ""
     size: int = 0
     # compact：摘要覆盖到哪一条 seq
@@ -99,7 +105,7 @@ _TEXT_FIELDS = (
     "blob",
     "parent_id",
 )
-_INT_FIELDS = ("size", "upto_seq")
+_INT_FIELDS = ("screen", "size", "upto_seq")
 
 
 def encode(event: Event) -> str:
@@ -186,6 +192,9 @@ def fold(
     否则下一轮它只记得一句重述的任务，会把做过的事情再做一遍。缺的是收尾：
     没等到结果的工具调用补一条回复，中断的轮次补一行 :data:`INTERRUPT_MARKER`。
 
+    每一轮 ``user`` 带上当时发出去的画面（:func:`task_message`）：重放出来的
+    正文与当时的请求逐字相同，前面的历史才是稳定的前缀。
+
     给了 ``marks`` 时，同步记下每条消息来自哪一条 ``seq``（摘要那条记 0），
     压缩时据此算出「裁到哪一条」。
     """
@@ -195,6 +204,7 @@ def fold(
     for event in events:
         if event.type == "compact" and event.upto_seq >= cutoff:
             cutoff, summary = event.upto_seq, event.content
+    screens = {event.seq: event for event in events if event.type == "screen"}
 
     messages: List[Message] = []
     if marks is not None:
@@ -226,7 +236,7 @@ def fold(
             continue
         if event.type == "user":
             close()
-            messages.append(Message("user", event.content))
+            messages.append(Message("user", _turn_text(event, screens, blobs)))
             if marks is not None:
                 marks.append(event.seq)
         elif event.type == "assistant":
@@ -259,6 +269,44 @@ def fold(
     # 没有 turn_end 的残尾（进程被杀）也要收：新的一轮不该带着半截调用发出。
     close()
     return _drop_unpaired(messages)
+
+
+def task_message(task: str, screen: str) -> str:
+    """一轮交给模型的正文：先画面，后任务。
+
+    写事件时由它拼请求，``fold`` 也由它重建 —— 模板只有这一份，重放才会
+    与当时的请求逐字相同。
+    """
+    body = screen if screen.strip() else "（屏幕为空）"
+    return (
+        "<terminal_state>\n"
+        + body
+        + "\n</terminal_state>\n\n"
+        + "<task>\n"
+        + task
+        + "\n</task>"
+    )
+
+
+def _turn_text(
+    event: Event,
+    screens: dict,
+    blobs: Optional[Callable[[Event], Optional[str]]],
+) -> str:
+    """一条 ``user`` 在请求里的正文。
+
+    画面取不到（没留、被压缩带走、blob 丢了）就退回任务原文：少一段输入
+    只会让这一轮薄一点，不该变成另一条消息。
+    """
+    snapshot = screens.get(event.screen) if event.screen else None
+    if snapshot is None:
+        return event.content
+    text = snapshot.content
+    if snapshot.blob:
+        text = blobs(snapshot) if blobs is not None else None
+        if text is None:
+            return event.content
+    return task_message(event.content, text)
 
 
 def _cancelled_result(status: str) -> str:

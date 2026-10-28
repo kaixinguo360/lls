@@ -91,8 +91,9 @@ sessions/
   index.json                  当前会话的缓存，丢了按目录重扫
   20251028-1052-7d1075/
     meta.json                 标题、模型、cwd、轮数、大小、更新时间
-    events.jsonl              session_start / user / assistant / tool / turn_end / compact
-    blobs/<sha1>              超过 8KB 的工具输出正文，事件里只留指针
+    events.jsonl              session_start / screen / user / assistant / tool /
+                              turn_end / compact
+    blobs/<sha1>              超过 8KB 的工具输出与画面正文，事件里只留指针
     lock                      占用者的 fcntl 排他锁
 ```
 
@@ -101,6 +102,10 @@ sessions/
 - 预算 = `min(context_window * 0.6, ai.context_limit)`，按 token 估算，
   优先用 provider 返回的 `usage`；
 - 从尾部向前装，按 `user` 边界切分，`tool_calls` 与对应 `tool` 回复不拆；
+- 每轮随任务发出去的终端画面单独落一条 `screen`，`user` 指向它：重放出来的
+  就是当时发出去的那条消息（逐字相同，缓存的前缀才连得上），画面没留下就
+  退回纯任务；
+- 每轮只读最近一次压缩之后的事件，压缩过的前缀不再逐行解码；
 - 中断、出错的轮次照样进上下文：没等到结果的 `tool_calls` 补一条 `error: …`，
   中断的那一轮再补一行「被用户中断」的标记 —— 下一轮看得见上一轮停在哪儿，
   不会把做过的事情再做一遍；

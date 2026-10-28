@@ -4,7 +4,7 @@
 事件并派生消息。窗口裁剪在 :mod:`.window`，事件模型在 :mod:`.events`。
 """
 
-from .events import Event, fold, log_entries
+from .events import Event, fold, log_entries, task_message
 from .store import (
     MAX_SESSIONS,
     Session,
@@ -46,4 +46,5 @@ __all__ = [
     "log_entries",
     "new_session_id",
     "store",
+    "task_message",
 ]

@@ -45,6 +45,7 @@ from lls.ai.sessions import (
     fit,
     last_turns,
     store,
+    task_message,
 )
 from lls.ai.sessions.events import SUMMARY_PREFIX
 from lls.commands.result import CommandResult
@@ -333,19 +334,6 @@ def _reply_rows(text: str, columns: int, bold: bool = False) -> list[str]:
     )
     # 空行只剩 SGR 序列，按可见内容判断才不会把空行留下。
     return [row for row in wrapped.split("\n") if strip_sgr(row).strip()]
-
-
-def _task_message(task: str, screen: str) -> str:
-    """本轮交给模型的消息：先是终端画面，再是任务。"""
-    body = screen if screen.strip() else "（屏幕为空）"
-    return (
-        "<terminal_state>\n"
-        + body
-        + "\n</terminal_state>\n\n"
-        + "<task>\n"
-        + task
-        + "\n</task>"
-    )
 
 
 # ---- 终端观察与等待 ----
@@ -735,13 +723,12 @@ class _Session:
         self._guard.reset()
         self._compacted_now = False
 
-        message = _task_message(task, screen)
+        message = task_message(task, screen)
         pending = [Message("user", message)]
         window = self._prepare_window(pending)
         if await self._compact(window, pending):
             window = self._prepare_window(pending)
-        if self._session is not None:
-            self._session.append_user(task, source="typed")
+        self._submit(task, screen)
 
         painter = _Painter(self._s)
         agent = Agent(
@@ -777,6 +764,19 @@ class _Session:
         self._record(task, summary)
 
     # ---- 记录 ----
+
+    def _submit(self, task: str, screen: str) -> None:
+        """把这一轮发出去的东西写进会话：先画面，再任务。
+
+        先写画面，后写任务：任务那条是这一轮开始的地方，它指向画面；画面
+        写不进去就只记任务，重放时这一轮少一段输入，仍是同一条消息。
+        """
+        if self._session is None:
+            return
+        snapshot = self._session.append_screen(screen)
+        self._session.append_user(
+            task, screen=snapshot.seq if snapshot is not None else 0, source="typed"
+        )
 
     def _keep_partial(self, agent: Any) -> None:
         """把中断前已经吐出来的正文补进会话。

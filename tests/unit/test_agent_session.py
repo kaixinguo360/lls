@@ -327,7 +327,7 @@ def test_ctrl_c_aborts_only_the_current_task(monkeypatch) -> None:
     assert any("已中断" in prompt for prompt in services.prompts)
     # 被中断的一轮留在会话里，末尾是中断标记：下一轮看得见它做到哪一步。
     sent = [message.content or "" for message in provider.requests[-1]["messages"]]
-    assert any(text.startswith("任务1") for text in sent)
+    assert any(text.endswith("<task>\n任务1\n</task>") for text in sent)
     assert INTERRUPT_MARKER in sent
 
 

@@ -22,6 +22,7 @@ from lls.ai.sessions import (
     fit,
     fold,
     last_turns,
+    task_message,
 )
 from lls.ai.sessions.events import (
     INTERRUPT_MARKER,
@@ -218,6 +219,81 @@ def test_compact_replaces_the_covered_range(tmp_path: Path) -> None:
     assert history[0].content == SUMMARY_PREFIX + "之前在做旧任务，结论是 X"
     assert [message.role for message in history] == ["user", "user"]
     assert history[-1].content == "新任务"
+    session.close()
+
+
+# ---- 随任务发出去的画面 ----
+
+
+def test_a_turn_replays_the_screen_it_was_sent_with(tmp_path: Path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    screen = "$ pytest -q\n3 passed"
+
+    snapshot = session.append_screen(screen)
+    session.append_user("跑一下测试", screen=snapshot.seq)
+
+    assert session.history() == [Message("user", task_message("跑一下测试", screen))]
+    # 覆盖层要的是任务原文，不是拼好的那条消息。
+    session.append_turn_end("ok")
+    assert session.log(1) == [("跑一下测试", "", "")]
+    session.close()
+
+
+def test_a_turn_without_its_screen_falls_back_to_the_task(tmp_path: Path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+
+    session.append_user("任务", screen=999)
+
+    assert session.history() == [Message("user", "任务")]
+    session.close()
+
+
+def test_a_big_screen_goes_to_blobs(tmp_path: Path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    screen = "行\n" * 5000
+
+    snapshot = session.append_screen(screen)
+    session.append_user("任务", screen=snapshot.seq)
+
+    assert snapshot.blob and snapshot.size > store_module.BLOB_BYTES
+    assert (session.path / "blobs" / snapshot.blob).is_file()
+    assert session.history()[-1] == Message("user", task_message("任务", screen))
+    assert "行\n行\n行" not in (session.path / "events.jsonl").read_text("utf-8")
+    session.close()
+
+
+def test_a_screen_whose_blob_is_gone_falls_back_to_the_task(tmp_path: Path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    snapshot = session.append_screen("行\n" * 5000)
+    session.append_user("任务", screen=snapshot.seq)
+    (session.path / "blobs" / snapshot.blob).unlink()
+
+    assert session.history() == [Message("user", "任务")]
+    session.close()
+
+
+# ---- 只读尾部 ----
+
+
+def test_the_context_starts_after_the_last_compaction(tmp_path: Path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    session.append_user("旧任务")
+    session.append_assistant("旧答复")
+    upto = session.meta.last_seq
+    session.append_compact("旧任务已经做完，结论是 X", upto)
+    session.append_user("新任务")
+
+    recent = session.recent()
+
+    assert recent[0].type == "compact"
+    assert [event.content for event in recent[1:]] == ["新任务"]
+    assert session.history()[0].content == SUMMARY_PREFIX + "旧任务已经做完，结论是 X"
+    assert session.compacted_upto() == upto
     session.close()
 
 
@@ -448,6 +524,31 @@ def test_fork_copies_the_blobs_it_points_at(tmp_path: Path) -> None:
         "大" * 20_000
     ]
     assert list((tmp_path / forked.id / "blobs").iterdir())
+    source.close()
+    forked.close()
+
+
+def test_fork_renumbers_the_fields_that_point_at_other_events(tmp_path: Path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    source = keeper.create("stub", "m")
+    source.append_user("旧任务")
+    source.append_assistant("旧答复")
+    upto = source.meta.last_seq
+    source.append_compact("旧任务已经做完，结论是 X", upto)
+    snapshot = source.append_screen("$ echo hi\nhi")
+    source.append_user("新任务", screen=snapshot.seq)
+
+    forked = keeper.fork(source.id)
+
+    events = forked.events()
+    compact = next(event for event in events if event.type == "compact")
+    snapshot = next(event for event in events if event.type == "screen")
+    task = events[-1]
+    # 摘要覆盖到它自己：新会话里它前面没有别的行。
+    assert compact.upto_seq == compact.seq
+    # 画面与任务跟着改号，否则指回源会话的编号。
+    assert task.type == "user" and task.screen == snapshot.seq
+    assert forked.history()[-1].content == task_message("新任务", "$ echo hi\nhi")
     source.close()
     forked.close()
 
