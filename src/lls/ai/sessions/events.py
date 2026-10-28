@@ -17,6 +17,7 @@ __all__ = [
     "Event",
     "CONTEXT_TYPES",
     "EVENT_TYPES",
+    "INTERRUPT_MARKER",
     "MISSING_BLOB",
     "SUMMARY_PREFIX",
     "decode",
@@ -49,6 +50,11 @@ SUMMARY_PREFIX = "（以下是更早对话的摘要，原文已压缩；需要�
 #: 正文落在 blobs/ 里但读不出来时的占位：宁可留一句「已清理」，也不要
 #: 静默跳过一个工具回复 —— 那会让 tool_calls 与 tool 对不上。
 MISSING_BLOB = "（这段工具输出已清理，原文不可用）"
+
+#: 被用户中断的轮次在上下文里留一行用户消息。和别家 CLI 的
+#: 「[Request interrupted by user]」是同一件事：模型要知道上一轮是自己没说
+#: 完、被打断的，而不是说完了，才知道该不该接着做。
+INTERRUPT_MARKER = "（上一轮被用户中断，任务没做完；需要时接着做）"
 
 
 @dataclass(frozen=True)
@@ -176,13 +182,14 @@ def fold(
     落在 blobs 里时由 ``blobs`` 读回，读不到就用占位文本 —— 但绝不跳过
     消息，否则 tool_calls 会失去配对。
 
+    中断和出错的轮次照样进上下文：用户看见屏幕上做到哪一步，模型也该看见，
+    否则下一轮它只记得一句重述的任务，会把做过的事情再做一遍。缺的是收尾：
+    没等到结果的工具调用补一条回复，中断的轮次补一行 :data:`INTERRUPT_MARKER`。
+
     给了 ``marks`` 时，同步记下每条消息来自哪一条 ``seq``（摘要那条记 0），
     压缩时据此算出「裁到哪一条」。
     """
     events = list(events)
-    # 中断/失败的轮次留在盘上备查，但不进上下文：下次请求不该看到
-    # 一个没有答复的半截任务。
-    skipped = _failed_ranges(events)
     cutoff = 0
     summary = ""
     for event in events:
@@ -196,10 +203,29 @@ def fold(
         messages.append(Message("user", SUMMARY_PREFIX + summary))
         if marks is not None:
             marks.append(0)
+    # 发出去、还等结果的工具调用：(发起它的 seq, 调用 id)。中断和崩溃都会让
+    # 它们永远等不到回复，而缺了配对的请求会被 API 拒掉。
+    pending: List[Tuple[int, str]] = []
+
+    def close(status: str = "") -> None:
+        """给还在等结果的调用补一条回复。
+
+        ``marks`` 记发起调用的那条 seq：合成出来的回复没有自己的事件，
+        压缩时才不会把它和调用切开。
+        """
+        for seq, call_id in pending:
+            messages.append(
+                Message("tool", _cancelled_result(status), tool_call_id=call_id)
+            )
+            if marks is not None:
+                marks.append(seq)
+        pending.clear()
+
     for event in events:
-        if event.seq <= cutoff or _inside(event.seq, skipped):
+        if event.seq <= cutoff:
             continue
         if event.type == "user":
+            close()
             messages.append(Message("user", event.content))
             if marks is not None:
                 marks.append(event.seq)
@@ -213,6 +239,8 @@ def fold(
             )
             if marks is not None:
                 marks.append(event.seq)
+            pending.clear()
+            pending.extend((event.seq, call.id) for call in event.tool_calls)
         elif event.type == "tool":
             text = event.content
             if event.blob:
@@ -220,35 +248,38 @@ def fold(
             messages.append(Message("tool", text, tool_call_id=event.tool_call_id))
             if marks is not None:
                 marks.append(event.seq)
+            # 这条调用已经有结果，不用再补。
+            pending[:] = [item for item in pending if item[1] != event.tool_call_id]
+        elif event.type == "turn_end":
+            close(event.status or "")
+            if event.status == "aborted":
+                messages.append(Message("user", INTERRUPT_MARKER))
+                if marks is not None:
+                    marks.append(event.seq)
+    # 没有 turn_end 的残尾（进程被杀）也要收：新的一轮不该带着半截调用发出。
+    close()
     return _drop_unpaired(messages)
 
 
-def _failed_ranges(events: List[Event]) -> List[tuple]:
-    """``turn_end`` 标了 aborted / error 的轮次：(起始 seq, 结束 seq)。"""
-    ranges: List[tuple] = []
-    start = 0
-    for event in events:
-        if event.type == "user":
-            start = event.seq
-        elif event.type == "turn_end":
-            if start and event.status and event.status != "ok":
-                ranges.append((start, event.seq))
-            start = 0
-    return ranges
+def _cancelled_result(status: str) -> str:
+    """补在没等到结果的工具调用上的回复。
 
-
-def _inside(seq: int, ranges: List[tuple]) -> bool:
-    for start, end in ranges:
-        if start <= seq <= end:
-            return True
-    return False
+    分开写中断与出错：被中断的那次多半要接着做，出错的那次多半要重试，
+    模型看到的理由不一样，下一步才不一样。
+    """
+    if status == "aborted":
+        return "error: 这次调用被用户中断，没有结果"
+    if status == "error":
+        return "error: 这一轮出错，这次调用没有结果"
+    return "error: 这次调用没有结果"
 
 
 def _drop_unpaired(messages: List[Message]) -> List[Message]:
     """丢掉配对不全的 tool_calls 与其回复。
 
-    中断、崩溃都可能让 assistant 的调用没有回复；原样送进 API 会被 400
-    拒掉，所以读侧统一清理：整组一起丢，不留下半截。
+    ``fold`` 已经给没等到结果的调用补了回复，这里只兜底残破的日志：压缩把调用
+    那一侧切掉了，或者回复比调用先出现。原样送进 API 会被 400 拒掉，所以整组
+    一起丢，不留下半截。
     """
     out: List[Message] = []
     index = 0

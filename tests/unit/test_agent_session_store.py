@@ -23,7 +23,12 @@ from lls.ai.sessions import (
     fold,
     last_turns,
 )
-from lls.ai.sessions.events import Event, MISSING_BLOB, SUMMARY_PREFIX
+from lls.ai.sessions.events import (
+    INTERRUPT_MARKER,
+    MISSING_BLOB,
+    SUMMARY_PREFIX,
+    Event,
+)
 
 store_module = importlib.import_module("lls.ai.sessions.store")
 
@@ -142,7 +147,8 @@ def test_fold_builds_messages_and_keeps_tool_pairs(tmp_path: Path) -> None:
     session.close()
 
 
-def test_fold_drops_a_tool_call_that_was_never_answered() -> None:
+def test_fold_answers_a_tool_call_that_was_never_answered() -> None:
+    """中断、崩溃都会留下没有回复的调用；补一条，别让请求缺配对。"""
     events = [
         Event(type="user", seq=1, content="任务"),
         Event(
@@ -152,7 +158,37 @@ def test_fold_drops_a_tool_call_that_was_never_answered() -> None:
         ),
     ]
 
-    assert fold(events) == [Message("user", "任务")]
+    messages = fold(events)
+    assert [message.role for message in messages] == ["user", "assistant", "tool"]
+    assert messages[-1].tool_call_id == "c1"
+    assert messages[-1].content.startswith("error:")
+
+
+def test_fold_keeps_an_aborted_turn_and_marks_it(tmp_path: Path) -> None:
+    """被中断的一轮留在上下文里：模型得知道上一轮停在哪儿、没做完。"""
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    session.append_user("任务")
+    session.append_assistant("", (ToolCall("c1", "shell", "{}"),))
+    session.append_turn_end("aborted", "已中断")
+
+    messages = session.history()
+    assert [message.role for message in messages] == ["user", "assistant", "tool", "user"]
+    assert messages[2].tool_call_id == "c1"
+    assert messages[2].content == "error: 这次调用被用户中断，没有结果"
+    assert messages[3].content == INTERRUPT_MARKER
+    session.close()
+
+
+def test_fold_keeps_a_failed_turn_without_a_marker(tmp_path: Path) -> None:
+    """出错的一轮也留下：答复可能没写出来，但用户看见的任务不该消失。"""
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    session.append_user("任务")
+    session.append_turn_end("error", "error: boom")
+
+    assert session.history() == [Message("user", "任务")]
+    session.close()
 
 
 def test_log_entries_come_from_user_and_turn_end(tmp_path: Path) -> None:

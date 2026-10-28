@@ -7,6 +7,7 @@ import json
 
 from lls.ai import Chunk, ChunkKind, ConfigError
 from lls.ai.sessions import SessionBusy, SessionStore
+from lls.ai.sessions.events import INTERRUPT_MARKER
 from lls.commands.builtin import agent as agent_cmd
 from lls.commands.builtin import sessions as sessions_cmd
 
@@ -152,7 +153,7 @@ def test_the_transcript_survives_into_the_next_process(monkeypatch, tmp_path) ->
     assert "答复一" in (sent[2].content or "")
 
 
-def test_an_aborted_turn_is_recorded_but_not_sent(monkeypatch, tmp_path) -> None:
+def test_an_aborted_turn_stays_in_context_marked_as_interrupted(monkeypatch, tmp_path) -> None:
     keeper = SessionStore(root=tmp_path)
     provider = ScriptedProvider([_text("答复一"), _text("答复二")])
     services = FakeServices(["任务一", "任务二", "/exit"])
@@ -171,8 +172,53 @@ def test_an_aborted_turn_is_recorded_but_not_sent(monkeypatch, tmp_path) -> None
     session = keeper.current()
     statuses = [event.status for event in session.events() if event.type == "turn_end"]
     assert statuses == ["aborted", "ok"]
+    # 中断的一轮留在上下文里，后面跟一行标记：下一轮不会当它没发生过。
     sent = provider.requests[-1]
-    assert all("任务一" not in (message.content or "") for message in sent if message.role == "user")
+    user_texts = [message.content or "" for message in sent if message.role == "user"]
+    assert any(text.startswith("任务一") for text in user_texts)
+    assert INTERRUPT_MARKER in user_texts
+    session.close()
+
+
+def test_an_interrupted_reply_keeps_what_was_already_shown(monkeypatch, tmp_path) -> None:
+    """中断时正文还没收完：屏幕上已经显示的，上下文里也要有。"""
+    keeper = SessionStore(root=tmp_path)
+
+    class SlowProvider(ScriptedProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.sent = 0
+
+        async def chat(self, model, messages, *, tools=None, **kwargs):
+            self.requests.append(list(messages))
+            for piece in ("先看", "一下", "终端"):
+                await asyncio.sleep(0)
+                self.sent += 1
+                yield Chunk(ChunkKind.TEXT, piece)
+            yield Chunk(ChunkKind.DONE)
+
+    provider = SlowProvider()
+    services = FakeServices(["任务", "任务二", "/exit"])
+
+    async def read_chars(timeout=None):
+        await asyncio.sleep(0)
+        # 第一轮吐了两段就中断；第二轮（任务二）正常跑完。
+        interrupted = len(services.prompts) == 1 and provider.sent >= 2
+        return b"\x03" if interrupted else b""
+
+    services.read_chars = read_chars
+    monkeypatch.setattr(agent_cmd, "default_catalog", lambda: FakeCatalog(provider))
+    monkeypatch.setattr(agent_cmd, "store", lambda: keeper)
+    asyncio.run(agent_cmd.cmd_agent(services, None))
+
+    session = keeper.current()
+    partial = [event.content for event in session.events() if event.type == "assistant"]
+    assert partial and "先看一下终端".startswith(partial[0]) and partial[0]
+    # 下一轮的请求里带着这段正文，紧接着才是中断标记。
+    sent = provider.requests[-1]
+    texts = [message.content or "" for message in sent]
+    assert partial[0] in texts
+    assert texts.index(partial[0]) < texts.index(INTERRUPT_MARKER)
     session.close()
 
 

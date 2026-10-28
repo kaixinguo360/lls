@@ -140,6 +140,16 @@ class Agent:
         # 增量落盘，崩溃或中断时也不会丢掉已经发生的部分。
         self._on_message = on_message
         self._usage: dict | None = None
+        self._partial = ""
+
+    @property
+    def partial_text(self) -> str:
+        """本轮已经收到的正文。
+
+        中断时正文还没凑完，也就没进会话；调用方拿它补一条 assistant，
+        免得屏幕上已经显示的答复在上下文里凭空消失。
+        """
+        return self._partial
 
     # ---- 公开 ----
 
@@ -159,6 +169,8 @@ class Agent:
                 step, self._request(conversation), self._tools_for_request()
             )
             self._push(conversation, self._assistant(text, calls), self._usage)
+            # 这一轮的正文已经进会话了，中断时别再补一遍。
+            self._partial = ""
 
             if not calls:
                 # 没有工具调用 = 正常结束；文本就是最终答复（空文本也照常结束）。
@@ -207,6 +219,7 @@ class Agent:
     ) -> tuple[str, list[ToolCall]]:
         """做一次流式请求，收集正文、工具调用与用量。"""
         self._usage = None
+        self._partial = ""
         text_parts: list[str] = []
         calls: list[ToolCall] = []
 
@@ -219,6 +232,7 @@ class Agent:
             ):
                 if chunk.kind is ChunkKind.TEXT:
                     text_parts.append(chunk.text)
+                    self._partial += chunk.text
                     self._emit(
                         AgentEvent(AgentEventKind.TEXT, step=step, text=chunk.text)
                     )

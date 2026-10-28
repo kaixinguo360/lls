@@ -756,9 +756,11 @@ class _Session:
         try:
             result = await agent.run(message, window.messages)
         except _SessionEnded:
+            self._keep_partial(agent)
             self._finish_turn("aborted", "子进程退出", window, None)
             raise
         except _Aborted as e:
+            self._keep_partial(agent)
             self._finish_turn("aborted", str(e), window, None)
             self._record(task, "", str(e))
             return
@@ -775,6 +777,15 @@ class _Session:
         self._record(task, summary)
 
     # ---- 记录 ----
+
+    def _keep_partial(self, agent: Any) -> None:
+        """把中断前已经吐出来的正文补进会话。
+
+        屏幕上已经显示的答复，上下文里也该有：不然下一轮只能从头再来一遍。
+        """
+        text = agent.partial_text
+        if self._session is not None and text:
+            self._session.append_assistant(text)
 
     def _prepare_window(self, pending: Any) -> Any:
         """本轮要带上的上下文：按预算从事件里裁出来。
