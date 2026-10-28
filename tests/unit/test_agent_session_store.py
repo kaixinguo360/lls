@@ -650,6 +650,42 @@ def test_export_reads_without_touching_the_disk(tmp_path: Path) -> None:
     assert events_path.stat().st_mtime_ns == before
 
 
+def test_the_markdown_export_separates_the_task_from_its_screen(
+    tmp_path: Path,
+) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    session.append_user("没画面的任务")
+    session.append_assistant("好的")
+    snapshot = session.append_screen("$ ls\nfile1")
+    session.append_user("看看目录", screen=snapshot.seq)
+    session.append_assistant("有俩文件")
+
+    markdown = keeper.export(session.id, "md")
+
+    # 任务印原文：拼好的那条消息带 <terminal_state> / <task> 包裹，是协议。
+    assert "## 任务\n\n看看目录\n" in markdown
+    assert "<terminal_state>" not in markdown and "<task>" not in markdown
+    assert "## 画面\n\n```\n$ ls\nfile1\n```" in markdown
+    # 没有画面的那一轮不空写一节。
+    assert markdown.count("## 画面") == 1
+    session.close()
+
+
+def test_the_markdown_export_omits_a_screen_it_cannot_read(
+    tmp_path: Path,
+) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    session.append_user("任务", screen=999)
+
+    markdown = keeper.export(session.id, "md")
+
+    assert "## 任务\n\n任务\n" in markdown
+    assert "## 画面" not in markdown
+    session.close()
+
+
 def test_export_reads_a_session_another_process_has_open(tmp_path: Path) -> None:
     owner = SessionStore(root=tmp_path)
     session = owner.create("stub", "m")
