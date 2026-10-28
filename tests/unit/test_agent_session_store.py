@@ -297,6 +297,19 @@ def test_the_context_starts_after_the_last_compaction(tmp_path: Path) -> None:
     session.close()
 
 
+def test_looking_back_from_the_end_does_not_return_the_first_event(
+    tmp_path: Path,
+) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+
+    # 尾部倒读找不到目标时会把整份日志读完，第一条是 session_start。
+    assert session.last_turn_end() is None
+    assert session.usage() is None
+    assert session.compacted_upto() == 0
+    session.close()
+
+
 # ---- 大块输出落 blobs ----
 
 
@@ -544,13 +557,57 @@ def test_fork_renumbers_the_fields_that_point_at_other_events(tmp_path: Path) ->
     compact = next(event for event in events if event.type == "compact")
     snapshot = next(event for event in events if event.type == "screen")
     task = events[-1]
-    # 摘要覆盖到它自己：新会话里它前面没有别的行。
-    assert compact.upto_seq == compact.seq
+    # 摘要覆盖到最后一条被压掉的事件（旧答复），不是它自己。
+    assert compact.upto_seq == compact.seq - 1
     # 画面与任务跟着改号，否则指回源会话的编号。
     assert task.type == "user" and task.screen == snapshot.seq
     assert forked.history()[-1].content == task_message("新任务", "$ echo hi\nhi")
     source.close()
     forked.close()
+
+
+def test_fork_keeps_the_turns_a_compaction_left_visible(tmp_path: Path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    source = keeper.create("stub", "m")
+    source.append_user("旧任务")
+    source.append_assistant("旧答复")
+    source.append_turn_end("ok")
+    upto = source.meta.last_seq - 1
+    source.append_user("新任务")
+    source.append_assistant("新答复")
+    source.append_turn_end("ok")
+    source.append_compact("旧任务已经做完，结论是 X", upto)
+    snapshot = source.append_screen("$ pwd\n/tmp")
+    source.append_user("再问一句", screen=snapshot.seq)
+    source.append_turn_end("ok")
+
+    forked = keeper.fork(source.id)
+
+    # 摘要之后的轮次还在：新会话里的 cutoff 不能一路盖到摘要自己。
+    assert forked.history() == source.history()
+    assert forked.meta.turns == source.meta.turns
+    assert forked.last_turn_end() is not None
+    source.close()
+    forked.close()
+
+
+def test_a_compacted_away_interruption_leaves_no_marker(tmp_path: Path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    session.append_user("旧任务")
+    session.append_assistant("做了一半")
+    session.append_turn_end("aborted")
+    upto = session.meta.last_seq - 1
+    session.append_user("新任务")
+    session.append_turn_end("ok")
+    session.append_compact("旧任务做到一半被打断", upto)
+
+    contents = [message.content or "" for message in session.history()]
+
+    # 那一轮的收尾落在 cutoff 之后，但它的任务与答复已经被压掉了。
+    assert INTERRUPT_MARKER not in contents
+    assert "新任务" in contents
+    session.close()
 
 
 def test_fit_counts_the_pending_task_against_the_budget() -> None:

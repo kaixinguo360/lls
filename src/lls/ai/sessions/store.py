@@ -406,7 +406,9 @@ class Session:
     def compacted_upto(self) -> int:
         """最近一次压缩覆盖到哪一条 seq。"""
         tail = self._from_end(lambda event: event.type == "compact")
-        return tail[0].upto_seq if tail else 0
+        if tail and tail[0].type == "compact":
+            return tail[0].upto_seq
+        return 0
 
     def window(self, budget: int) -> Window:
         return fit(self.history(), budget)
@@ -416,12 +418,20 @@ class Session:
         tail = self._from_end(
             lambda event: event.type == "assistant" and bool(event.usage)
         )
-        return dict(tail[0].usage or {}) if tail else None
+        if tail and tail[0].type == "assistant":
+            return dict(tail[0].usage or {})
+        return None
 
     def last_turn_end(self) -> Optional[Event]:
-        """最近一条收尾记录。"""
+        """最近一条收尾记录。
+
+        ``_from_end`` 找不到时会把整份日志倒着读完，它的第一条是
+        ``session_start`` —— 不是收尾记录，不能拿 ``note`` 当「最近一轮」。
+        """
         tail = self._from_end(lambda event: event.type == "turn_end")
-        return tail[0] if tail else None
+        if tail and tail[0].type == "turn_end":
+            return tail[0]
+        return None
 
     def transcript(self) -> str:
         """Markdown 导出：只读，不写盘。"""
@@ -702,7 +712,8 @@ class SessionStore:
             event
             for event in source.events()
             if event.seq <= cutoff
-            and event.type in ("user", "screen", "assistant", "tool", "compact")
+            and event.type
+            in ("user", "screen", "assistant", "tool", "turn_end", "compact")
         ]
         new = self.create(
             source.meta.provider_id, source.meta.model_id, parent_id=source.id
@@ -721,28 +732,34 @@ class SessionStore:
             except OSError as e:
                 self.last_error = "{}: {}".format(blob, e)
         # seq 在新会话里重排，引用它们的字段跟着改号：画面的 seq 指回源会话
-        # 就是空号，摘要覆盖到的位置在新会话里也不一样。
-        screens: Dict[int, int] = {}
+        # 就是空号，摘要覆盖到的位置在新会话里也不一样。摘要的 cutoff 取它
+        # 覆盖到的那些事件在新会话里的最后一条：直接写它自己的 seq 会把压缩
+        # 之后、它之前那些留下来的轮次一起丢掉。
+        moved: Dict[int, int] = {}
         for event in keep:
             upto = event.upto_seq
             if event.type == "compact":
-                upto = new.meta.last_seq + 1
+                covered = [
+                    new_seq for old, new_seq in moved.items() if old <= event.upto_seq
+                ]
+                upto = max(covered) if covered else new.meta.last_seq
             copied = new.append(
                 event.type,
                 content=event.content,
                 tool_calls=event.tool_calls,
                 tool_call_id=event.tool_call_id,
                 status=event.status,
+                note=event.note,
                 model=event.model,
                 usage=event.usage,
                 source=event.source,
-                screen=screens.get(event.screen, 0),
+                screen=moved.get(event.screen, 0),
                 blob=event.blob,
                 size=event.size,
                 upto_seq=upto,
             )
-            if event.type == "screen" and copied is not None:
-                screens[event.seq] = copied.seq
+            if copied is not None:
+                moved[event.seq] = copied.seq
         return new
 
     def export(self, spec: Optional[str], fmt: str = "md") -> str:

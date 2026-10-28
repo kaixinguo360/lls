@@ -231,15 +231,21 @@ def fold(
                 marks.append(seq)
         pending.clear()
 
+    # 压缩会把一轮的消息整段带走，它的 ``turn_end`` 却可能落在 cutoff 之后
+    # （收尾不是消息，marks 指不到它）。这之前没有见过任何消息时，这条收尾
+    # 属于已经压掉的那一轮，不能再把「被中断」的标记补到摘要后面。
+    started = False
     for event in events:
         if event.seq <= cutoff:
             continue
         if event.type == "user":
             close()
+            started = True
             messages.append(Message("user", _turn_text(event, screens, blobs)))
             if marks is not None:
                 marks.append(event.seq)
         elif event.type == "assistant":
+            started = True
             messages.append(
                 Message(
                     "assistant",
@@ -252,6 +258,7 @@ def fold(
             pending.clear()
             pending.extend((event.seq, call.id) for call in event.tool_calls)
         elif event.type == "tool":
+            started = True
             text = event.content
             if event.blob:
                 text = (blobs(event) if blobs is not None else None) or MISSING_BLOB
@@ -261,6 +268,8 @@ def fold(
             # 这条调用已经有结果，不用再补。
             pending[:] = [item for item in pending if item[1] != event.tool_call_id]
         elif event.type == "turn_end":
+            if not started:
+                continue
             close(event.status or "")
             if event.status == "aborted":
                 messages.append(Message("user", INTERRUPT_MARKER))
