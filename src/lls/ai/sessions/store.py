@@ -433,65 +433,6 @@ class Session:
             return tail[0]
         return None
 
-    def transcript(self) -> str:
-        """Markdown 导出：只读，不写盘。
-
-        任务与画面分开写。``fold`` 给每条 ``user`` 拼的是请求里的那一条，
-        带着 ``<terminal_state>`` 与 ``<task>`` 包裹；直接印出来读到的是
-        协议而非对话。这里回到同一段事件：任务印原文，画面单独一节，没
-        留下画面就省掉这一节。
-        """
-        events = self.recent()
-        marks: List[int] = []
-        messages = fold(events, self._read_blob, marks)
-        tasks = {event.seq: event for event in events if event.type == "user"}
-        screens = {event.seq: event for event in events if event.type == "screen"}
-        lines = [
-            "# 会话 {}".format(self.id),
-            "",
-            "- 模型：{}".format(self.model or "-"),
-            "- 标题：{}".format(self.meta.title or "-"),
-            "- 轮数：{}".format(self.meta.turns),
-            "",
-        ]
-        for message, seq in zip(messages, marks):
-            if message.role == "user":
-                event = tasks.get(seq)
-                if event is None:
-                    # 摘要与「被中断」标记没有自己的任务事件，照原样印。
-                    lines.extend(["## 任务", "", message.content or "", ""])
-                    continue
-                lines.extend(self._screen_section(screens.get(event.screen)))
-                lines.extend(["## 任务", "", event.content or "", ""])
-            elif message.role == "assistant":
-                if message.content:
-                    lines.extend(["## 答复", "", message.content, ""])
-                for call in message.tool_calls:
-                    lines.extend(
-                        [
-                            "## 调用 `{}`".format(call.name),
-                            "",
-                            "```json",
-                            call.arguments or "{}",
-                            "```",
-                            "",
-                        ]
-                    )
-            elif message.role == "tool":
-                lines.extend(["### 结果", "", "```", message.content or "", "```", ""])
-        return "\n".join(lines)
-
-    def _screen_section(self, snapshot: Optional[Event]) -> List[str]:
-        """``transcript`` 里的「画面」一节；取不到正文就整节省掉。"""
-        if snapshot is None:
-            return []
-        text = snapshot.content
-        if snapshot.blob:
-            text = self._read_blob(snapshot) or ""
-        if not text.strip():
-            return []
-        return ["## 画面", "", "```", text, "```", ""]
-
     def jsonl(self) -> str:
         return "".join(encode(event) + "\n" for event in self.events())
 
@@ -790,10 +731,9 @@ class SessionStore:
                 moved[event.seq] = copied.seq
         return new
 
-    def export(self, spec: Optional[str], fmt: str = "md") -> str:
-        """导出 transcript：只读打开，因此会话正被 agent 占着也能导。"""
-        session = self.read(spec)
-        return session.jsonl() if fmt == "jsonl" else session.transcript()
+    def export(self, spec: Optional[str]) -> str:
+        """导出事件流：只读打开，因此会话正被 agent 占着也能导。"""
+        return self.read(spec).jsonl()
 
     def read(self, spec: Optional[str] = None) -> Session:
         """只读打开：不建锁、不建写句柄，不修改磁盘上的任何东西。"""

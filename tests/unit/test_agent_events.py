@@ -346,7 +346,7 @@ def test_sessions_command_lists_and_exports(monkeypatch, tmp_path) -> None:
     asyncio.run(sessions_cmd.cmd_sessions(services, None))
     assert session.id in services.messages[-1]
 
-    asyncio.run(sessions_cmd.cmd_export(services, "{} --jsonl".format(session.id)))
+    asyncio.run(sessions_cmd.cmd_export(services, session.id))
     exported = [json.loads(line) for line in services.messages[-1].splitlines()]
     assert [event["type"] for event in exported][-2:] == ["user", "assistant"]
     assert exported[-1]["content"] == "答复"

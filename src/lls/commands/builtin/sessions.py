@@ -54,20 +54,18 @@ async def cmd_sessions(s: Services, args: str | None) -> CommandResult:
 
 @command("export", category="ai")
 async def cmd_export(s: Services, args: str | None) -> CommandResult:
-    """导出会话 transcript：export <id> [--md|--jsonl]"""
-    parts = (args or "").split()
-    fmt = "md"
+    """导出会话事件流：export <id>"""
     spec = None
-    for part in parts:
-        if part in ("--md", "--jsonl"):
-            fmt = part[2:]
-        elif part.startswith("--"):
+    for part in (args or "").split():
+        if part.startswith("--"):
             await s.show_message("未知参数 {}".format(part))
             return CommandResult()
-        elif spec is None:
-            spec = part
+        if spec is not None:
+            await s.show_message("多余的参数 {}".format(part))
+            return CommandResult()
+        spec = part
     try:
-        text = store().export(spec, fmt)
+        text = store().export(spec)
     except SessionError as e:
         await s.show_message("error: {}".format(e))
         return CommandResult()
