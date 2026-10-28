@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from .config import AIConfig, ConfigError, load, resolve_config_path
+from ..config import ConfigError, load_ai, resolve_config_path
+from .config import AIConfig
 from .provider import Provider
 from .registry import create_provider
 
@@ -81,7 +82,7 @@ class Catalog:
 
 @lru_cache(maxsize=4)
 def _catalog_for(path: str) -> Catalog:
-    return Catalog(load(path))
+    return Catalog(load_ai(path))
 
 
 def default_catalog() -> Catalog:

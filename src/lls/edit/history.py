@@ -20,20 +20,22 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from lls.config import DEFAULT_HISTORY_MAX_BYTES, DEFAULT_HISTORY_MAX_ENTRIES, load
+
 __all__ = [
-    "DEFAULT_LIMIT",
+    "DEFAULT_MAX_ENTRIES",
     "HistoryStore",
     "default_history_dir",
     "forget_session",
-    "history_from_env",
+    "history_from_config",
     "session_dir_name",
 ]
 
 #: 载入进 ↑ 的条数上限：再多也翻不到，白占内存。
-DEFAULT_LIMIT = 200
+DEFAULT_MAX_ENTRIES = DEFAULT_HISTORY_MAX_ENTRIES
 
 #: 单个历史文件超过它就顺手压缩（只在载入时做，不挡输入）。
-DEFAULT_MAX_BYTES = 128 * 1024
+DEFAULT_MAX_BYTES = DEFAULT_HISTORY_MAX_BYTES
 
 #: 不跟着会话走的那一份：本机敲过的东西，跨进程共用。
 _GLOBAL = "global"
@@ -45,14 +47,8 @@ _BAD_CHARS = re.compile(r"[^A-Za-z0-9_.-]")
 
 
 def default_history_dir() -> Path:
-    """历史目录：``$LLS_HISTORY_HOME`` > ``$LLS_SESSIONS_HOME`` > ``~/.local``。
-
-    默认与 ``default_sessions_dir()`` 同一个根，只是把末段换成 ``history``；
-    想单独挪走历史时用 ``LLS_HISTORY_HOME``。
-    """
-    base = os.environ.get("LLS_HISTORY_HOME") or os.environ.get("LLS_SESSIONS_HOME")
-    root = Path(base).expanduser() if base else Path.home() / ".local" / "lls"
-    return root / "history"
+    """历史目录：配置里的 ``paths.history_dir``（默认 ``~/.local/lls/history``）。"""
+    return load().paths.history_dir
 
 
 def _safe(name: str) -> str:
@@ -74,22 +70,17 @@ def forget_session(session_id: str, root: Path | None = None) -> None:
     shutil.rmtree(str(base / session_dir_name(session_id)), ignore_errors=True)
 
 
-def history_from_env(scope_of: Callable[[], str] | None = None) -> "HistoryStore | None":
-    """按环境变量决定要不要落盘：``LLS_HISTORY=off`` 关掉，默认开。"""
-    if os.environ.get("LLS_HISTORY", "").strip().lower() in {"0", "off", "no", "false"}:
+def history_from_config(scope_of: Callable[[], str] | None = None) -> "HistoryStore | None":
+    """按配置决定要不要落盘，并把容量参数交给 :class:`HistoryStore`。"""
+    config = load()
+    if not config.input_history.enabled:
         return None
     return HistoryStore(
-        default_history_dir(),
-        limit=_env_int("LLS_HISTORY_LIMIT", DEFAULT_LIMIT),
+        config.paths.history_dir,
+        max_entries=config.input_history.max_entries,
+        max_bytes=config.input_history.max_bytes,
         scope_of=scope_of,
     )
-
-
-def _env_int(name: str, fallback: int) -> int:
-    try:
-        return max(1, int(os.environ[name]))
-    except (KeyError, ValueError):
-        return fallback
 
 
 class HistoryStore:
@@ -99,12 +90,12 @@ class HistoryStore:
         self,
         root: Path,
         *,
-        limit: int = DEFAULT_LIMIT,
+        max_entries: int = DEFAULT_MAX_ENTRIES,
         max_bytes: int = DEFAULT_MAX_BYTES,
         scope_of: Callable[[], str] | None = None,
     ) -> None:
         self._root = Path(root)
-        self._limit = limit
+        self._max_entries = max_entries
         self._max_bytes = max_bytes
         self._scope_of = scope_of
         # 每个文件最后写进去的一条：去重时省掉一次读盘。
@@ -155,11 +146,11 @@ class HistoryStore:
             self._unterminated.discard(path)
         elif entries or _size(path):
             self._unterminated.add(path)
-        values = entries[-self._limit :]
+        values = entries[-self._max_entries :]
         if not values:
             return []
         self._last[path] = values[-1]
-        if len(entries) > self._limit or _size(path) > self._max_bytes:
+        if len(entries) > self._max_entries or _size(path) > self._max_bytes:
             # 只在冷路径上压缩：不挡输入，也不会越攒越大。
             self._compact(path, values)
         return values

@@ -6,8 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lls.ai import ConfigError, load
-from lls.ai.config import DEFAULT_FILENAME, resolve_config_path
+from lls.config import ConfigError, DEFAULT_FILENAME, load_ai as load, resolve_config_path
 
 VALID = """\
 ai:
@@ -78,7 +77,7 @@ def test_provider_defaults(tmp_path: Path) -> None:
 
 
 def test_absent_ai_section_yields_empty_config(tmp_path: Path) -> None:
-    config = load(_write(tmp_path, "other: 1\n"))
+    config = load(_write(tmp_path, "other: 1\n"), emit_warnings=False)
 
     assert config.providers == {}
     assert config.default_model is None

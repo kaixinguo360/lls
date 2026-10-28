@@ -413,14 +413,16 @@ def test_agent_continues_from_disk_after_a_restart(monkeypatch, tmp_path) -> Non
     assert reopened.current().id == session_id
 
 
-def test_default_sessions_dir_follows_the_environment(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("LLS_SESSIONS_HOME", str(tmp_path))
+def test_default_sessions_dir_follows_the_config(monkeypatch, tmp_path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("paths:\n  root: {}\n".format(tmp_path), encoding="utf-8")
+    monkeypatch.setenv("LLS_CONFIG", str(config))
 
     assert default_sessions_dir() == tmp_path / "sessions"
 
 
 def test_default_sessions_dir_sits_under_dot_local(monkeypatch, tmp_path) -> None:
-    monkeypatch.delenv("LLS_SESSIONS_HOME", raising=False)
+    monkeypatch.setenv("LLS_CONFIG", str(tmp_path / "missing.yaml"))
     # Path.home() 在 Windows 上不读 HOME，直接把它指到临时目录才能跨平台成立。
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 

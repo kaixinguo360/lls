@@ -10,7 +10,7 @@ import asyncio
 import os
 import sys
 
-from .edit import history_from_env
+from .edit import history_from_config
 from .handlers import CommandHandler, PassthroughHandler
 from .session.engine import Engine
 from .session.services import Handler
@@ -67,7 +67,7 @@ def run_interactive(command: list[str]) -> int:
         screen,
         build_handlers(),
         "default",
-        history=history_from_env(_current_session_id),
+        history=history_from_config(_current_session_id),
     )
 
     try:

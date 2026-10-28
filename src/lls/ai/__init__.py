@@ -18,7 +18,8 @@ from .agent import (
     trim_turns,
 )
 from .catalog import Catalog, default_catalog, parse_model_spec
-from .config import AIConfig, ConfigError, load, resolve_config_path
+from ..config import ConfigError, load_ai, resolve_config_path
+from .config import AIConfig
 from .conversation import Conversation
 from .provider import Provider
 from .registry import available_types, create_provider, register_type
@@ -46,9 +47,13 @@ __all__ = [
     "create_provider",
     "default_catalog",
     "load",
+    "load_ai",
     "parse_model_spec",
     "providers",
     "register_type",
     "resolve_config_path",
     "trim_turns",
 ]
+
+# 兼容旧调用：lls.ai.load 现在等同严格解析 AI 段。
+load = load_ai

@@ -7,7 +7,9 @@ import os
 import stat
 from pathlib import Path
 
-from lls.edit import HistoryStore, forget_session, history_from_env
+import pytest
+
+from lls.edit import HistoryStore, forget_session, history_from_config
 from lls.edit.buffer import LineEditor
 from lls.session.engine import Engine
 
@@ -87,7 +89,7 @@ def test_half_written_tail_is_ignored(tmp_path: Path) -> None:
 
 
 def test_load_keeps_only_the_tail(tmp_path: Path) -> None:
-    store = HistoryStore(tmp_path, limit=3)
+    store = HistoryStore(tmp_path, max_entries=3)
     for text in ("a", "b", "c", "d", "e"):
         store.append("cmd", text)
 
@@ -96,7 +98,7 @@ def test_load_keeps_only_the_tail(tmp_path: Path) -> None:
 
 def test_oversized_file_is_compacted_on_load(tmp_path: Path) -> None:
     """载入时顺手压缩：文件不会只增不减，且压缩后还能继续追加。"""
-    store = HistoryStore(tmp_path, limit=2)
+    store = HistoryStore(tmp_path, max_entries=2)
     path = store.path_for("cmd")
     _write(path, *("cmd-%d" % i for i in range(50)))
 
@@ -180,36 +182,52 @@ def test_forget_session_removes_only_that_session(tmp_path: Path) -> None:
     assert (tmp_path / "session-s-2").exists()
 
 
-# ---- 环境变量开关 ----
+# ---- 配置开关 ----
+
+def _configure(monkeypatch, tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "config.yaml"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("LLS_CONFIG", str(path))
+    return path
+
 
 def test_switch_off_disables_store(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("LLS_HISTORY", "off")
-    monkeypatch.setenv("LLS_HISTORY_HOME", str(tmp_path))
+    _configure(
+        monkeypatch,
+        tmp_path,
+        "paths:\n  root: {}\ninput_history:\n  enabled: false\n".format(tmp_path),
+    )
 
-    assert history_from_env() is None
+    assert history_from_config() is None
 
 
 def test_enabled_by_default_and_reads_limits(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.delenv("LLS_HISTORY", raising=False)
-    monkeypatch.setenv("LLS_HISTORY_HOME", str(tmp_path))
-    monkeypatch.setenv("LLS_HISTORY_LIMIT", "7")
+    _configure(
+        monkeypatch,
+        tmp_path,
+        "paths:\n  root: {}\ninput_history:\n  max_entries: 7\n".format(tmp_path),
+    )
 
-    store = history_from_env()
+    store = history_from_config()
 
     assert store is not None
     store.append("cmd", "ls")
     assert (tmp_path / "history" / "global" / "cmd.jsonl").exists()
-    assert store._limit == 7
+    assert store._max_entries == 7
 
 
 def test_bad_limit_falls_back(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("LLS_HISTORY_LIMIT", "not-a-number")
-    monkeypatch.setenv("LLS_HISTORY_HOME", str(tmp_path))
+    _configure(
+        monkeypatch,
+        tmp_path,
+        "paths:\n  root: {}\ninput_history:\n  max_entries: not-a-number\n".format(tmp_path),
+    )
 
-    store = history_from_env()
+    with pytest.warns(RuntimeWarning, match="input_history.max_entries"):
+        store = history_from_config()
 
     assert store is not None
-    assert store._limit == 200
+    assert store._max_entries == 200
 
 
 # ---- 引擎接线 ----

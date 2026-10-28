@@ -4,7 +4,7 @@
 字段。这样同一个模型可以并行多条会话，换模型也不必丢掉上下文。
 
 本模块只管「按 id 存取」与「一个会话一个文件」的落盘，不认识终端、不认识
-命令循环。磁盘布局（``$LLS_SESSIONS_HOME/sessions``，默认
+命令循环。磁盘布局（配置 ``state.sessions``，默认
 ``~/.local/lls/sessions``）::
 
     <id>.json    一条会话：provider/model、history、log、时间戳
@@ -66,13 +66,10 @@ def new_session_id() -> str:
 
 
 def default_sessions_dir() -> Path:
-    """会话目录：``$LLS_SESSIONS_HOME`` > ``~/.local``；会话在它下面的 ``sessions``。
+    """会话目录：配置里的 ``state.sessions``（默认 ``~/.local/lls/sessions``）。"""
+    from lls.config import load
 
-    与配置的 ``~/.config/lls`` 对称：路径短，一层就够。
-    """
-    base = os.environ.get("LLS_SESSIONS_HOME")
-    root = Path(base).expanduser() if base else Path.home() / ".local" / "lls"
-    return root / "sessions"
+    return load().paths.sessions_dir
 
 
 @dataclass

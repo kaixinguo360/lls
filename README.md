@@ -78,9 +78,8 @@ lls bash        # 指定命令
 执行中按 `Ctrl-C` 只中止当前任务，会话继续。任务没有步数上限，随时可以
 `Ctrl-C` 中止。
 
-会话有独立身份并落盘到 `$LLS_SESSIONS_HOME`（默认 `~/.local/lls`）下的
-`sessions/`，一条会话一个 JSON 文件。再次 `agent` 回到同一段上下文，
-`agent --new` 另开一条。
+会话有独立身份并落盘到配置的 `paths.sessions_dir`（默认 `~/.local/lls/sessions`），
+一条会话一个 JSON 文件。再次 `agent` 回到同一段上下文，`agent --new` 另开一条。
 
 `agent` 不弹确认，模型给出的输入直接写入子进程 —— 请在愿意让它动手的终端里
 使用。
@@ -93,19 +92,34 @@ lls bash        # 指定命令
 （`session-<id>/`，换会话换一份，会话删掉一起删）。文件权限 0600、目录
 0700。
 
-- `LLS_HISTORY=off`：不落盘，`↑` 只在本次进程里有效；
-- `LLS_HISTORY_HOME`：历史根目录，默认与 `LLS_SESSIONS_HOME` 同一个根下的
-  `history/`；
-- `LLS_HISTORY_LIMIT`：载入进 `↑` 的条数上限，默认 200。
+- `input_history.enabled: false`：不落盘，`↑` 只在本次进程里有效；
+- `paths.history_dir`：历史根目录，默认 `paths.root/history`；写绝对路径可单独挪走；
+- `input_history.max_entries`：载入进 `↑` 的条数上限，默认 200；
+- `input_history.max_bytes`：单个历史文件超过它就顺手压缩，默认 131072。
 
 写不进去（家目录只读、磁盘满）只是不再落盘，不影响继续输入。
 
 ## 配置
 
-`generate` 与 `agent` 从 YAML 读 provider 配置，路径优先级：
-`LLS_CONFIG` > `$XDG_CONFIG_HOME/lls/config.yaml` > `~/.config/lls/config.yaml`。
+配置路径优先级：`--config` > `LLS_CONFIG` > `$XDG_CONFIG_HOME/lls/config.yaml`
+> `~/.config/lls/config.yaml`。`--set KEY=VALUE` 可临时覆盖一项，如
+`--set input_history.max_entries=50`，走与 YAML 相同的解析路径。
+
+文件不存在或写坏时，除 AI 命令外都用内置默认值照常启动；未知键会告警，老键名
+（`state` / `history` / `history.limit`）会提示改成了哪个。`paths` 里的相对路径
+一律相对配置文件所在目录。`--doctor` 会打印实际生效的路径。
 
 ```yaml
+paths:
+  root: ~/.local/lls
+  sessions_dir: sessions      # 相对配置文件所在目录；也可写绝对路径
+  history_dir: history
+
+input_history:
+  enabled: true
+  max_entries: 200
+  max_bytes: 131072
+
 ai:
   default_model: openai/gpt-4o-mini
   providers:
