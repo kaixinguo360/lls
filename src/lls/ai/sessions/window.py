@@ -15,6 +15,8 @@ from .events import SUMMARY_PREFIX
 __all__ = [
     "BUDGET_RATIO",
     "CHARS_PER_TOKEN",
+    "COMPACT_TARGET_RATIO",
+    "COMPACT_TRIGGER_RATIO",
     "Window",
     "default_budget",
     "estimate_tokens",
@@ -29,6 +31,14 @@ CHARS_PER_TOKEN = 3.5
 
 #: 预算占 context window 的比例，留给输出与工具定义。
 BUDGET_RATIO = 0.6
+
+#: 压缩的触发水位：用到预算的这个比例就压，不等装不下才压。等到装不下，
+#: 窗口会一直贴着上限：每轮只丢掉刚超出的那一点，于是每轮都要再压一次。
+COMPACT_TRIGGER_RATIO = 0.85
+
+#: 压缩的目标水位：一次压到这里，而不是只压够这一轮。触发线与目标线之差，
+#: 就是两次压缩之间能攒下的上下文。
+COMPACT_TARGET_RATIO = 0.6
 
 #: 每条消息的固定开销（role、分隔符）。
 _MESSAGE_OVERHEAD = 4
@@ -143,6 +153,8 @@ def fit(messages: Sequence[Message], budget: int, pending: Sequence[Message] = (
         budget=budget,
         used=used,
         dropped=dropped,
+        # 头部是压缩摘要，说明这段历史被压过：``describe`` 据此说「已压缩」。
+        compacted=bool(head),
         keep_from=offset + len(messages) - kept_count,
         dropped_tokens=dropped_tokens,
         note=note,

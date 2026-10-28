@@ -16,9 +16,19 @@ from .store import (
     new_session_id,
     store,
 )
-from .window import Window, default_budget, estimate_tokens, fit, last_turns
+from .window import (
+    COMPACT_TARGET_RATIO,
+    COMPACT_TRIGGER_RATIO,
+    Window,
+    default_budget,
+    estimate_tokens,
+    fit,
+    last_turns,
+)
 
 __all__ = [
+    "COMPACT_TARGET_RATIO",
+    "COMPACT_TRIGGER_RATIO",
     "Event",
     "MAX_SESSIONS",
     "Session",

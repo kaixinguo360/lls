@@ -126,7 +126,8 @@ def test_a_completed_turn_writes_events_with_usage(monkeypatch, tmp_path) -> Non
     ]
     assert events[2].usage == {"prompt": 9, "completion": 4}
     assert events[3].status == "ok"
-    assert "tok" in events[3].note
+    # 常规一轮不写备注：条数与预算由 /context 算，耗时由前后两条 ts 相减。
+    assert events[3].note == ""
     assert session.meta.turns == 1
     session.close()
 
@@ -384,6 +385,110 @@ def test_every_round_can_compact_further_into_the_transcript(monkeypatch, tmp_pa
     assert cutoffs[-1] > cutoffs[0]
     # 压缩是累积的：历史里只剩一段摘要加上之后没被裁掉的部分。
     assert sum(1 for message in session.history() if message.role == "user") == 2
+    session.close()
+
+
+def _prefill_sized(keeper, turns: int = 17, chars: int = 700) -> object:
+    """造一段「装得下、但已经到水位」的历史：每轮约 610 tok。"""
+    session = keeper.create("stub", "m")
+    for index in range(turns):
+        session.append_user("旧任务 {}".format(index))
+        session.append_assistant("答" * chars)
+        session.append_turn_end("ok")
+    return session
+
+
+def test_the_watermark_compacts_before_anything_is_dropped(monkeypatch, tmp_path) -> None:
+    """到 85% 就压，不必等到装不下：等到装不下，窗口就永远贴着上限。
+
+    预算 12000（窗口 20000），水位 10200，目标 7200。
+    """
+    keeper = SessionStore(root=tmp_path)
+    _prefill_sized(keeper).close()
+    provider = ScriptedProvider([_text("摘要：旧任务都做完了"), _text("新答复")])
+
+    _run(
+        monkeypatch,
+        provider,
+        ["/exit"],
+        keeper,
+        args="新任务",
+        catalog=FakeCatalog(provider, 20000),
+    )
+
+    session = keeper.current()
+    compacts = [event for event in session.events() if event.type == "compact"]
+    assert len(compacts) == 1
+    # 压完停在目标水位以下，而不是刚好够这一次请求。
+    window = session.window(12000)
+    assert window.dropped == 0
+    assert window.used <= 7200
+    # 留下的还是最近几轮旧历史 + 这一轮，不是只留一条摘要。
+    assert sum(1 for m in session.history() if m.role == "user") >= 10
+    # 这一轮真压过，才在覆盖层留一句话。
+    assert "已压缩到" in session.last_turn_end().note
+    session.close()
+
+
+def test_the_next_turns_do_not_compact_again(monkeypatch, tmp_path) -> None:
+    """压过一次以后留出几轮空隙：否则每轮都要重摘一遍整段前缀。"""
+    keeper = SessionStore(root=tmp_path)
+    _prefill_sized(keeper).close()
+    provider = ScriptedProvider([_text("摘要：旧任务都做完了")] + [_text("新答复")] * 5)
+
+    _run(
+        monkeypatch,
+        provider,
+        ["任务1", "任务2", "任务3", "/exit"],
+        keeper,
+        catalog=FakeCatalog(provider, 20000),
+    )
+
+    session = keeper.current()
+    compacts = [event for event in session.events() if event.type == "compact"]
+    assert len(compacts) == 1
+    session.close()
+
+
+def test_a_later_compaction_merges_the_previous_summary(monkeypatch, tmp_path) -> None:
+    """第二次压缩以上一版摘要为底稿，不重摘整段前缀。"""
+
+    class Summarising(ScriptedProvider):
+        def __init__(self, rounds) -> None:
+            super().__init__(rounds)
+            self.summaries: list = []
+
+        async def chat(self, model, messages, **kwargs):
+            if any(
+                message.role == "system" and "压缩成要点" in (message.content or "")
+                for message in messages
+            ):
+                self.summaries.append(messages[-1].content or "")
+                yield Chunk(ChunkKind.TEXT, "摘要第{}版".format(len(self.summaries)))
+                yield Chunk(ChunkKind.DONE)
+                return
+            yield Chunk(ChunkKind.TEXT, "答" * 700)
+            yield Chunk(ChunkKind.DONE)
+
+    keeper = SessionStore(root=tmp_path)
+    _prefill_sized(keeper).close()
+    provider = Summarising([])
+
+    _run(
+        monkeypatch,
+        provider,
+        ["任务{}".format(index) for index in range(9)] + ["/exit"],
+        keeper,
+        catalog=FakeCatalog(provider, 20000),
+    )
+
+    session = keeper.current()
+    cutoffs = [event.upto_seq for event in session.events() if event.type == "compact"]
+    assert len(cutoffs) >= 2
+    assert cutoffs == sorted(set(cutoffs))  # 每次都比上一次更远，不原地打转
+    assert "上一版摘要：" not in provider.summaries[0]
+    assert "上一版摘要：" in provider.summaries[1]
+    assert "摘要第1版" in provider.summaries[1]
     session.close()
 
 

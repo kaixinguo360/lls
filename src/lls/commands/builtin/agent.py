@@ -38,12 +38,15 @@ from lls.ai import (
     default_catalog,
 )
 from lls.ai.sessions import (
+    COMPACT_TARGET_RATIO,
+    COMPACT_TRIGGER_RATIO,
     SessionError,
     default_budget,
     fit,
     last_turns,
     store,
 )
+from lls.ai.sessions.events import SUMMARY_PREFIX
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.session.services import Services
@@ -66,6 +69,9 @@ COMPACT_PROMPT = """\
 
 保留：已经确认的事实（路径、命令、结论）、做过的决定及理由、还没做完的
 事项与下一步；丢掉寒暄、重复的尝试和可以重新读到的原始输出。
+
+给了「上一版摘要」时，以它为底稿合并新内容：仍然成立的事实留着，被新对话
+推翻或已经做完的删掉，不要重复叙述，也不要另起一份并列的清单。
 
 用中文、不超过 400 字、不要标题，直接给内容。"""
 TASK_LINES = 80           # 每轮任务消息里带多少行终端画面
@@ -626,6 +632,7 @@ class _Session:
         self._tools = _build_tools(services, self._view, self._guard)
         self._log = session.log(LOG_ENTRIES) if session is not None else []
         self._window = None
+        self._compacted_now = False
 
     async def run(self, first_task: str | None) -> bool:
         """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。"""
@@ -726,15 +733,16 @@ class _Session:
         screen = self._view.snapshot(TASK_LINES)
         self._view.mark(screen)
         self._guard.reset()
+        self._compacted_now = False
 
         message = _task_message(task, screen)
-        window = self._prepare_window(message)
-        if await self._compact(window):
-            window = self._prepare_window(message)
+        pending = [Message("user", message)]
+        window = self._prepare_window(pending)
+        if await self._compact(window, pending):
+            window = self._prepare_window(pending)
         if self._session is not None:
             self._session.append_user(task, source="typed")
 
-        started = time.monotonic()
         painter = _Painter(self._s)
         agent = Agent(
             self._provider,
@@ -748,27 +756,27 @@ class _Session:
         try:
             result = await agent.run(message, window.messages)
         except _SessionEnded:
-            self._finish_turn("aborted", "子进程退出", started, window, None)
+            self._finish_turn("aborted", "子进程退出", window, None)
             raise
         except _Aborted as e:
-            self._finish_turn("aborted", str(e), started, window, None)
+            self._finish_turn("aborted", str(e), window, None)
             self._record(task, "", str(e))
             return
         except Exception as e:  # noqa: BLE001
             note = "error: {}".format(e)
-            self._finish_turn("error", note, started, window, None)
+            self._finish_turn("error", note, window, None)
             self._record(task, "", note)
             return
         finally:
             self._s.restore_context()
 
         summary = result.summary if result.summary.strip() else "（无文本答复）"
-        self._finish_turn("ok", "", started, window, result.usage)
+        self._finish_turn("ok", "", window, result.usage)
         self._record(task, summary)
 
     # ---- 记录 ----
 
-    def _prepare_window(self, message: str = "") -> Any:
+    def _prepare_window(self, pending: Any) -> Any:
         """本轮要带上的上下文：按预算从事件里裁出来。
 
         当前任务作为 ``pending`` 一起算预算：它还没进历史，但一定会随请求
@@ -777,41 +785,58 @@ class _Session:
         messages = self._session.history() if self._session is not None else []
         if HISTORY_TURNS > 0:
             messages = last_turns(messages, HISTORY_TURNS)
-        pending = [Message("user", message)] if message else []
         window = fit(messages, self._budget, pending)
         self._window = window
         return window
 
-    async def _compact(self, window: Any) -> bool:
-        """裁掉的部分先试一次摘要；失败就退回硬截断。
+    async def _compact(self, window: Any, pending: Any = ()) -> bool:
+        """到水位就把最旧的一段压成摘要，一次压回目标水位；失败退回硬截断。
 
-        ``keep_from`` 是输入里第一个被保留的下标，据此得到「裁到哪一条事件」；
-        摘要本身还在头部，不能拿消息条数相减来算，否则每次都会少裁一条，
-        第二次以后 cutoff 不前进，压缩就只剩第一次生效。
+        两种触发：这一轮已经装不下（``window.dropped``），或者用量到了
+        ``COMPACT_TRIGGER_RATIO``。压到哪儿由 ``COMPACT_TARGET_RATIO`` 决定，
+        不是「刚好够这一轮」—— 只补足一轮的话，窗口会一直贴着上限，
+        每轮都要重摘一遍整段前缀。
+
+        ``target.keep_from`` 是消息列表里第一个被保留的下标，据此换算成「裁到
+        哪一条事件」。摘要本身顶在头部，不能拿消息条数相减来算，否则每次都少
+        裁一条，第二次以后 cutoff 不前进，压缩就只剩第一次生效。
         """
-        if self._session is None or not window.dropped or window.budget <= 0:
+        if self._session is None or window.budget <= 0:
             return False
-        if window.dropped_tokens < MIN_COMPACT_TOKENS:
+        trigger = int(window.budget * COMPACT_TRIGGER_RATIO)
+        if not window.dropped and window.used < trigger:
             return False
         messages, marks = self._session.history_marks()
-        cut = window.keep_from
-        if cut <= 0 or cut > len(marks):
+        # 顶部那条摘要不参与压缩：它既不该算进被压掉的区间，也不能被自己覆盖。
+        pinned = 1 if messages and _is_summary(messages[0]) else 0
+        target = fit(messages, int(window.budget * COMPACT_TARGET_RATIO), pending)
+        cut = target.keep_from
+        if cut <= pinned or cut > len(marks):
+            return False
+        if target.dropped_tokens < MIN_COMPACT_TOKENS:
             return False
         cutoff = marks[cut - 1]
         if cutoff <= 0 or cutoff <= self._session.compacted_upto():
             return False
-        summary = await self._summarize(messages[:cut])
+        previous = messages[0].content[len(SUMMARY_PREFIX):] if pinned else ""
+        summary = await self._summarize(messages[pinned:cut], previous)
         if not summary:
-            self._window = window
             return False
         self._session.append_compact(summary, cutoff)
+        self._compacted_now = True
         return True
 
-    async def _summarize(self, messages: Any) -> str:
-        """让模型把要丢掉的那段压成要点；失败返回空串（调用方退回截断）。"""
+    async def _summarize(self, messages: Any, previous: str = "") -> str:
+        """让模型把要丢掉的那段压成要点；失败返回空串（调用方退回截断）。
+
+        ``previous`` 是上一版摘要，有它就当底稿合并出新的一版。不合并的话，
+        每次都要从原文重摘整段前缀，既贵，早先的结论也会在一次次复述里磨掉。
+        """
         body = _transcript(messages)
         if not body.strip():
             return ""
+        if previous:
+            body = "上一版摘要：\n" + previous + "\n\n新增的对话：\n" + body
         request = [Message("system", COMPACT_PROMPT), Message("user", body)]
         parts: list = []
         try:
@@ -837,20 +862,11 @@ class _Session:
             status = "error" if text.startswith("error:") else "ok"
             self._session.append_tool(message.tool_call_id or "", text, status)
 
-    def _finish_turn(self, status: str, note: str, started: float, window: Any,
-                     usage: Any) -> None:
-        """收尾：写 turn_end（带窗口说明与用量），并刷新覆盖层的任务列表。"""
+    def _finish_turn(self, status: str, note: str, window: Any, usage: Any) -> None:
+        """收尾：写 turn_end，并刷新覆盖层的任务列表。"""
         if self._session is None:
             return
-        detail = "；".join(
-            part
-            for part in (
-                note,
-                window.describe() if window else "",
-                "{:.1f}s".format(time.monotonic() - started),
-            )
-            if part
-        )
+        detail = "；".join(part for part in (note, self._turn_note(window)) if part)
         extra = {"usage": usage} if usage else {}
         self._session.append_turn_end(
             status=status,
@@ -859,6 +875,20 @@ class _Session:
             **extra,
         )
         self._log = self._session.log(LOG_ENTRIES)
+
+    def _turn_note(self, window: Any) -> str:
+        """这一轮要不要在覆盖层留一句话：裁过、压过、或窗口有话要说时才留。
+
+        常规的一轮没什么可说：条数与预算 ``/context`` 随时能算，耗时也能由
+        前后两条 ``ts`` 相减得到；每轮都写，覆盖层就只剩噪声。
+        """
+        if window is None:
+            return ""
+        if window.dropped or window.note:
+            return window.describe()
+        if self._compacted_now:
+            return "已压缩到 {} tok".format(window.used)
+        return ""
 
     def _record(self, task: str, reply: str, note: str = "") -> None:
         """覆盖层用的两行；有会话时它就是事件流折出来的最后两条。"""
@@ -879,6 +909,8 @@ class _Session:
             rows.append(_line("(agent) ", task, columns))
             if reply:
                 rows.extend(_reply_rows(reply, columns, bold=index == latest))
+            # 备注只在有事要说的轮次才有（见 ``_turn_note``）；照实显示，
+            # 上一轮的告警留到被下一次顶掉。
             if note:
                 rows.append(_line(NOTE_PREFIX, note, columns))
         # 高度只由屏幕实际行数决定，不再有固定上限：覆盖层比屏幕高就会贴
@@ -892,6 +924,11 @@ class _Session:
         if not rows:
             return INPUT_PROMPT
         return "\n".join(rows) + "\n" + INPUT_PROMPT
+
+
+def _is_summary(message: Any) -> bool:
+    """这条消息是不是 ``fold`` 顶在头部的压缩摘要。"""
+    return (message.content or "").startswith(SUMMARY_PREFIX)
 
 
 def _transcript(messages: Any) -> str:
