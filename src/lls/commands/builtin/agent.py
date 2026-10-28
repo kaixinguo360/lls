@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import difflib
 import json
 import math
 import time
@@ -89,6 +90,66 @@ MIN_COMPACT_TOKENS = 1024
 MODEL_ROWS_KEPT = 6       # 会话提示上方至少留几行给子进程画面
 SUGGESTED_REPLY_LINES = 6 # 只用于提示词：建议的答复长度，显示层不再按行截断
 REPEAT_REMIND_AT = 3      # 连续相同调用第几次开始提醒
+
+# ---- 会话内斜杠命令 ----
+# 名字、别名、处理方法、一句话说明；/help 与「未知命令」的提示都由它生成：
+# 加一条命令只需在这里加一行，再写一个 ``_slash_<名字>`` 方法。
+_SLASH_COMMANDS = (
+    ("help", ("h", "?"), "_slash_help", "列出这些命令"),
+    ("status", ("st",), "_slash_status", "会话 id、模型、预算与最近一轮"),
+    ("context", ("ctx",), "_slash_context", "这一轮带上了哪些上下文、裁掉多少"),
+    ("title", (), "_slash_title", "查看或修改标题：/title [文字]"),
+    ("model", (), "_slash_model", "查看或切换模型：/model [provider/model]"),
+    ("compact", (), "_slash_compact", "立刻把最旧的一段历史压成摘要"),
+    ("tools", (), "_slash_tools", "列出模型可用的工具"),
+    ("sessions", ("ls",), "_slash_sessions", "列出所有会话（--all 含归档）"),
+    ("resume", (), "_slash_resume", "切到另一条会话：/resume <id>"),
+    ("new", (), "_slash_new", "开一条新会话并切过去：/new [标题]"),
+    ("fork", (), "_slash_fork", "从当前会话分叉：/fork [--at <seq>]"),
+    ("rm", (), "_slash_rm", "删除一条会话：/rm <id>"),
+    ("retry", (), "_slash_retry", "重跑上一轮的任务"),
+    ("exit", ("quit", "q"), "_slash_exit", "退出 agent 模式"),
+)
+
+_SLASH_INDEX = dict(
+    [(item[0], item[2]) for item in _SLASH_COMMANDS]
+    + [(alias, item[2]) for item in _SLASH_COMMANDS for alias in item[1]]
+)
+
+
+class _Switch(Exception):
+    """换会话：交给 ``cmd_agent`` 的循环重开一条。
+
+    ``target`` 是 ``("open", 会话 id)`` 或 ``("new", 标题)``。换会话要换
+    provider、预算和事件流，比在 ``_Session`` 里原地改干净。
+    """
+
+    def __init__(self, target):
+        super(_Switch, self).__init__(target)
+        self.target = target
+
+
+def _looks_like_path(name):
+    """``usr/bin/env``、``etc/passwd`` 是路径不是命令，别吃掉。"""
+    return "/" in name or name.startswith((".", "~"))
+
+
+def _unknown_command(name):
+    """没匹配上的 ``/xxx``：报错，不当任务发出去。
+
+    打错的 ``/modle`` 若悄悄变成任务，模型会拿它当指令去执行，代价比一句
+    报错大得多；而报错是可恢复的 —— 这行已经进了输入历史，↑ 就能改。
+    """
+    rows = ["未知命令：/{}（没有发给模型）".format(name)]
+    close = difflib.get_close_matches(
+        name, sorted(item[0] for item in _SLASH_COMMANDS), n=1, cutoff=0.6
+    )
+    if close:
+        rows.append("是不是想用 /{}？".format(close[0]))
+    rows.append("/help 看全部命令。")
+    rows.append("这行确实要发给模型时，行首再加一个斜杠：//{}".format(name))
+    return "\n".join(rows)
+
 
 INPUT_PROMPT = "(agent): "
 REPLY_PREFIX = "(agent-reply) "
@@ -609,10 +670,16 @@ class _Session:
         session: Any = None,
         *,
         budget: int = 0,
+        provider_id: str = "",
+        catalog: Any = None,
+        keeper: Any = None,
     ) -> None:
         self._s = services
         self._provider = provider
         self._model = model
+        self._provider_id = provider_id
+        self._catalog = catalog  # /model 要解析模型名并构造 provider
+        self._keeper = keeper    # 会话类命令借用命令层手里的仓库
         self._session = session
         self._budget = max(0, int(budget))
         self._view = _TerminalView(services)
@@ -621,9 +688,13 @@ class _Session:
         self._log = session.log(LOG_ENTRIES) if session is not None else []
         self._window = None
         self._compacted_now = False
+        self._last_task = ""     # /retry：上一轮的任务原文
 
     async def run(self, first_task: str | None) -> bool:
-        """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。"""
+        """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。
+
+        /resume 这类换会话的命令抛 ``_Switch``，由 ``cmd_agent`` 接住重开一条。
+        """
         task: Any = first_task.strip() if first_task else None
         while True:
             if task is None:
@@ -668,27 +739,248 @@ class _Session:
         return text
 
     async def _slash(self, text: str) -> Any:
-        """会话内的斜杠命令：只影响本地状态，不交给模型。"""
-        name, _, rest = text.partition(" ")
+        """会话内的斜杠命令：只影响本地状态，不交给模型。
+
+        结局有四种：返回 ``_CANCEL`` 回去继续读任务；返回一段文本（``/retry``）
+        会被当作任务执行；返回 ``_EXIT`` 退出；换会话则抛 :class:`_Switch`。
+        """
+        if text.startswith("//"):
+            # 转义：去掉一个斜杠，原样交给模型。
+            return text[1:]
+        name, _, rest = text[1:].partition(" ")
         name = name.lower()
-        if name in ("/exit", "/quit"):
-            return _EXIT
-        if name == "/context":
-            await self._s.show_message(self._context_text())
+        if not name:
+            # 只打了个 /：直接给命令表。
+            return await self._slash_help("")
+        method = _SLASH_INDEX.get(name)
+        if method is None:
+            if _looks_like_path(name):
+                # /usr/bin/env、/etc/passwd 这类是路径，别当命令吃掉。
+                return text
+            await self._s.show_message(_unknown_command(name))
             return _CANCEL
-        if name == "/title":
-            if self._session is None:
-                await self._s.show_message("本次会话不落盘，改不了标题")
-            elif not rest.strip():
-                await self._s.show_message("用法：/title <文字>")
-            else:
-                self._session.set_title(rest)
-                await self._s.show_message("标题已改为 " + self._session.meta.title)
+        return await getattr(self, method)(rest.strip())
+
+    # ---- 各个 / 命令 ----
+
+    async def _slash_help(self, args: str) -> Any:
+        rows = ["会话内命令（本地执行，不发给模型）："]
+        for name, aliases, _, summary in _SLASH_COMMANDS:
+            alias = ""
+            if aliases:
+                alias = " ({})".format("、".join("/" + item for item in aliases))
+            rows.append("  /{}{}  {}".format(name, alias, summary))
+        rows.append("//开头：去掉一个斜杠原样当任务；/usr/bin 这类路径也当任务。")
+        await self._s.show_message("\n".join(rows))
+        return _CANCEL
+
+    async def _slash_exit(self, args: str) -> Any:
+        return _EXIT
+
+    async def _slash_context(self, args: str) -> Any:
+        await self._s.show_message(self._context_text())
+        return _CANCEL
+
+    async def _slash_status(self, args: str) -> Any:
+        if self._session is None:
+            rows = ["会话：不落盘（本次运行不记历史）"]
+        else:
+            meta = self._session.meta
+            rows = [
+                "会话：{}（{}）· {} 轮 · {:.0f}KB".format(
+                    meta.id, meta.title or "无标题", meta.turns, meta.size / 1024.0
+                )
+            ]
+        rows.append(
+            "模型：{}（provider {}）".format(self._model, self._provider_id or "-")
+        )
+        rows.append("预算：{} tok · 工具 {} 个".format(self._budget, len(self._tools)))
+        last = self._session.last_turn_end() if self._session is not None else None
+        if last is not None:
+            rows.append(
+                "最近一轮：{}（{}）".format(last.status or "ok", last.note or "无备注")
+            )
+        if self._last_task:
+            rows.append("上一轮任务：" + _clip(self._last_task, max(16, self._s.screen.columns - 8)))
+        await self._s.show_message("\n".join(rows))
+        return _CANCEL
+
+    async def _slash_title(self, args: str) -> Any:
+        if self._session is None:
+            await self._s.show_message("本次会话不落盘，改不了标题")
             return _CANCEL
+        text = args.strip()
+        if not text:
+            await self._s.show_message(
+                "标题：{}（用 /title <文字> 改）".format(
+                    self._session.meta.title or "无标题"
+                )
+            )
+            return _CANCEL
+        self._session.set_title(text)
+        await self._s.show_message("标题已改为 " + self._session.meta.title)
+        return _CANCEL
+
+    async def _slash_model(self, args: str) -> Any:
+        spec = args.strip()
+        if not spec:
+            rows = [
+                "当前模型：{}（provider {}）".format(
+                    self._model, self._provider_id or "-"
+                )
+            ]
+            if self._catalog is not None and self._catalog.provider_ids():
+                rows.append("已配置 provider：" + "、".join(self._catalog.provider_ids()))
+            rows.append("用法：/model <provider/model>")
+            await self._s.show_message("\n".join(rows))
+            return _CANCEL
+        if self._catalog is None:
+            await self._s.show_message("这次会话拿不到模型配置，改不了模型")
+            return _CANCEL
+        try:
+            provider_id, model_id = self._catalog.resolve_spec(spec)
+            provider = self._catalog.get(provider_id)
+        except (ConfigError, SessionError) as e:
+            await self._s.show_message("error: {}".format(e))
+            return _CANCEL
+        self._provider = provider
+        self._provider_id = provider_id
+        self._model = model_id
+        self._budget = _budget_for(self._catalog, provider_id)
+        if self._session is not None:
+            meta = self._session.meta
+            meta.provider_id = provider_id
+            meta.model_id = model_id
+            self._session.append_model_switch(meta.model)
+            if self._keeper is not None:
+                self._keeper.write_meta(meta)
         await self._s.show_message(
-            "未知命令：{}（可用 /context、/title <文字>、/exit）".format(name)
+            "已切到 {}/{}（窗口 {} tok），历史不变，下一轮生效".format(
+                provider_id, model_id, self._budget
+            )
         )
         return _CANCEL
+
+    async def _slash_compact(self, args: str) -> Any:
+        if self._session is None:
+            await self._s.show_message("本次会话不落盘，没有可压缩的历史")
+            return _CANCEL
+        self._compacted_now = False
+        compressed = await self._compact(self._prepare_window(()), (), force=True)
+        after = self._prepare_window(())
+        if compressed:
+            await self._s.show_message("已压缩，窗口 {}".format(after.describe()))
+        else:
+            await self._s.show_message(
+                "没压缩：历史还短（不到 {} tok）或者已经压到底；当前 {}".format(
+                    MIN_COMPACT_TOKENS, after.describe()
+                )
+            )
+        return _CANCEL
+
+    async def _slash_tools(self, args: str) -> Any:
+        rows = ["模型可用的工具（何时调用由模型自己决定）："]
+        for item in self._tools:
+            rows.append("  " + item.tool.name)
+            summary = (item.tool.description or "").strip().split("\n", 1)[0]
+            if summary:
+                rows.append("    " + summary)
+        await self._s.show_message("\n".join(rows))
+        return _CANCEL
+
+    async def _slash_sessions(self, args: str) -> Any:
+        if self._keeper is None:
+            await self._s.show_message("没有可用的会话仓库")
+            return _CANCEL
+        await self._s.show_message(
+            _session_rows(self._keeper, include_archived="--all" in args.split())
+        )
+        return _CANCEL
+
+    def _find_meta(self, spec: str) -> Any:
+        """解析会话 id / 前缀 / 标题片段：返回 ``(meta, 错误文本)`` 之一。"""
+        try:
+            return self._keeper.resolve(spec), ""
+        except SessionError as e:
+            return None, "error: {}".format(e)
+
+    async def _slash_resume(self, args: str) -> Any:
+        spec = args.strip()
+        if self._keeper is None or self._session is None:
+            await self._s.show_message("本次会话不落盘，切不了会话")
+            return _CANCEL
+        if not spec:
+            await self._s.show_message("用法：/resume <id>（用 /sessions 看有哪些）")
+            return _CANCEL
+        meta, err = self._find_meta(spec)
+        if meta is None:
+            await self._s.show_message(err)
+            return _CANCEL
+        if meta.id == self._session.id:
+            await self._s.show_message("已经在会话 {} 里".format(meta.id))
+            return _CANCEL
+        raise _Switch(("open", meta.id))
+
+    async def _slash_new(self, args: str) -> Any:
+        raise _Switch(("new", args.strip()))
+
+    async def _slash_fork(self, args: str) -> Any:
+        if self._keeper is None or self._session is None:
+            await self._s.show_message("本次会话不落盘，分不了叉")
+            return _CANCEL
+        at_seq = 0
+        rest = args.strip()
+        if rest:
+            head, _, tail = rest.partition(" ")
+            if head != "--at" or not tail.strip().isdigit():
+                await self._s.show_message("用法：/fork [--at <seq>]")
+                return _CANCEL
+            at_seq = int(tail.strip())
+        try:
+            forked = self._keeper.fork(self._session.id, at_seq)
+        except SessionError as e:
+            await self._s.show_message("error: {}".format(e))
+            return _CANCEL
+        await self._s.show_message(
+            "已分叉到 {}（来自 {}{}）".format(
+                forked.id,
+                self._session.id,
+                "，到 seq {}".format(at_seq) if at_seq else "，全部",
+            )
+        )
+        raise _Switch(("open", forked.id))
+
+    async def _slash_rm(self, args: str) -> Any:
+        spec = args.strip()
+        if self._keeper is None:
+            await self._s.show_message("没有可用的会话仓库")
+            return _CANCEL
+        if not spec:
+            await self._s.show_message("用法：/rm <id>（当前会话要先 /exit）")
+            return _CANCEL
+        meta, err = self._find_meta(spec)
+        if meta is None:
+            await self._s.show_message(err)
+            return _CANCEL
+        if self._session is not None and meta.id == self._session.id:
+            await self._s.show_message("{} 是当前会话，删不了；先 /exit".format(meta.id))
+            return _CANCEL
+        try:
+            gone = self._keeper.drop(meta.id)
+        except SessionError as e:
+            await self._s.show_message("error: {}".format(e))
+            return _CANCEL
+        await self._s.show_message(
+            "已删除会话 {}（{}）".format(gone.id, gone.title or "无标题")
+        )
+        return _CANCEL
+
+    async def _slash_retry(self, args: str) -> Any:
+        if not self._last_task:
+            await self._s.show_message("还没有可以重跑的上一轮任务")
+            return _CANCEL
+        # 返回原文：``run`` 会把它当任务再跑一遍，提示符里也看得到。
+        return self._last_task
 
     def _context_text(self) -> str:
         """``/context``：这次请求送了多少、丢了什么、用掉多少。"""
@@ -715,6 +1007,7 @@ class _Session:
 
     async def _one(self, task: str) -> None:
         """执行一轮任务。异常路径只影响本轮，不影响已经写下的事件。"""
+        self._last_task = task
         # 提交任务时同批到达的按键还留在键盘缓冲里；转回原始队列，
         # 否则本轮的中断检测看不到它们（两个队列不互通）。
         self._s.requeue_pending_keys()
@@ -800,7 +1093,7 @@ class _Session:
         self._window = window
         return window
 
-    async def _compact(self, window: Any, pending: Any = ()) -> bool:
+    async def _compact(self, window: Any, pending: Any = (), force: bool = False) -> bool:
         """到水位就把最旧的一段压成摘要，一次压回目标水位；失败退回硬截断。
 
         两种触发：这一轮已经装不下（``window.dropped``），或者用量到了
@@ -814,9 +1107,10 @@ class _Session:
         """
         if self._session is None or window.budget <= 0:
             return False
-        trigger = int(window.budget * COMPACT_TRIGGER_RATIO)
-        if not window.dropped and window.used < trigger:
-            return False
+        if not force:
+            trigger = int(window.budget * COMPACT_TRIGGER_RATIO)
+            if not window.dropped and window.used < trigger:
+                return False
         messages, marks = self._session.history_marks()
         # 顶部那条摘要不参与压缩：它既不该算进被压掉的区间，也不能被自己覆盖。
         pinned = 1 if messages and _is_summary(messages[0]) else 0
@@ -1095,27 +1389,57 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
 
     try:
         catalog = default_catalog()
-        session = _open_or_create(opts, catalog, keeper)
-    except (SessionError, ConfigError) as e:
+    except ConfigError as e:
         await s.show_message("error: {}".format(e))
         return CommandResult()
 
-    try:
-        provider = catalog.get(session.meta.provider_id)
-    except ConfigError as e:
-        session.close()
-        await s.show_message(
-            "error: {}（会话 {} 的 provider 已不存在；用 agent --new 开新会话）".format(
-                e, session.id
-            )
-        )
-        return CommandResult()
+    task = opts.task
+    exited = False
+    while True:
+        try:
+            session = _open_or_create(opts, catalog, keeper)
+        except (SessionError, ConfigError) as e:
+            await s.show_message("error: {}".format(e))
+            return CommandResult()
 
-    budget = _budget_for(catalog, session.meta.provider_id)
-    try:
-        exited = await _Session(
-            s, provider, session.meta.model_id, session, budget=budget
-        ).run(opts.task)
-    finally:
-        session.close()
+        try:
+            provider = catalog.get(session.meta.provider_id)
+        except ConfigError as e:
+            session.close()
+            await s.show_message(
+                "error: {}（会话 {} 的 provider 已不存在；用 agent --new 开新会话）".format(
+                    e, session.id
+                )
+            )
+            return CommandResult()
+
+        budget = _budget_for(catalog, session.meta.provider_id)
+        worker = _Session(
+            s,
+            provider,
+            session.meta.model_id,
+            session,
+            budget=budget,
+            provider_id=session.meta.provider_id,
+            catalog=catalog,
+            keeper=keeper,
+        )
+        target = None
+        exited = False
+        try:
+            exited = await worker.run(task)
+        except _Switch as e:
+            target = e.target
+        finally:
+            keeper.write_meta(session.meta)
+            session.close()
+        if target is None:
+            break
+        # 用户换了会话：按目标重开一条，回到循环开头。任务算已交付，不再重放。
+        kind, value = target
+        opts.new = kind == "new"
+        opts.resume = value if kind == "open" else None
+        opts.title = value if kind == "new" else None
+        opts.model = None
+        task = None
     return CommandResult(handler="default" if exited else None)
