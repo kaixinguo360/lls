@@ -1,7 +1,7 @@
-"""会话管理的只读命令：列、导出、分叉、删除。
+"""会话管理命令：列、分叉、删除。
 
-全部走 :class:`lls.ai.sessions.SessionStore`：只读命令不写盘（除了
-``fork`` / ``rm`` 这两个明确要改盘的）。
+全部走 :class:`lls.ai.sessions.SessionStore`：``sessions`` 不写盘，
+``fork`` / ``rm`` 明确要改盘。
 """
 
 from __future__ import annotations
@@ -49,27 +49,6 @@ async def cmd_sessions(s: Services, args: str | None) -> CommandResult:
     if not include_all:
         rows.append("（--all 含已归档）")
     await s.show_message("\n".join(rows))
-    return CommandResult()
-
-
-@command("export", category="ai")
-async def cmd_export(s: Services, args: str | None) -> CommandResult:
-    """导出会话事件流：export <id>"""
-    spec = None
-    for part in (args or "").split():
-        if part.startswith("--"):
-            await s.show_message("未知参数 {}".format(part))
-            return CommandResult()
-        if spec is not None:
-            await s.show_message("多余的参数 {}".format(part))
-            return CommandResult()
-        spec = part
-    try:
-        text = store().export(spec)
-    except SessionError as e:
-        await s.show_message("error: {}".format(e))
-        return CommandResult()
-    await s.show_message(text)
     return CommandResult()
 
 

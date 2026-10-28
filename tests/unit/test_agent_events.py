@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 from lls.ai import Chunk, ChunkKind, ConfigError
 from lls.ai.sessions import SessionBusy, SessionStore
@@ -331,10 +330,10 @@ def test_a_missing_provider_names_the_session(monkeypatch, tmp_path) -> None:
     session.close()
 
 
-# ---- sessions / export / fork / rm ----
+# ---- sessions / fork / rm ----
 
 
-def test_sessions_command_lists_and_exports(monkeypatch, tmp_path) -> None:
+def test_sessions_command_lists_sessions(monkeypatch, tmp_path) -> None:
     keeper = SessionStore(root=tmp_path)
     session = keeper.create("stub", "m")
     session.append_user("任务")
@@ -344,12 +343,8 @@ def test_sessions_command_lists_and_exports(monkeypatch, tmp_path) -> None:
 
     services = FakeServices([])
     asyncio.run(sessions_cmd.cmd_sessions(services, None))
-    assert session.id in services.messages[-1]
 
-    asyncio.run(sessions_cmd.cmd_export(services, session.id))
-    exported = [json.loads(line) for line in services.messages[-1].splitlines()]
-    assert [event["type"] for event in exported][-2:] == ["user", "assistant"]
-    assert exported[-1]["content"] == "答复"
+    assert session.id in services.messages[-1]
 
 
 def test_fork_command_copies_up_to_seq(monkeypatch, tmp_path) -> None:

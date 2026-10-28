@@ -203,15 +203,12 @@ class Session:
         path: Path,
         meta: SessionMeta,
         lock_fd: int,
-        writable: bool = True,
     ) -> None:
         self.path = path
         self.meta = meta
         self._store = store
-        self._writable = writable
         self._lock_fd = lock_fd
-        # 只读打开（list/export）既不建锁也不开写句柄：不占用会话，也不碰盘。
-        self._events_fd = _open_append(path / EVENTS_NAME) if writable else -1
+        self._events_fd = _open_append(path / EVENTS_NAME)
         self.last_error: Optional[str] = None
         self.bad_lines = 0
         self._closed = False
@@ -238,8 +235,6 @@ class Session:
 
         失败时不推进 ``seq``，下次写入会补上同一个序号。
         """
-        if not self._writable:
-            raise SessionError("会话 {} 是只读打开的".format(self.id))
         if self._closed:
             raise SessionError("会话 {} 已关闭".format(self.id))
         event = Event(type=kind, seq=self.meta.last_seq + 1, ts=time.time(), **fields)
@@ -327,7 +322,7 @@ class Session:
     def recent(self) -> List[Event]:
         """上下文那一段：最近一次压缩覆盖到的位置之后，含那条摘要本身。
 
-        压缩之后，前面的行只给 ``jsonl`` / 分叉这类要原文的地方；每轮的
+        压缩之后，前面的行只给分叉这类要原文的地方；每轮的
         上下文只由这一段派生，代价不随会话变长。摘要也可能写在它覆盖的位置
         之后（分叉就是这样），所以边界取 ``upto_seq`` 而不是摘要自己的 seq。
         """
@@ -433,9 +428,6 @@ class Session:
             return tail[0]
         return None
 
-    def jsonl(self) -> str:
-        return "".join(encode(event) + "\n" for event in self.events())
-
     # ---- 内部 ----
 
     def _write_blob(self, text: str) -> str:
@@ -480,12 +472,11 @@ class Session:
                     fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
                 os.close(self._lock_fd)
             self._lock_fd = -1
-        if self._writable:
-            self._store.forget(self.id)
+        self._store.forget(self.id)
 
 
 class SessionStore:
-    """会话目录的入口：开、建、列、删、分叉、导出。
+    """会话目录的入口：开、建、列、删、分叉。
 
     ``root`` 为 None 时用一个临时目录：命令层的测试不必碰用户家目录。
     """
@@ -669,7 +660,7 @@ class SessionStore:
             archived.append(meta.id)
         return archived
 
-    # ---- 分叉与导出 ----
+    # ---- 分叉与删除 ----
 
     def fork(self, spec: str, at_seq: int = 0) -> Session:
         """把 ``spec`` 在 ``at_seq`` 之前的事件复制成一条新会话；0 表示到末尾。"""
@@ -730,20 +721,6 @@ class SessionStore:
             if copied is not None:
                 moved[event.seq] = copied.seq
         return new
-
-    def export(self, spec: Optional[str]) -> str:
-        """导出事件流：只读打开，因此会话正被 agent 占着也能导。"""
-        return self.read(spec).jsonl()
-
-    def read(self, spec: Optional[str] = None) -> Session:
-        """只读打开：不建锁、不建写句柄，不修改磁盘上的任何东西。"""
-        session_id = spec
-        if session_id is None or not session_id.strip():
-            session_id = self.current_id()
-            if session_id is None:
-                raise SessionError("还没有会话")
-        meta = self.resolve(session_id)
-        return Session(self, self._path_of(meta), meta, -1, writable=False)
 
     # ---- 内部 ----
 

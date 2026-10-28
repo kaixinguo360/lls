@@ -1,6 +1,6 @@
 """会话存储：事件流是事实来源，窗口是派生视图。
 
-这里只测存储本身（目录布局、追加、折叠、blobs、锁、归档、分叉、导出）；
+这里只测存储本身（目录布局、追加、折叠、blobs、锁、归档、分叉）；
 命令层是否把状态接上在 ``test_agent_session.py``。
 """
 
@@ -500,7 +500,7 @@ def test_drop_removes_the_directory_and_the_input_history(
     assert keeper.current_id() is None
 
 
-# ---- 分叉与导出 ----
+# ---- 分叉 ----
 
 
 def test_fork_copies_events_up_to_the_given_seq(tmp_path: Path) -> None:
@@ -630,35 +630,6 @@ def test_fit_keeps_the_last_turn_when_nothing_is_pending() -> None:
 
     assert window.messages == messages
     assert window.keep_from == 0
-
-
-def test_export_reads_without_touching_the_disk(tmp_path: Path) -> None:
-    keeper = SessionStore(root=tmp_path)
-    session = keeper.create("stub", "m")
-    session.append_user("任务")
-    session.append_assistant("答复")
-    session.close()
-
-    events_path = tmp_path / session.id / "events.jsonl"
-    before = events_path.stat().st_mtime_ns
-
-    raw = keeper.export(session.id)
-
-    assert json.loads(raw.splitlines()[1])["content"] == "任务"
-    assert events_path.stat().st_mtime_ns == before
-
-
-def test_export_reads_a_session_another_process_has_open(tmp_path: Path) -> None:
-    owner = SessionStore(root=tmp_path)
-    session = owner.create("stub", "m")
-    session.append_user("正在跑的任务")
-    other = SessionStore(root=tmp_path)
-
-    # 只读的 export 不抢锁：会话正被 agent 占着也能导出来。
-    with pytest.raises(SessionBusy):
-        other.open(session.id)
-    assert "正在跑的任务" in other.export(session.id)
-    session.close()
 
 
 def test_current_pointer_is_only_a_cache(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 """会话：事件流落盘、上下文窗口、按 id 存取。
 
-对外只暴露这一层：``SessionStore`` 开/建/列/删/叉/导出，``Session`` 追加
+对外只暴露这一层：``SessionStore`` 开/建/列/删/叉，``Session`` 追加
 事件并派生消息。窗口裁剪在 :mod:`.window`，事件模型在 :mod:`.events`。
 """
 
