@@ -186,6 +186,8 @@ class Engine:
         self._overlay_source: Callable[[int, int], str] | None = None
         # 因为覆盖层收起、变矮或移走而需要按模型重铺的行。
         self._stale_rows: set[int] = set()
+        # 上一次看到的「子进程是否在备用屏上」（见 ``_note_screen_switch``）。
+        self._alt_screen = False
 
         # 等待喂给模型的字节（显示优先时，模型在后面追赶）。
         self._backlog = bytearray()
@@ -396,6 +398,7 @@ class Engine:
             # 透传会让「子进程画的」与「覆盖层画的」争用同一个终端。
             self.flush_backlog()
             self.screen.feed(data)
+            self._note_screen_switch()
             self.render_from_model()
 
     def _attach_console(self, console: Console) -> None:
@@ -474,6 +477,7 @@ class Engine:
         兜底丢历史，保证积压有界，同时**不**让任何一轮卡住事件循环。
         """
         self._feed_backlog_slice()
+        self._note_screen_switch()
 
     def _feed_backlog_slice(self) -> None:
         """喂一小片积压（按时间预算），并清掉 dirty。
@@ -524,6 +528,8 @@ class Engine:
             self.screen.feed(bytes(self._backlog))
             self._backlog.clear()
             self.screen.clear_dirty()
+        # 排空之后模型才是最新的，这时才知道子进程是不是换了屏。
+        self._note_screen_switch()
 
     # ---- 渲染 ----
 
@@ -811,6 +817,29 @@ class Engine:
         self._overlay_source = None
         self._drop_overlay()
         self.render_from_model()
+
+    def _note_screen_switch(self) -> None:
+        """子进程换屏（进/出备用屏）时，把覆盖层交还出去。
+
+        覆盖层属于它画上去的那一屏。全屏程序（vim、less、top）一进来就整块
+        接管画面：覆盖层是合成帧的一部分，那就不是「不画」能了事的 —— 上一帧
+        画上去的那几行会被每一帧补回新画面上，直到退出 vim 还在那儿。
+
+        所以这里不让它跟着过去：内容一并忘掉（改尺寸时也不会再画回来），
+        旧行也不用按模型重铺（整块屏都换了）。切出来时同理，那一屏已经没了。
+
+        判据只有一条：子进程在备用屏上，覆盖层就不该还在。进入备用屏之后
+        新画的覆盖层（消息框、选择框）不受影响 —— 它们画在切换之后。
+        """
+        if self._console is None:
+            return
+        alternate = self.screen.alternate
+        if alternate == self._alt_screen:
+            return
+        self._alt_screen = alternate
+        self._overlay_source = None
+        self._drop_overlay()
+        self._stale_rows.clear()
 
     def _drop_overlay(self) -> None:
         """让覆盖层让出它占的行（内容一并忘掉，改尺寸时不会再画回来）。"""

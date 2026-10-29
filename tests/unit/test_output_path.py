@@ -34,6 +34,7 @@ class FakeConsole:
 class FakeScreen:
     rows = 24
     columns = 80
+    alternate = False           # 引擎按它判断子进程是否换了屏
 
     def __init__(self) -> None:
         self.fed = 0

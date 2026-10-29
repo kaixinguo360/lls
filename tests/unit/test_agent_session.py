@@ -53,7 +53,6 @@ class FakeServices:
         self.written = []
         self.painted = []
         self.messages = []
-        self.restored = 0
         self._chars = []
 
     def queue_chars(self, *values) -> None:
@@ -82,7 +81,7 @@ class FakeServices:
         pass
 
     def restore_context(self) -> None:
-        self.restored += 1
+        pass
 
     def requeue_pending_keys(self) -> None:
         pass
@@ -686,11 +685,11 @@ def test_painter_forgets_the_previous_step() -> None:
     assert services.painted[-1] == "(agent 2) awaiting reply..."
 
 
-def test_painter_takes_the_overlay_back_when_a_fullscreen_app_starts() -> None:
-    """vim 一进来就接管整块屏幕：那一行得收掉。
+def test_painter_stays_out_of_a_fullscreen_app() -> None:
+    """vim 一进来就整块接管画面：painter 不再往上画。
 
-    覆盖层归合成帧管之后，「不画」不等于「消失」—— 上一次画上去的那行会
-    一直被补在 vim 的画面上。所以收一次，而不是每帧都收。
+    已经画在屏上的那一行由引擎在换屏时收走（见 Engine._note_screen_switch），
+    painter 这边只管不再添新的。
     """
     screen = FakeScreen()
     services = FakeServices([], screen=screen)
@@ -699,15 +698,15 @@ def test_painter_takes_the_overlay_back_when_a_fullscreen_app_starts() -> None:
 
     screen.alternate = True
     painter.begin()
-    painter.begin()
+    painter.compacting()
 
-    assert services.restored == 1
-    assert services.painted == ["(agent) preparing..."]   # 全屏程序下不再画
+    assert services.painted == ["(agent) " + agent_cmd.PREPARING]
+    services.painted.clear()
 
     screen.alternate = False
     painter.begin()
 
-    assert services.painted[-1] == "(agent) preparing..."
+    assert services.painted == ["(agent) " + agent_cmd.PREPARING]
 
 
 # ---- 提示词与显示预算一致 ----

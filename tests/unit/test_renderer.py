@@ -307,6 +307,103 @@ def test_message_overlay_owns_the_physical_cursor() -> None:
     assert b"\x1b[2;4H" in console.snapshot()
 
 
+# ---- 全屏程序（备用屏）：覆盖层不跟着过去 ----
+
+VIM_ENTER = b"\x1b[?1049h\x1b[2J\x1b[HA hello\x1b[2;1H~"
+VIM_LEAVE = b"\x1b[?1049l"
+
+
+def test_a_fullscreen_app_takes_the_overlay_away() -> None:
+    """vim 一进来就整块接管画面：上一帧画上去的那行不能留在它屏上。"""
+    engine, screen, console = _overlay_engine()
+    screen.feed(b"$ vim a.txt")
+    engine.draw_overlay("(agent 1) planning")
+    console.snapshot()
+
+    screen.feed(VIM_ENTER)
+    engine.render_from_model()
+
+    assert screen.alternate is True
+    assert engine.overlay.visible is False
+    assert b"planning" not in console.snapshot()
+
+
+def test_leaving_a_fullscreen_app_does_not_bring_the_overlay_back() -> None:
+    """退回主屏后也不回来：那一层属于它当时画上去的那一屏。"""
+    engine, screen, console = _overlay_engine()
+    screen.feed(b"$ vim a.txt")
+    engine.draw_overlay("(agent 1) planning")
+    screen.feed(VIM_ENTER)
+    engine.render_from_model()
+    console.snapshot()
+
+    screen.feed(VIM_LEAVE)
+    engine.render_from_model()
+
+    assert screen.alternate is False
+    assert engine.overlay.visible is False
+    assert b"planning" not in console.snapshot()
+
+
+def test_an_overlay_drawn_inside_a_fullscreen_app_is_kept() -> None:
+    """在 vim 里画的（消息框、选择框）画在换屏之后，照旧留着。"""
+    engine, screen, console = _overlay_engine()
+    screen.feed(VIM_ENTER)
+    engine.render_from_model()
+    console.snapshot()
+
+    engine.draw_overlay("小工具")
+    engine.render_from_model()
+
+    assert engine.overlay.visible is True
+    assert any("小工具" in row for row in _emulate(console.snapshot()))
+
+
+def _passthrough_engine():
+    class _Pass:
+        passthrough = True
+
+    screen = PyteScreenModel(rows=8, columns=20)
+    console = FakeConsole()
+    engine = Engine(
+        backend=None,  # type: ignore[arg-type]
+        argv=[],
+        screen=screen,
+        handlers={"pass": _Pass()},
+        initial_handler="pass",
+    )
+    engine._attach_console(console)
+    return engine, screen, console
+
+
+class _Never:
+    """``_exit_event`` 的替身：没有子进程退出，也不需要事件循环。"""
+
+    def is_set(self) -> bool:
+        return False
+
+
+def test_passthrough_writes_no_overlay_into_the_fullscreen_app() -> None:
+    """透传时终端由 vim 自己画：一个字节的覆盖层都不许掺进去。"""
+    engine, screen, console = _passthrough_engine()
+    engine._exit_event = _Never()
+    pending: list[bytes] = []
+    engine._read_all_available = lambda: (pending.pop(0) if pending else None)
+
+    screen.feed(b"$ vim a.txt")
+    engine.draw_overlay("(agent 1) planning")
+    console.snapshot()
+
+    pending.append(VIM_ENTER + b"\x1b[3;5Hx")
+    engine._on_master_readable()
+    out = console.snapshot()
+
+    assert screen.alternate is True
+    assert engine.overlay.visible is False
+    assert b"planning" not in out
+    assert out.endswith(b"\x1b[3;5Hx\x1b[?2026l")
+
+
 # ---- 读输入后把覆盖层原地交给下一个界面 ----
 
 def _loop_engine():
