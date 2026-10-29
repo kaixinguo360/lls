@@ -110,8 +110,8 @@ _SLASH_COMMANDS = (
     ("sessions", ("ls", "resume"), "_slash_sessions", "选一条会话切过去：/sessions"),
     ("new", (), "_slash_new", "开一条新会话并切过去：/new [标题]"),
     ("fork", (), "_slash_fork", "从当前会话分叉：/fork [--at <seq>]"),
-    ("rm", (), "_slash_rm", "删除本会话（要确认），随后退出 agent"),
-    ("archive", (), "_slash_archive", "归档本会话（要确认），随后退出 agent"),
+    ("rm", (), "_slash_rm", "删除本会话（要确认），随后挑一条接着用"),
+    ("archive", (), "_slash_archive", "归档本会话（要确认），随后挑一条接着用"),
     ("retry", (), "_slash_retry", "接着本轮继续执行：/retry"),
     ("exit", ("quit", "q"), "_slash_exit", "退出 agent 模式"),
 )
@@ -612,6 +612,14 @@ def _build_tools(
     ]
 
 
+# 第一行没有具体动作时说的话：每一句都对应一个能核对的时刻。
+PREPARING = "preparing..."      # 快照、拼上下文：此刻没有请求在路上
+COMPACTING = "compacting..."    # 把旧历史压成摘要，一次网络请求
+AWAITING = "awaiting reply..."  # 请求已发出，模型第一个字节还没到
+REPLYING = "replying..."        # 正文在流里
+REASONING = "reasoning..."      # 只有推理在流里，正文还没开始
+PLANNING = "planning a call..." # 工具调用的参数在流里，还没拼完
+
 # ---- 状态覆盖层 ----
 
 class _Painter:
@@ -620,10 +628,12 @@ class _Painter:
     def __init__(self, services: Services) -> None:
         self._s = services
         self._step = 0
+        self._phase = PREPARING
         self._action = ""
         self._think = ""
         self._call = ""
         self._call_name = ""
+        self._started = 0.0
         self._painted = 0.0
 
     def begin(self) -> None:
@@ -633,26 +643,58 @@ class _Painter:
         压缩、拼上下文这些要联网的步骤）。中间那一大段屏幕上什么都没有，
         看着就像程序卡住了。
         """
+        self._phase = PREPARING
+        self._paint(force=True)
+
+    def compacting(self) -> None:
+        """压缩开始：一次摘要请求，可能要好几秒，得让屏幕说出来。"""
+        self._phase = COMPACTING
+        self._paint(force=True)
+
+    def awaiting(self) -> None:
+        """请求马上发出：先摆上这一相，别停在上一相上冒充当前状态。"""
+        self._phase = AWAITING
         self._paint(force=True)
 
     def on_event(self, event: AgentEvent) -> None:
         if event.kind is AgentEventKind.STEP:
             self._step = event.step
+            # 新的一步：上一段的调用、参数、推理都成过去了，留在屏上只会
+            # 冒充当前状态。
+            self._action = ""
+            self._call = ""
+            self._call_name = ""
+            self._think = ""
+            self._phase = AWAITING
             self._paint(force=True)
+        elif event.kind is AgentEventKind.TEXT:
+            if self._phase != REPLYING:
+                self._phase = REPLYING
+                self._paint(force=True)
         elif event.kind is AgentEventKind.REASONING:
             self._think = (self._think + event.text)[-400:]
-            self._paint()
+            if self._phase == AWAITING:
+                self._phase = REASONING
+                self._paint(force=True)
+            else:
+                self._paint()
         elif event.kind is AgentEventKind.CALL_DELTA:
             if event.name:
                 self._call_name = event.name
             self._call = (self._call + event.text)[-400:]
+            self._phase = PLANNING
             self._paint()
         elif event.kind is AgentEventKind.CALL:
-            self._action = (event.name + ": " + event.text)[-400:]
+            self._started = time.monotonic()
+            self._action = ("calling " + event.name + ": " + event.text)[-400:]
             self._call = ""
             self._paint(force=True)
         elif event.kind is AgentEventKind.RESULT:
-            self._paint()
+            # 细节在终端画面里，这里只要「跑完了、花了多久」。
+            self._action = "{} done ({:.1f}s)".format(
+                event.name, time.monotonic() - self._started
+            )
+            self._paint(force=True)
 
     def _paint(self, force: bool = False) -> None:
         now = time.monotonic()
@@ -673,7 +715,7 @@ class _Painter:
         lines = [
             _line(
                 prefix,
-                action or "waiting...",
+                action or self._phase,
                 columns,
             )
         ]
@@ -1003,13 +1045,35 @@ class _Session:
         )
         return isinstance(answer, str) and answer.strip().lower() in ("y", "yes")
 
+    async def _switch_after_gone(self, note: str) -> Any:
+        """本会话刚被删掉或归档：把剩下的会话摆出来接着用，不直接退出。
+
+        ``note`` 是「已删除 / 已归档」那一句，放在选择界面顶上。挑中的那条
+        由 :class:`_Switch` 交给 ``cmd_agent`` 重开；按 q、子进程退出、或者
+        一条会话都不剩时才 ``_EXIT`` —— 那时确实没有可接着用的上下文。
+        """
+        if self._keeper is not None and self._keeper.list():
+            chosen = await _choose_session(
+                self._s,
+                self._keeper,
+                header=note + "挑一条接着用：",
+                footer="up/down: select, Enter: switch, q: leave agent",
+            )
+            if chosen is not None:
+                raise _Switch(("open", chosen.id))
+            await self._s.show_message(note + "已退出 agent 模式。")
+            return _EXIT
+        await self._s.show_message(
+            note + "没有别的会话了，已退出 agent 模式；要新会话用 agent --new。"
+        )
+        return _EXIT
+
     async def _slash_rm(self, args: str) -> Any:
-        """删掉本会话：确认后删，然后离开 agent 模式。
+        """删掉本会话：确认后删，然后把会话列表摆出来让人挑下一条。
 
         只认自己，不带参数 —— 会话 id 记不住，也不该为了删一条会话先
-        ``/exit``。删完这条就没有上下文可接着用了，所以直接退出 agent：要不要
-        再进来由用户自己决定（确实要新会话再用 ``/new``）。这里不顺手开一条
-        空会话 —— 删掉的正是「不想留」的那一条，回来却多出一条，等于没删。
+        ``/exit``。删掉的正是「不想留」的那一条，所以不顺手再开一条空的：
+        选界面里挑中的那条才接着用，按 q、或者一条都不剩时才退出 agent。
         """
         if args.strip():
             await self._s.show_message("用法：/rm（删除本会话，不需要参数）")
@@ -1030,18 +1094,16 @@ class _Session:
         except SessionError as e:
             await self._s.show_message("error: {}".format(e))
             return _CANCEL
-        await self._s.show_message(
+        return await self._switch_after_gone(
             "已删除会话 {}（{}）。".format(gone.id, gone.title or "无标题")
-            + "\n已退出 agent 模式；要继续用请重新运行 agent，新会话用 /new。"
         )
-        return _EXIT
 
     async def _slash_archive(self, args: str) -> Any:
-        """把本会话收进归档，然后离开 agent 模式。
+        """把本会话收进归档，然后把会话列表摆出来让人挑下一条。
 
         归档不是删除：目录移进 ``_archive/``，默认列表里不再出现，
-        ``agent --all`` 仍然看得到。收起来的那条就是不想再接着用的，
-        所以同样退出去，不另外开一条新的。
+        ``agent --all`` 仍然看得到。收起来的那条不再接着用，但也不必因此
+        退出 agent —— 挑一条留着接着用，按 q 或一条都不剩时才退出。
         """
         if args.strip():
             await self._s.show_message("用法：/archive（归档本会话，不需要参数）")
@@ -1062,13 +1124,9 @@ class _Session:
         except SessionError as e:
             await self._s.show_message("error: {}".format(e))
             return _CANCEL
-        await self._s.show_message(
-            "已归档会话 {}（{}），默认列表里不再出现，agent --list --all 仍能看到。".format(
-                gone.id, gone.title or "无标题"
-            )
-            + "\n已退出 agent 模式。"
+        return await self._switch_after_gone(
+            "已归档会话 {}（{}）。".format(gone.id, gone.title or "无标题")
         )
-        return _EXIT
 
     async def _slash_retry(self, args: str) -> Any:
         """接着本轮往下执行，等同于这一轮还没结束。不新增任何消息。
@@ -1107,10 +1165,12 @@ class _Session:
             message = task_message(task, screen)
             pending = [Message("user", message)]
         window = self._prepare_window(pending)
+        painter.compacting()
         if await self._compact(window, pending):
             window = self._prepare_window(pending)
         if message is not None:
             self._submit(task, screen)
+        painter.awaiting()
 
         agent = Agent(
             self._provider,

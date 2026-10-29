@@ -251,14 +251,14 @@ async def _stream_payload(
             if chunk.kind is ChunkKind.TOOL_CALL_DELTA and chunk.fragment is not None:
                 merger.add(chunk.fragment)
                 name, tail = merger.progress()
-                _paint(s, "gen-cmd", (name + " " + tail).strip() or "waiting...")
+                _paint(s, "gen-cmd", (name + " " + tail).strip() or "awaiting reply...")
             elif chunk.kind is ChunkKind.REASONING:
                 think.append(chunk.text)
                 _paint_thinking(s, "".join(think))
             elif chunk.kind is ChunkKind.DONE:
                 return
 
-    _paint(s, "gen-cmd", "waiting...")
+    _paint(s, "gen-cmd", "awaiting reply...")
 
     task = asyncio.ensure_future(consume())
     try:

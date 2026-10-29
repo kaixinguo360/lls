@@ -384,7 +384,7 @@ def test_a_display_only_overlay_stays_put_while_output_flows() -> None:
     """消息框、进度行画在哪就在哪：子进程的输出不会把它顶走。"""
     engine, screen, console = _overlay_engine()
     screen.feed(b"one\r\ntwo")
-    engine.draw_overlay("(agent 1) waiting...")
+    engine.draw_overlay("(agent 1) planning")
     console.snapshot()
     console.writes = 0
 
@@ -393,7 +393,7 @@ def test_a_display_only_overlay_stays_put_while_output_flows() -> None:
 
     rows = _emulate(console.snapshot())
     assert console.writes == 1                  # 铺模型与补画覆盖层同属一帧
-    assert rows[1].rstrip() == "(agent 1) waiting..."
+    assert rows[1].rstrip() == "(agent 1) planning"
     assert rows[2].rstrip() == "three"          # 子进程写在自己的行上
 
 

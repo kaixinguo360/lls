@@ -615,14 +615,74 @@ def test_painter_previews_the_latest_reasoning() -> None:
     assert "START" not in shown
 
 
-def test_painter_paints_waiting_before_the_model_answers() -> None:
+def test_painter_paints_a_phase_before_the_model_answers() -> None:
     """开跑之前就得有状态行：提示行已收起，首字节回来前屏幕上不能是空的。"""
     services = FakeServices([])
     painter = agent_cmd._Painter(services)
 
     painter.begin()
 
-    assert services.painted == ["(agent) waiting..."]
+    assert services.painted == ["(agent) preparing..."]
+
+
+def test_painter_says_what_it_is_doing_at_each_phase() -> None:
+    """每一相都对应一件具体的事，不留笼统的等待语。"""
+    services = FakeServices([])
+    painter = agent_cmd._Painter(services)
+
+    painter.begin()
+    painter.compacting()
+    painter.awaiting()
+    text = agent_cmd.AgentEvent(agent_cmd.AgentEventKind.TEXT, step=1, text="好")
+    painter.on_event(text)
+    painter.on_event(text)
+    painter._paint(force=True)
+
+    assert services.painted == [
+        "(agent) preparing...",
+        "(agent) compacting...",
+        "(agent) awaiting reply...",
+        "(agent) replying...",
+        "(agent) replying...",      # 再来一段正文不再换相
+    ]
+
+
+def test_painter_shows_a_call_and_how_long_it_took() -> None:
+    """调用期间显示工具名与参数；返回后换成「跑完了、花了多久」。"""
+    services = FakeServices([])
+    painter = agent_cmd._Painter(services)
+    call = agent_cmd.AgentEvent(
+        agent_cmd.AgentEventKind.CALL,
+        step=2,
+        name="read_terminal",
+        text='{"lines": 3}',
+    )
+
+    painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=2))
+    painter.on_event(call)
+    painter.on_event(
+        agent_cmd.AgentEvent(agent_cmd.AgentEventKind.RESULT, step=2, name="read_terminal")
+    )
+
+    assert services.painted[1] == '(agent 2) calling read_terminal: {"lines": 3}'
+    assert services.painted[-1].startswith("(agent 2) read_terminal done (")
+    assert services.painted[-1].endswith("s)")
+
+
+def test_painter_forgets_the_previous_step() -> None:
+    """新的一步不能还挂着上一步的调用和推理。"""
+    services = FakeServices([])
+    painter = agent_cmd._Painter(services)
+    painter.on_event(
+        agent_cmd.AgentEvent(agent_cmd.AgentEventKind.REASONING, step=1, text="想一想")
+    )
+    painter.on_event(
+        agent_cmd.AgentEvent(agent_cmd.AgentEventKind.CALL, step=1, name="bash", text="{}")
+    )
+
+    painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=2))
+
+    assert services.painted[-1] == "(agent 2) awaiting reply..."
 
 
 # ---- 提示词与显示预算一致 ----
