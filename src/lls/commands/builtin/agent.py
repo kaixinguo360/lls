@@ -657,6 +657,17 @@ class _Painter:
 
 # ---- 会话 ----
 
+def _hands_over(line: Any) -> bool:
+    """这一行进来后会立刻换成另一个覆盖层吗？
+
+    斜杠命令不交给模型：它们要么自己画屏（``/status`` 的翻看、``/help``
+    的消息框），要么下一轮提示原地重画。所以先别把提示占的行还给子进程
+    —— 那一帧还原会闪出子进程画面。成了任务的行照旧还原：接下来是子进程
+    的输出，屏幕该还给模型。
+    """
+    return isinstance(line, str) and line.startswith("/")
+
+
 class _Session:
     """一个持续的 Agent 会话：多轮任务共享历史，每轮内部自动多步执行。
 
@@ -724,6 +735,7 @@ class _Session:
             history_id="agent_task",
             history_scope="session",
             escape=_ESCAPE,
+            handoff=_hands_over,
         )
         if line is None:
             return None

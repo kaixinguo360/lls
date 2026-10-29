@@ -21,7 +21,7 @@ import select
 import signal
 import sys
 import time
-from typing import Any
+from typing import Any, Callable
 
 from lls.edit import HistoryStore, LineEditor
 from lls.term import ScreenModel
@@ -901,6 +901,7 @@ class Engine:
         history_scope: str = "global",
         escape: Any = None,
         keep_history: bool = True,
+        handoff: Callable[[Any], bool] | None = None,
     ) -> Any:
         """读一行输入，完整行编辑。
 
@@ -910,6 +911,12 @@ class Engine:
         ``history_scope`` 为 ``"session"`` 时这份 ↑ 历史跟着当前 AI 会话走
         （换会话就换一份，会话删掉一起删）；``"global"`` 是本机共用的一份。
         ``keep_history`` 为 False 时，这一行不进入该 ``history_id`` 的历史。
+
+        ``handoff(line)`` 为真表示返回值马上会换成另一个覆盖层（分页器、
+        消息框等）。默认返回前按模型还原覆盖层占的行 —— 调用方可能接着
+        跑子进程或透传，这是对的；但换覆盖层时那一次还原只会闪出一帧
+        子进程画面。交接时改为保留锚点与行数，下一个 ``draw_overlay``
+        原地顶替，中间不露底。
         """
         session = history_scope == "session"
         editor = self._editor_for(history_id, session=session)
@@ -930,6 +937,18 @@ class Engine:
             lines_all,
             lines_cur,
         )
+
+        def _leave(result: Any) -> Any:
+            """离开输入循环：按模型还原覆盖层，或把它原地交给调用方。
+
+            交接时不还原，锚点与行数留在原地：调用方的 ``draw_overlay``
+            若锚点相同、行数够，就直接原地覆盖，物理画面上不会出现
+            「先露出子进程画面、再被新覆盖层盖住」的那一帧。
+            """
+            if handoff is None or not handoff(result):
+                self.render_from_model(keep_overlay=False)
+            return result
+
         try:
             while True:
                 key = await self.read_key()
@@ -943,28 +962,27 @@ class Engine:
                 if key.control in ("ctrl_c", "ctrl_d", "enter") or (
                     key.control == "escape" and escape is not None
                 ):
-                    # 离开输入循环：收起覆盖层，把它占的行按模型还原
-                    self.render_from_model(keep_overlay=False)
+                    # 离开输入循环：收起覆盖层，或把它原地交给调用方
                     if key.control == "ctrl_c":
                         if cancel is not None:
-                            return cancel
+                            return _leave(cancel)
                         line = editor.text
                         if include_last:
                             line += "\x03"
-                        return line
+                        return _leave(line)
                     if key.control == "ctrl_d":
                         if exit is not None or cancel is not None:
-                            return exit if exit is not None else cancel
+                            return _leave(exit if exit is not None else cancel)
                         line = editor.text
                         if include_last:
                             line += "\x04"
-                        return line
+                        return _leave(line)
                     if key.control == "enter":
                         line = editor.submit(keep=keep_history)
                         if keep_history:
                             self._remember(history_id, line, session=session)
-                        return line
-                    return escape  # Esc
+                        return _leave(line)
+                    return _leave(escape)  # Esc
                 if key.control == "backspace":
                     editor.backspace()
                 elif key.control == "delete":

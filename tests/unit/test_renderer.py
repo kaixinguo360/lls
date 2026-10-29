@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pyte
 
 from lls.session.engine import Engine
@@ -202,3 +204,69 @@ def test_resize_redraws_the_overlay_at_the_new_width() -> None:
     assert engine._overlay_lines == 2
     assert rows[0].rstrip() == ">aaaaaaaaa"
     assert rows[1].rstrip() == "aaaaaaaaa"
+
+
+# ---- 读输入后把覆盖层原地交给下一个界面 ----
+
+def _loop_engine():
+    """3.8 上 Event/Queue 构造时就绑定循环，只能在运行中的循环里建。"""
+    engine, screen, console = _overlay_engine()
+    engine._stdin_q = asyncio.Queue()
+    engine._exit_event = asyncio.Event()
+    return engine, screen, console
+
+
+def _typed(keys: bytes, handoff=None):
+    """敲一串键跑一次 read_line，回放整段写后得到的屏幕。"""
+
+    async def run():
+        engine, screen, console = _loop_engine()
+        screen.feed(b"one\r\ntwo\r\nthree")
+        engine.push_keys(keys)
+        line = await engine.read_line("> ", handoff=handoff)
+        return engine, console, line
+
+    engine, console, line = asyncio.run(run())
+    return engine, _emulate(bytes(console.data)), line
+
+
+def test_handoff_keeps_the_prompt_rows_for_the_next_screen() -> None:
+    """按回车进 /status 时不还原：翻看界面直接顶替提示占的行。
+
+    旧行为是 read_line 返回前按模型重绘一次，于是斜杠命令的下一屏到来
+    之前会闪出一帧子进程画面。
+    """
+    def takes_over(text: str) -> bool:
+        return text.startswith("/")
+
+    engine, rows, line = _typed(b"/s\r", handoff=takes_over)
+
+    assert line == "/s"
+    # 提示行原地留着，没被子进程的画面顶掉
+    assert rows[2].rstrip() == "> /s"
+    assert engine._overlay_anchor_row is not None
+
+
+def test_no_handoff_gives_the_rows_back_like_before() -> None:
+    """成了任务的行照旧还原：接下来是子进程的输出。"""
+    def takes_over(text: str) -> bool:
+        return text.startswith("/")
+
+    engine, rows, line = _typed(b"list files\r", handoff=takes_over)
+
+    assert line == "list files"
+    assert rows[0].rstrip() == "one"
+    assert rows[2].rstrip() == "three"
+    assert engine._overlay_anchor_row is None
+
+
+# ---- 哪些行会换成另一个覆盖层 ----
+
+def test_slash_lines_are_handed_over() -> None:
+    from lls.commands.builtin.agent import _hands_over
+
+    assert _hands_over("/status") is True
+    assert _hands_over("/s") is True
+    assert _hands_over("") is False
+    assert _hands_over("看看 README") is False
+    assert _hands_over("//原样交给模型") is True
