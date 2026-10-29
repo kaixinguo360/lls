@@ -387,6 +387,7 @@ def test_output_without_any_overlay_draws_nothing_extra() -> None:
 
     assert console.data == b""
 
+
 def test_display_only_overlay_leaves_the_cursor_where_the_child_writes() -> None:
     """纯展示的覆盖层画完不能把光标留在文末。
 
@@ -402,3 +403,27 @@ def test_display_only_overlay_leaves_the_cursor_where_the_child_writes() -> None
     emulated = pyte.Screen(20, 8)
     pyte.ByteStream(emulated).feed(bytes(console.data))
     assert (emulated.cursor.y, emulated.cursor.x) == (screen.cursor.y, screen.cursor.x)
+
+def test_a_batch_of_keys_repaints_the_prompt_once() -> None:
+    """同一批到达的键只重画一帧。
+
+    每处理一个键就重画一次时，这些帧会逐个上屏：连按方向键，中间帧里的
+    光标还没跟到后面几个键该在的位置，看起来就是光标在错处一闪。
+    """
+    cursors = []
+
+    async def run():
+        engine, screen, _console = _loop_engine()
+        screen.feed(b"one\r\ntwo\r\nthree")
+        real = engine.draw_overlay
+
+        def counting(text, cursor=None):
+            cursors.append(cursor)
+            return real(text, cursor)
+
+        engine.draw_overlay = counting
+        engine.push_keys(b"abcd" + b"\x1b[D" * 6 + b"\r")
+        return await engine.read_line("> ")
+
+    assert asyncio.run(run()) == "abcd"
+    assert len(cursors) == 1  # 只有进入时那一帧，按键不再逐个重画

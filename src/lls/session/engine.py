@@ -1024,20 +1024,29 @@ class Engine:
         editor.reset(value)
 
         assert self._printer is not None
-        anchor, lines_all = self.draw_overlay(
-            prompt + editor.text, len(prompt) + editor.cursor
-        )
-        lines_cur = lines_all
-        # **立刻**登记活跃覆盖层，而不是等到第一次按键之后。
-        # 否则「刚进入、用户在等、子进程此时输出」的窗口里 _active_prompt
-        # 仍是 None，输出会直接透传并把覆盖层冲掉。
-        self._active_prompt = (
-            prompt,
-            editor.text,
-            len(prompt) + editor.cursor,
-            lines_all,
-            lines_cur,
-        )
+        shown: tuple[str, int] = ("", 0)
+
+        def _draw() -> None:
+            """按当前编辑状态重画提示行，并登记活跃覆盖层。
+
+            ``shown`` 记住画出去的是哪一版：缓冲里还有键时会跳过重画，
+            交接前要据此补最后一帧。
+            """
+            nonlocal shown
+            anchor, lines_all = self.draw_overlay(
+                prompt + editor.text, len(prompt) + editor.cursor
+            )
+            shown = (editor.text, editor.cursor)
+            # **立刻**登记活跃覆盖层，而不是等到第一次按键之后。
+            # 否则「刚进入、用户在等、子进程此时输出」的窗口里 _active_prompt
+            # 仍是 None，输出会直接透传并把覆盖层冲掉。
+            self._active_prompt = (
+                prompt,
+                editor.text,
+                len(prompt) + editor.cursor,
+                lines_all,
+                lines_all,
+            )
 
         def _leave(result: Any) -> Any:
             """离开输入循环：按模型还原覆盖层，或把它原地交给调用方。
@@ -1048,7 +1057,14 @@ class Engine:
             """
             if handoff is None or not handoff(result):
                 self.render_from_model(keep_overlay=False)
+                return result
+            if (editor.text, editor.cursor) != shown:
+                # 缓冲里还有键时省下的重画要在这里补上：交出去的是这一帧
+                # 的位置与行数，别停在按键之前的样子上。
+                _draw()
             return result
+
+        _draw()
 
         try:
             while True:
@@ -1104,18 +1120,13 @@ class Engine:
                     pass
                 elif key.char:
                     editor.insert(key.char)
+                # 同一批到达的键先全部应用，只重画最后那一帧。每处理一个键
+                # 就画一次时，这些帧会逐个上屏：连按方向键，中间帧里的光标
+                # 还没跟到后面几个键该在的位置，看起来就是光标在错处一闪。
+                if self._key_buf:
+                    continue
                 # 内容变化后重新布局：行数可能变，位置随之上下调整。
-                anchor, lines_all = self.draw_overlay(
-                    prompt + editor.text, len(prompt) + editor.cursor
-                )
-                lines_cur = lines_all
-                self._active_prompt = (
-                    prompt,
-                    editor.text,
-                    len(prompt) + editor.cursor,
-                    lines_all,
-                    lines_cur,
-                )
+                _draw()
         finally:
             # 覆盖层不再显示，后续输出无需再绕过它；内容也一并忘掉，
             # 免得之后改尺寸时又把它当成「当前覆盖层」画回来。
