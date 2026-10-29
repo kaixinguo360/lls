@@ -147,6 +147,30 @@ def test_a_completed_turn_writes_events_with_usage(monkeypatch, tmp_path) -> Non
     session.close()
 
 
+def test_retry_continues_without_adding_a_message(monkeypatch, tmp_path) -> None:
+    """``/retry`` 只接着跑：不新增消息，也不多写一条 user。"""
+    keeper = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复一"), _text("答复二")])
+
+    _run(monkeypatch, provider, ["任务一", "/retry", "/exit"], keeper)
+
+    session = keeper.current()
+    events = session.events()
+    assert [event.type for event in events] == [
+        "session_start",
+        "screen",
+        "user",
+        "assistant",
+        "turn_end",
+        "assistant",
+        "turn_end",
+    ]
+    # 第二次请求里没有新的用户消息：会话原样继续。
+    sent = provider.requests[-1]
+    assert [m.role for m in sent if m.role != "system"] == ["user", "assistant"]
+    session.close()
+
+
 def test_the_transcript_survives_into_the_next_process(monkeypatch, tmp_path) -> None:
     first = SessionStore(root=tmp_path)
     _run(monkeypatch, ScriptedProvider([_text("答复一")]), ["/exit"], first, args="任务一")

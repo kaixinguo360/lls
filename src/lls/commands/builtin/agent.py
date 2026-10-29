@@ -67,6 +67,7 @@ __all__ = ["cmd_agent"]
 _ESCAPE = object()
 _CANCEL = object()
 _EXIT = object()
+_CONTINUE = object()
 
 HISTORY_TURNS = 0         # 兜底的轮数上限；0 = 只按 token 预算裁
 COMPACT_SOURCE_CHARS = 40000  # 摘要请求里最多带多少字符原文
@@ -110,7 +111,7 @@ _SLASH_COMMANDS = (
     ("new", (), "_slash_new", "开一条新会话并切过去：/new [标题]"),
     ("fork", (), "_slash_fork", "从当前会话分叉：/fork [--at <seq>]"),
     ("rm", (), "_slash_rm", "删除一条会话：/rm <id>"),
-    ("retry", (), "_slash_retry", "重跑上一轮的任务"),
+    ("retry", (), "_slash_retry", "接着本轮继续执行"),
     ("exit", ("quit", "q"), "_slash_exit", "退出 agent 模式"),
 )
 
@@ -726,7 +727,6 @@ class _Session:
         self._log = session.log(LOG_ENTRIES) if session is not None else []
         self._window = None
         self._compacted_now = False
-        self._last_task = ""     # /retry：上一轮的任务原文
 
     async def run(self, first_task: str | None) -> bool:
         """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。
@@ -780,7 +780,7 @@ class _Session:
     async def _slash(self, text: str) -> Any:
         """会话内的斜杠命令：只影响本地状态，不交给模型。
 
-        结局有四种：返回 ``_CANCEL`` 回去继续读任务；返回一段文本（``/retry``）
+        结局有四种：返回 ``_CANCEL`` 回去继续读任务；返回一段文本
         会被当作任务执行；返回 ``_EXIT`` 退出；换会话则抛 :class:`_Switch`。
         """
         if text.startswith("//"):
@@ -1014,15 +1014,14 @@ class _Session:
         return _CANCEL
 
     async def _slash_retry(self, args: str) -> Any:
-        if not self._last_task:
-            await self._s.show_message("还没有可以重跑的上一轮任务")
-            return _CANCEL
-        # 返回原文：``run`` 会把它当任务再跑一遍，提示符里也看得到。
-        return self._last_task
+        """接着本轮往下执行，等同于这一轮还没结束。不新增任何消息。"""
+        return _CONTINUE
 
-    async def _one(self, task: str) -> None:
-        """执行一轮任务。异常路径只影响本轮，不影响已经写下的事件。"""
-        self._last_task = task
+    async def _one(self, task: Any) -> None:
+        """执行一轮任务。异常路径只影响本轮，不影响已经写下的事件。
+
+        ``task`` 是 ``_CONTINUE`` 时接着现有会话往下执行，不新增消息。
+        """
         # 先画状态，再去忙那些要等的事（快照、压缩、拼上下文）：提示行已经
         # 收起，等下去的那几秒屏幕上不能是空的。
         painter = _Painter(self._s)
@@ -1030,17 +1029,24 @@ class _Session:
         # 提交任务时同批到达的按键还留在键盘缓冲里；转回原始队列，
         # 否则本轮的中断检测看不到它们（两个队列不互通）。
         self._s.requeue_pending_keys()
-        screen = self._view.snapshot(TASK_LINES)
-        self._view.mark(screen)
         self._guard.reset()
         self._compacted_now = False
 
-        message = task_message(task, screen)
-        pending = [Message("user", message)]
+        label = "" if task is _CONTINUE else task
+        if task is _CONTINUE:
+            # 接着往下执行：窗口就是现有会话，什么都不新加。
+            message = None
+            pending: List[Any] = []
+        else:
+            screen = self._view.snapshot(TASK_LINES)
+            self._view.mark(screen)
+            message = task_message(task, screen)
+            pending = [Message("user", message)]
         window = self._prepare_window(pending)
         if await self._compact(window, pending):
             window = self._prepare_window(pending)
-        self._submit(task, screen)
+        if message is not None:
+            self._submit(task, screen)
 
         agent = Agent(
             self._provider,
@@ -1060,19 +1066,19 @@ class _Session:
         except _Aborted as e:
             self._keep_partial(agent)
             self._finish_turn("aborted", str(e), window, None)
-            self._record(task, "", str(e))
+            self._record(label, "", str(e))
             return
         except Exception as e:  # noqa: BLE001
             note = "error: {}".format(e)
             self._finish_turn("error", note, window, None)
-            self._record(task, "", note)
+            self._record(label, "", note)
             return
         finally:
             self._s.restore_context()
 
         summary = result.summary if result.summary.strip() else "（无文本答复）"
         self._finish_turn("ok", "", window, result.usage)
-        self._record(task, summary)
+        self._record(label, summary)
 
     # ---- 记录 ----
 

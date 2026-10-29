@@ -156,10 +156,16 @@ class Agent:
 
     # ---- 公开 ----
 
-    async def run(self, task: str, history: Sequence[Message] = ()) -> AgentResult:
-        """执行一轮任务，直到模型不再调用工具（或达到可选的上限）。"""
+    async def run(
+        self, task: str | None = None, history: Sequence[Message] = ()
+    ) -> AgentResult:
+        """执行一轮任务，直到模型不再调用工具（或达到可选的上限）。
+
+        ``task`` 为 None 时不新增用户消息：接着 ``history`` 往下执行。
+        """
         conversation = list(history)
-        self._push(conversation, Message("user", task), None)
+        if task is not None:
+            self._push(conversation, Message("user", task), None)
 
         step = 0
         while True:
