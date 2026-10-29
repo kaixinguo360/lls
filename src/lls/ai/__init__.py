@@ -22,7 +22,16 @@ from .config import AIConfig
 from .conversation import Conversation
 from .provider import Provider
 from .registry import available_types, create_provider, register_type
-from .types import Chunk, ChunkKind, Message, ProviderConfig, Tool, ToolCall
+from .toolcalls import ToolCallMerger
+from .types import (
+    Chunk,
+    ChunkKind,
+    Message,
+    ProviderConfig,
+    Tool,
+    ToolCall,
+    ToolCallDelta,
+)
 
 __all__ = [
     "AIConfig",
@@ -42,6 +51,8 @@ __all__ = [
     "ProviderConfig",
     "Tool",
     "ToolCall",
+    "ToolCallDelta",
+    "ToolCallMerger",
     "available_types",
     "create_provider",
     "default_catalog",

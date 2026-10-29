@@ -10,7 +10,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-__all__ = ["Chunk", "ChunkKind", "Message", "ProviderConfig", "Tool", "ToolCall"]
+__all__ = [
+    "Chunk",
+    "ChunkKind",
+    "Message",
+    "ProviderConfig",
+    "Tool",
+    "ToolCall",
+    "ToolCallDelta",
+]
 
 
 @dataclass(frozen=True)
@@ -22,6 +30,22 @@ class ToolCall:
 
     id: str
     name: str
+    arguments: str = ""
+
+
+@dataclass(frozen=True)
+class ToolCallDelta:
+    """工具调用的一个**分片**（wire 原样）。
+
+    ``id`` / ``name`` 通常只在首片出现，``arguments`` 是 JSON 文本的一段。
+    拼成完整调用由使用方做，见 :mod:`lls.ai.toolcalls`。
+    """
+
+    index: int = 0
+    """同一次请求里的第几个调用（并行调用靠它分槽）。"""
+
+    id: str = ""
+    name: str = ""
     arguments: str = ""
 
 
@@ -89,8 +113,8 @@ class ChunkKind(str, Enum):
     REASONING = "reasoning"
     """推理内容（delta.reasoning_content）。"""
 
-    TOOL_CALL = "tool_call"
-    """一次**归并完成**的工具调用（分片已在传输层合并）。"""
+    TOOL_CALL_DELTA = "tool_call_delta"
+    """工具调用的一个分片，原样交出；归并见 :mod:`lls.ai.toolcalls`。"""
 
     USAGE = "usage"
     """本轮的 token 用量（``prompt`` / ``completion``）。"""
@@ -105,7 +129,7 @@ class Chunk:
 
     kind: ChunkKind
     text: str = ""
-    call: ToolCall | None = None
+    fragment: ToolCallDelta | None = None
     usage: dict[str, Any] | None = None
 
 

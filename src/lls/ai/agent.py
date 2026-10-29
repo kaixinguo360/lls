@@ -29,6 +29,7 @@ from enum import Enum
 from typing import Any, Awaitable, Callable, Sequence
 
 from .provider import Provider
+from .toolcalls import ToolCallMerger
 from .types import ChunkKind, Message, Tool, ToolCall
 
 __all__ = [
@@ -67,6 +68,8 @@ class AgentEventKind(str, Enum):
     STEP = "step"
     TEXT = "text"
     REASONING = "reasoning"
+    CALL_DELTA = "call_delta"
+    """工具调用分片：``name`` 是刚收到的名字，``text`` 是参数片段。"""
     CALL = "call"
     RESULT = "result"
 
@@ -221,7 +224,7 @@ class Agent:
         self._usage = None
         self._partial = ""
         text_parts: list[str] = []
-        calls: list[ToolCall] = []
+        merger = ToolCallMerger()
 
         async def consume() -> None:
             async for chunk in self._provider.chat(
@@ -240,8 +243,20 @@ class Agent:
                     self._emit(
                         AgentEvent(AgentEventKind.REASONING, step=step, text=chunk.text)
                     )
-                elif chunk.kind is ChunkKind.TOOL_CALL and chunk.call is not None:
-                    calls.append(chunk.call)
+                elif (
+                    chunk.kind is ChunkKind.TOOL_CALL_DELTA
+                    and chunk.fragment is not None
+                ):
+                    merger.add(chunk.fragment)
+                    # 分片一到位就外传，界面能在流中看到「正在拼哪个调用」。
+                    self._emit(
+                        AgentEvent(
+                            AgentEventKind.CALL_DELTA,
+                            step=step,
+                            name=chunk.fragment.name,
+                            text=chunk.fragment.arguments,
+                        )
+                    )
                 elif chunk.kind is ChunkKind.USAGE:
                     self._usage = dict(chunk.usage or {})
                 elif chunk.kind is ChunkKind.DONE:
@@ -261,7 +276,7 @@ class Agent:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-        return "".join(text_parts), calls
+        return "".join(text_parts), merger.calls()
 
     # ---- 工具执行 ----
 

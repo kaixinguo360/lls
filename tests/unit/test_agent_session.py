@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from lls.ai import Chunk, ChunkKind, ConfigError, ToolCall
+from lls.ai import Chunk, ChunkKind, ConfigError, ToolCall, ToolCallDelta
 from lls.commands import get_command
 from lls.commands.builtin import agent as agent_cmd
 from lls.ui import strip_sgr
@@ -159,9 +159,24 @@ def _text(value: str):
 
 
 def _calls(*calls):
-    return [Chunk(ChunkKind.TOOL_CALL, call=call) for call in calls] + [
-        Chunk(ChunkKind.DONE)
-    ]
+    """按 wire 的样子拆成分片：id/name 只在首片，arguments 分两段发。"""
+    chunks = []
+    for index, call in enumerate(calls):
+        cut = len(call.arguments) // 2
+        chunks.append(
+            Chunk(
+                ChunkKind.TOOL_CALL_DELTA,
+                fragment=ToolCallDelta(index, call.id, call.name, call.arguments[:cut]),
+            )
+        )
+        if cut < len(call.arguments):
+            chunks.append(
+                Chunk(
+                    ChunkKind.TOOL_CALL_DELTA,
+                    fragment=ToolCallDelta(index, "", "", call.arguments[cut:]),
+                )
+            )
+    return chunks + [Chunk(ChunkKind.DONE)]
 
 
 def _call(call_id: str, name: str, arguments) -> ToolCall:
@@ -837,3 +852,67 @@ def test_agent_tool_schemas_are_strict_and_required() -> None:
         assert tool.strict is True
         assert tool.parameters["required"]
         assert tool.parameters["additionalProperties"] is False
+
+
+# ---- 进度覆盖层 ----
+
+
+class _OverlayScreen:
+    columns = 80
+    rows = 24
+    alternate = False
+
+    def __init__(self) -> None:
+        self.painted = []
+
+    def draw_overlay(self, text, cursor=None):
+        self.painted.append(text)
+        return 0, len(text.split("\n"))
+
+
+class _OverlayServices:
+    def __init__(self) -> None:
+        self.screen = _OverlayScreen()
+
+    def draw_overlay(self, text):
+        return self.screen.draw_overlay(text)
+
+
+def test_progress_shows_the_call_being_built() -> None:
+    """工具调用分片还在流里时就把「正在拼哪个调用」画出来，不等流结束。"""
+    services = _OverlayServices()
+    progress = agent_cmd._Painter(services)
+
+    progress.on_event(
+        agent_cmd.AgentEvent(
+            agent_cmd.AgentEventKind.CALL_DELTA,
+            step=1,
+            name="send_text",
+            text='{"text"',
+        )
+    )
+
+    first = services.screen.painted[0]
+    assert "send_text" in first
+    assert '{"text"' in first
+
+
+def test_progress_replaces_the_partial_call_with_the_finished_one() -> None:
+    services = _OverlayServices()
+    progress = agent_cmd._Painter(services)
+
+    progress.on_event(
+        agent_cmd.AgentEvent(
+            agent_cmd.AgentEventKind.CALL_DELTA, step=1, name="send_text", text="{"
+        )
+    )
+    progress.on_event(
+        agent_cmd.AgentEvent(
+            agent_cmd.AgentEventKind.CALL,
+            step=1,
+            name="send_text",
+            text='{"text": "ls"}',
+        )
+    )
+
+    assert 'send_text: {"text": "ls"}' in services.screen.painted[-1]

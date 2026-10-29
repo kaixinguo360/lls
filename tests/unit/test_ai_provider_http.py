@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from lls.ai import ChunkKind, Message, ProviderConfig, Tool
+from lls.ai import ChunkKind, Message, ProviderConfig, Tool, ToolCallMerger
 from lls.ai.providers.http import HttpProvider
 from lls.ai.providers.openai import ProviderError
 
@@ -140,6 +140,14 @@ def _chat(provider, **kwargs):
 
     return asyncio.run(run())
 
+def _merged(chunks):
+    """把流里的分片拼成完整调用：provider 只交碎片，归并在使用方。"""
+    merger = ToolCallMerger()
+    for chunk in chunks:
+        if chunk.kind is ChunkKind.TOOL_CALL_DELTA and chunk.fragment is not None:
+            merger.add(chunk.fragment)
+    return merger.calls()
+
 
 # ---- 流式内容 ----
 
@@ -150,11 +158,16 @@ def test_text_chunks_are_forwarded(stub) -> None:
     assert "".join(c.text for c in chunks if c.kind is ChunkKind.TEXT) == "hello"
 
 
-def test_tool_call_fragments_are_merged(stub) -> None:
+def test_tool_call_fragments_are_forwarded_as_is(stub) -> None:
     chunks = _chat(_provider(stub))
 
-    call = [c for c in chunks if c.kind is ChunkKind.TOOL_CALL][0].call
+    fragments = [c.fragment for c in chunks if c.kind is ChunkKind.TOOL_CALL_DELTA]
+    assert len(fragments) == 3  # 桩就是把一个调用拆成三片发下来的
+    assert [f.index for f in fragments] == [0, 0, 0]
+
+    call = _merged(chunks)[0]
     assert call.id == "call_stub"
+    assert call.name == "emit_input"
     assert json.loads(call.arguments) == {"input": "ls"}
 
 
@@ -164,10 +177,10 @@ def test_stream_ends_with_done(stub) -> None:
     assert chunks[-1].kind is ChunkKind.DONE
 
 
-def test_single_tool_call_is_emitted_once(stub) -> None:
+def test_a_single_tool_call_merges_into_one(stub) -> None:
     chunks = _chat(_provider(stub))
 
-    assert len([c for c in chunks if c.kind is ChunkKind.TOOL_CALL]) == 1
+    assert len(_merged(chunks)) == 1
 
 
 # ---- 请求本身 ----

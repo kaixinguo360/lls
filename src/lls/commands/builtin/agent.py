@@ -619,6 +619,8 @@ class _Painter:
         self._step = 0
         self._action = ""
         self._think = ""
+        self._call = ""
+        self._call_name = ""
         self._painted = 0.0
 
     def on_event(self, event: AgentEvent) -> None:
@@ -628,8 +630,14 @@ class _Painter:
         elif event.kind is AgentEventKind.REASONING:
             self._think = (self._think + event.text)[-400:]
             self._paint()
+        elif event.kind is AgentEventKind.CALL_DELTA:
+            if event.name:
+                self._call_name = event.name
+            self._call = (self._call + event.text)[-400:]
+            self._paint()
         elif event.kind is AgentEventKind.CALL:
             self._action = (event.name + ": " + event.text)[-400:]
+            self._call = ""
             self._paint(force=True)
         elif event.kind is AgentEventKind.RESULT:
             self._paint()
@@ -643,10 +651,14 @@ class _Painter:
             # 全屏程序自己拥有画面；覆盖层只会把它弄花。
             return
         columns = max(1, self._s.screen.columns)
+        action = self._action
+        if not action and self._call:
+            # 参数还在流里：先把「正在拼哪个调用、拼到哪」显示出来。
+            action = (self._call_name + " " + self._call).strip()
         lines = [
             _line(
                 f"(agent {self._step}) ",
-                self._action or "waiting...",
+                action or "waiting...",
                 columns,
             )
         ]

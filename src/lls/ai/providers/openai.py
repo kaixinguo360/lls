@@ -1,7 +1,7 @@
 """OpenAI 兼容 provider。
 
 走标准 ``/v1/chat/completions``。只做协议转发：``Message`` 列表变请求，
-流式 delta 变 ``Chunk``；工具调用按 index 归并成完整的 ``ToolCall``。
+流式 delta 变 ``Chunk``；工具调用按分片原样交出（归并见 :mod:`lls.ai.toolcalls`）。
 不做提示词拼接、不做输出清洗。
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, Sequence
 
 from ..types import Chunk, ChunkKind, Message, ProviderConfig, Tool
-from ._wire import finished_calls, merge_tool_fragments
+from ..toolcalls import delta_from
 
 __all__ = ["OpenAIProvider", "ProviderError"]
 
@@ -62,9 +62,6 @@ class OpenAIProvider:
         payload = [m.to_payload() for m in messages]
         body = self._request_body(model, payload, tools, parallel_tool_calls, params)
 
-        # index -> 累积中的调用。id/name 通常只在首片出现，arguments 逐片拼接。
-        pending = {}  # type: Dict[int, Dict[str, str]]
-
         try:
             response = await client.chat.completions.create(**body)
             async for piece in response:
@@ -80,14 +77,14 @@ class OpenAIProvider:
                 reasoning = getattr(delta, "reasoning_content", None)
                 if reasoning:
                     yield Chunk(ChunkKind.REASONING, reasoning)
-                merge_tool_fragments(pending, getattr(delta, "tool_calls", None))
+                for fragment in getattr(delta, "tool_calls", None) or ():
+                    yield Chunk(
+                        ChunkKind.TOOL_CALL_DELTA, fragment=delta_from(fragment)
+                    )
         except ProviderError:
             raise
         except Exception as e:  # noqa: BLE001
             raise ProviderError(str(e)) from e
-
-        for call in finished_calls(pending):
-            yield Chunk(ChunkKind.TOOL_CALL, call=call)
 
         yield Chunk(ChunkKind.DONE)
 

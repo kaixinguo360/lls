@@ -16,7 +16,7 @@ import pytest
 
 pytest.importorskip("openai")
 
-from lls.ai import ChunkKind, Message, ProviderConfig, Tool  # noqa: E402
+from lls.ai import ChunkKind, Message, ProviderConfig, Tool, ToolCallMerger  # noqa: E402
 from lls.ai.providers.openai import OpenAIProvider  # noqa: E402
 
 TOOL = Tool(
@@ -113,20 +113,28 @@ def _chat(provider, **kwargs):
 
     return asyncio.run(run())
 
+def _merged(chunks):
+    """把流里的分片拼成完整调用：provider 只交碎片，归并在使用方。"""
+    merger = ToolCallMerger()
+    for chunk in chunks:
+        if chunk.kind is ChunkKind.TOOL_CALL_DELTA and chunk.fragment is not None:
+            merger.add(chunk.fragment)
+    return merger.calls()
 
-def test_streamed_tool_call_is_emitted(stub) -> None:
+
+def test_streamed_tool_call_is_emitted_as_fragments(stub) -> None:
     chunks = _chat(_provider(stub), parallel_tool_calls=False)
 
-    calls = [c for c in chunks if c.kind is ChunkKind.TOOL_CALL]
-    assert len(calls) == 1
-    assert calls[0].call.name == "emit_input"
+    fragments = [c for c in chunks if c.kind is ChunkKind.TOOL_CALL_DELTA]
+    assert fragments and all(c.fragment is not None for c in fragments)
+    assert [c.name for c in _merged(chunks)] == ["emit_input"]
     assert chunks[-1].kind is ChunkKind.DONE
 
 
-def test_argument_fragments_are_merged(stub) -> None:
+def test_argument_fragments_merge_into_one_call(stub) -> None:
     chunks = _chat(_provider(stub), parallel_tool_calls=False)
 
-    call = [c for c in chunks if c.kind is ChunkKind.TOOL_CALL][0].call
+    call = _merged(chunks)[0]
     assert call.id == "call_stub"
     assert call.arguments == '{"input": "ls -l"}'
     assert json.loads(call.arguments) == {"input": "ls -l"}

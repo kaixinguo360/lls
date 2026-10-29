@@ -22,6 +22,7 @@ from lls.ai import (
     Message,
     Tool,
     ToolCall,
+    ToolCallDelta,
 )
 
 SYSTEM = "system prompt"
@@ -59,9 +60,24 @@ def _text(value: str):
 
 
 def _calls(*calls) -> list:
-    return [Chunk(ChunkKind.TOOL_CALL, call=call) for call in calls] + [
-        Chunk(ChunkKind.DONE)
-    ]
+    """按 wire 的样子拆成分片：id/name 只在首片，arguments 分两段发。"""
+    chunks = []
+    for index, call in enumerate(calls):
+        cut = len(call.arguments) // 2
+        chunks.append(
+            Chunk(
+                ChunkKind.TOOL_CALL_DELTA,
+                fragment=ToolCallDelta(index, call.id, call.name, call.arguments[:cut]),
+            )
+        )
+        if cut < len(call.arguments):
+            chunks.append(
+                Chunk(
+                    ChunkKind.TOOL_CALL_DELTA,
+                    fragment=ToolCallDelta(index, "", "", call.arguments[cut:]),
+                )
+            )
+    return chunks + [Chunk(ChunkKind.DONE)]
 
 
 def _call(call_id: str, name: str, arguments) -> ToolCall:
@@ -410,6 +426,42 @@ def test_events_cover_stream_and_tools() -> None:
         assert expected in kinds
 
 
+def test_call_fragments_are_emitted_while_streaming() -> None:
+    """分片一到位就外传：界面能在流中看到「正在拼哪个调用」。"""
+    events = []
+
+    async def handler(args):
+        return "ok"
+
+    provider = ScriptedProvider(
+        [_calls(_call("c", "t", {"a": 1})), _text("done")]
+    )
+
+    _run(provider, "任务", tools=[_tool("t", handler)], events=events)
+
+    deltas = [e for e in events if e.kind is AgentEventKind.CALL_DELTA]
+    assert [d.name for d in deltas] == ["t", ""]
+    assert "".join(d.text for d in deltas) == '{"a": 1}'
+
+
+def test_call_event_carries_the_merged_arguments() -> None:
+    events = []
+
+    async def handler(args):
+        return "ok"
+
+    provider = ScriptedProvider(
+        [_calls(_call("c", "t", {"a": 1})), _text("done")]
+    )
+
+    result = _run(provider, "任务", tools=[_tool("t", handler)], events=events)
+
+    call = [e for e in events if e.kind is AgentEventKind.CALL][0]
+    assert call.name == "t"
+    assert json.loads(call.text) == {"a": 1}
+    assert result.messages[2].tool_call_id == "c"
+
+
 def test_tools_and_parallel_flag_are_sent() -> None:
     definition = Tool(name="t", description="d", parameters={"type": "object"})
 
@@ -453,7 +505,10 @@ def test_each_message_reaches_on_message_with_its_usage() -> None:
         [
             [
                 Chunk(ChunkKind.TEXT, "先看看"),
-                Chunk(ChunkKind.TOOL_CALL, call=ToolCall("c1", "shell", "{}")),
+                Chunk(
+                    ChunkKind.TOOL_CALL_DELTA,
+                    fragment=ToolCallDelta(0, "c1", "shell", "{}"),
+                ),
                 Chunk(ChunkKind.USAGE, usage={"prompt": 10, "completion": 2}),
                 Chunk(ChunkKind.DONE),
             ],

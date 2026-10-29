@@ -16,7 +16,7 @@ from typing import Any, AsyncIterator, Sequence
 from urllib.parse import urlsplit
 
 from ..types import Chunk, ChunkKind, Message, ProviderConfig, Tool
-from ._wire import finished_calls, merge_tool_fragments
+from ..toolcalls import delta_from
 from .openai import ProviderError
 
 __all__ = ["HttpProvider"]
@@ -209,7 +209,6 @@ class HttpProvider:
                 body = detail.decode("utf-8", "replace").strip()
                 raise ProviderError(f"HTTP {status}: {body}")
 
-            pending = {}  # type: Dict[int, Dict[str, str]]
             async for event in self._iter_sse(self._iter_body(reader, headers)):
                 usage = event.get("usage")
                 if isinstance(usage, dict):
@@ -224,10 +223,11 @@ class HttpProvider:
                 reasoning = delta.get("reasoning_content")
                 if reasoning:
                     yield Chunk(ChunkKind.REASONING, reasoning)
-                merge_tool_fragments(pending, delta.get("tool_calls"))
+                for fragment in delta.get("tool_calls") or ():
+                    yield Chunk(
+                        ChunkKind.TOOL_CALL_DELTA, fragment=delta_from(fragment)
+                    )
 
-            for call in finished_calls(pending):
-                yield Chunk(ChunkKind.TOOL_CALL, call=call)
             yield Chunk(ChunkKind.DONE)
         except ProviderError:
             raise

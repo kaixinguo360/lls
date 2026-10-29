@@ -17,6 +17,7 @@ from lls.ai import (
     Message,
     Tool,
     ToolCall,
+    ToolCallMerger,
     default_catalog,
 )
 from lls.commands.result import CommandResult
@@ -237,7 +238,7 @@ async def _stream_payload(
     """
     provider, model = default_catalog().resolve()
     messages = build_messages(request, screen, history)
-    box = {}  # type: dict
+    merger = ToolCallMerger()
     think = []  # type: List[str]
 
     async def consume() -> None:
@@ -247,8 +248,10 @@ async def _stream_payload(
             tools=[EMIT_TOOL],
             parallel_tool_calls=False,
         ):
-            if chunk.kind is ChunkKind.TOOL_CALL:
-                box["call"] = chunk.call
+            if chunk.kind is ChunkKind.TOOL_CALL_DELTA and chunk.fragment is not None:
+                merger.add(chunk.fragment)
+                name, tail = merger.progress()
+                _paint(s, "gen-cmd", (name + " " + tail).strip() or "waiting...")
             elif chunk.kind is ChunkKind.REASONING:
                 think.append(chunk.text)
                 _paint_thinking(s, "".join(think))
@@ -271,9 +274,10 @@ async def _stream_payload(
         await asyncio.gather(task, return_exceptions=True)
         s.restore_context()
 
-    call = box.get("call")
-    if call is None:
+    calls = merger.calls()
+    if not calls:
         raise RuntimeError("model returned no tool call")
+    call = calls[0]
 
     try:
         arguments = json.loads(call.arguments)
