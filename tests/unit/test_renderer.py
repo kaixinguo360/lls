@@ -7,7 +7,7 @@ from collections import deque
 
 import pyte
 
-from lls.session.engine import Engine
+from lls.session.engine import Engine, _PendingWrites
 from lls.term import PyteScreenModel
 from lls.ui import (
     LinePrinter,
@@ -427,3 +427,15 @@ def test_a_batch_of_keys_repaints_the_prompt_once() -> None:
 
     assert asyncio.run(run()) == "abcd"
     assert len(cursors) == 1  # 只有进入时那一帧，按键不再逐个重画
+
+def test_a_frame_is_written_between_sync_markers() -> None:
+    """一帧整段夹在同步输出里：终端攒到收尾符才呈现，不会画出半帧。"""
+    console = FakeConsole()
+    out = _PendingWrites()
+    out.attach(console)
+
+    with out.frame():
+        out.write(b"a")
+        out.write(b"b")
+
+    assert console.snapshot() == b"\x1b[?2026hab\x1b[?2026l"

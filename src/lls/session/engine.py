@@ -77,6 +77,13 @@ _READ_WINDOW = 0.002        # 合并窗口：把这段时间内陆续到达的�
 _READ_COALESCE_MIN = 16     # 首笔至少这么大才值得等待合并（按键回显仅 1-3 字节）
 
 
+# 同步输出：``ESC [ ? 2026 h`` 开始攒、``ESC [ ? 2026 l`` 收尾。由 iTerm2
+# 提出，kitty / WezTerm / foot / Alacritty / Windows Terminal / xterm 379+
+# 支持；不支持的终端按私有模式的惯例忽略。
+_BEGIN_SYNC = b"\x1b[?2026h"
+_END_SYNC = b"\x1b[?2026l"
+
+
 class _PendingWrites:
     """宿主终端的写缓冲：一帧内的多次写攒成一笔发出。
 
@@ -120,7 +127,11 @@ class _PendingWrites:
         data = b"".join(self._chunks)
         self._chunks.clear()
         if self._console is not None:
-            self._console.write(data)
+            # 同步输出（DECSET 2026）：这一段由终端攒着，读到收尾符才一次性
+            # 呈现，中间不会有半帧。一帧本来就是一笔写，支持这个模式的终端
+            # 连「解析到一半」的中间态也不必画。不支持的老终端（老 xterm、
+            # 部分 VTE）会忽略不认识的私有模式，因此可以无条件发。
+            self._console.write(_BEGIN_SYNC + data + _END_SYNC)
 
 
 class Engine:

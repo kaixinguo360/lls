@@ -92,7 +92,9 @@ def test_passthrough_bytes_and_overlay_share_one_frame() -> None:
 
     engine._on_master_readable()
 
-    assert console.writes == [b"line-1\r\n"], "子进程字节与覆盖层被拆成了多笔"
+    # 一笔写出（整段还夹在同步输出里，见 _PendingWrites._flush）
+    assert len(console.writes) == 1, "子进程字节与覆盖层被拆成了多笔"
+    assert b"line-1\r\n" in console.writes[0]
     assert drawn == [":abc"], "输出到达后没有把覆盖层补回去"
 
 
