@@ -54,7 +54,14 @@ from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.session.services import Services
 from lls.tty import KeyParser, encode_keys
-from lls.ui import SGR_RESET, conservative_char_width, strip_sgr, wrap_multi_lines
+from lls.ui import (
+    SGR_RESET,
+    clusters,
+    conservative_char_width,
+    strip_sgr,
+    text_width,
+    wrap_multi_lines,
+)
 
 from .agent_pager import page
 from .agent_picker import pick
@@ -313,7 +320,7 @@ SEND_RAW_TOOL = Tool(
 
 def _width(text: str) -> int:
     """按保守宽度量一段文字（模糊宽度字符按两列算，SGR 序列不算宽）。"""
-    return sum(conservative_char_width(char) for char in strip_sgr(text))
+    return text_width(text, conservative_char_width)
 
 
 def _flat(text: str) -> str:
@@ -337,12 +344,12 @@ def _clip(text: str, columns: int) -> str:
 
     kept: list[str] = []
     used = 0
-    for char in flat:
-        char_width = conservative_char_width(char)
-        if used + char_width > room:
+    for cluster in clusters(flat):
+        width = conservative_char_width(cluster)
+        if used + width > room:
             break
-        kept.append(char)
-        used += char_width
+        kept.append(cluster)
+        used += width
     return "".join(kept) + marker
 
 
@@ -370,12 +377,12 @@ def _tail_line(prefix: str, text: str, columns: int) -> str:
 
     kept: list[str] = []
     used = 0
-    for char in reversed(flat):
-        char_width = conservative_char_width(char)
-        if used + char_width > room:
+    for cluster in reversed(list(clusters(flat))):
+        width = conservative_char_width(cluster)
+        if used + width > room:
             break
-        kept.append(char)
-        used += char_width
+        kept.append(cluster)
+        used += width
     return prefix + marker + "".join(reversed(kept))
 
 

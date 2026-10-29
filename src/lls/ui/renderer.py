@@ -12,7 +12,12 @@
 
 from __future__ import annotations
 
-from .width import Measure, char_width, conservative_char_width
+from .width import (
+    Measure,
+    char_width,
+    cluster_end,
+    conservative_char_width,
+)
 
 SGR_RESET = "\x1b[0m"
 
@@ -60,8 +65,11 @@ def wrap_multi_lines(
 ) -> tuple[str, int]:
     """将长字符串按终端宽度自动换行。返回 (输出串, 行数)。
 
-    ``measure`` 决定每个字符算几列；覆盖层排版传入
+    ``measure`` 决定一个簇算几列；覆盖层排版传入
     :func:`conservative_char_width`，避免在模糊宽度上窄算。
+
+    切分单位是簇而不是字符：组合符、VS16、ZWJ 序列必须和基字符留在同一行，
+    切开就等于让终端画出半个字符（宽度算得再准也没用）。
 
     SGR（颜色/加粗）转义序列按零列算，并跨行重放：每行结尾先重置、
     下一行开头再补回生效中的样式。这样按行绝对定位重画时，每行都
@@ -74,27 +82,30 @@ def wrap_multi_lines(
     index = 0
     size = len(display)
     while index < size:
-        c = display[index]
-        if c == "\x1b" and display[index + 1 : index + 2] == "[":
+        char = display[index]
+        if char == "\x1b" and display[index + 1 : index + 2] == "[":
             stop = _csi_end(display, index)
             seq = display[index:stop]
             output += seq
             style = _next_style(style, seq)
             index = stop
             continue
-        index += 1
-        if c == "\n":
+        if char == "\n":
             output += (SGR_RESET if style else "") + end + style
             lines += 1
             n = 0
+            index += 1
             continue
-        c_width = measure(c)
-        if n + c_width > width:
+        stop = cluster_end(display, index)
+        cluster = display[index:stop]
+        index = stop
+        cluster_width = measure(cluster)
+        if n + cluster_width > width:
             output += (SGR_RESET if style else "") + end + style
             lines += 1
             n = 0
-        output += c
-        n += c_width
+        output += cluster
+        n += cluster_width
     if style:
         output += SGR_RESET
     return output, lines

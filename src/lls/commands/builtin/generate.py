@@ -23,7 +23,12 @@ from lls.ai import (
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.session.services import Services
-from lls.ui import conservative_char_width, wrap_multi_lines
+from lls.ui import (
+    clusters,
+    conservative_char_width,
+    text_width,
+    wrap_multi_lines,
+)
 
 __all__ = [
     "CONTEXT_LINES",
@@ -141,7 +146,7 @@ def _width(text: str) -> int:
     窄算会让整行宽出屏幕、被终端软折行，而覆盖层是按行号绝对定位的 ——
     多出来的物理行会把行列对应关系全部推错。
     """
-    return sum(conservative_char_width(c) for c in text)
+    return text_width(text, conservative_char_width)
 
 
 def _fit(text: str, limit: int) -> str:
@@ -157,11 +162,11 @@ def _fit(text: str, limit: int) -> str:
 
     kept = []
     used = 0
-    for char in flat:
-        width = conservative_char_width(char)
+    for cluster in clusters(flat):
+        width = conservative_char_width(cluster)
         if used + width > room:
             break
-        kept.append(char)
+        kept.append(cluster)
         used += width
     return "".join(kept) + marker
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, List, Sequence
 
-from lls.ui import conservative_char_width, text_width
+from lls.ui import clusters, conservative_char_width, text_width
 
 __all__ = ["Picker", "pick"]
 
@@ -30,7 +30,7 @@ _RESET = "\x1b[0m"
 POLL_SECONDS = 0.2
 
 ELLIPSIS = "..."
-_ELLIPSIS_WIDTH = sum(conservative_char_width(c) for c in ELLIPSIS)
+_ELLIPSIS_WIDTH = text_width(ELLIPSIS, conservative_char_width)
 
 # Cursor marker: the selected row is reversed and gets a small pointer.
 _MARK = "> "
@@ -73,11 +73,11 @@ def _clip(line: str, columns: int) -> str:
     room = columns - _ELLIPSIS_WIDTH
     kept = ""
     used = 0
-    for char in line:
-        width = conservative_char_width(char)
+    for cluster in clusters(line):
+        width = conservative_char_width(cluster)
         if used + width > room:
             break
-        kept += char
+        kept += cluster
         used += width
     return kept + ELLIPSIS
 

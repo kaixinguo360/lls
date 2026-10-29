@@ -11,7 +11,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any, List, Sequence
 
-from lls.ui import conservative_char_width, text_width, wrap_multi_lines
+from lls.ui import (
+    clusters,
+    conservative_char_width,
+    text_width,
+    wrap_multi_lines,
+)
 
 __all__ = ["Pager", "page"]
 
@@ -72,11 +77,11 @@ def _clip(line: str, columns: int) -> str:
     room = columns - conservative_char_width("…")
     kept = ""
     used = 0
-    for char in line:
-        width = conservative_char_width(char)
+    for cluster in clusters(line):
+        width = conservative_char_width(cluster)
         if used + width > room:
             break
-        kept += char
+        kept += cluster
         used += width
     return kept + "…"
 

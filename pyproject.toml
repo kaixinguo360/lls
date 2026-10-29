@@ -13,6 +13,7 @@ authors = [{ name = "LLS" }]
 dependencies = [
     "pyte>=0.8.2",
     "pyyaml>=5.1",
+    "wcwidth>=0.2",
 ]
 
 [project.optional-dependencies]

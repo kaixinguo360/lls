@@ -6,11 +6,20 @@ from .renderer import (
     render_row_cells,
     wrap_multi_lines,
 )
-from .width import char_width, conservative_char_width, strip_sgr, text_width
+from .width import (
+    char_width,
+    cluster_end,
+    clusters,
+    conservative_char_width,
+    strip_sgr,
+    text_width,
+)
 
 __all__ = [
     "SGR_RESET",
     "char_width",
+    "cluster_end",
+    "clusters",
     "conservative_char_width",
     "overlay_anchor",
     "render_row_cells",

@@ -10,7 +10,13 @@ import pyte
 from lls.session.engine import Engine, _PendingWrites
 from lls.term import PyteScreenModel
 from lls.session.overlay import Overlay
-from lls.ui import char_width, wrap_multi_lines
+from lls.ui import (
+    char_width,
+    clusters,
+    conservative_char_width,
+    text_width,
+    wrap_multi_lines,
+)
 
 
 class FakeConsole:
@@ -33,6 +39,50 @@ class FakeConsole:
 def test_char_width() -> None:
     assert char_width("a") == 1
     assert char_width("中") == 2
+
+
+def test_vs16_makes_a_narrow_char_wide() -> None:
+    """U+2764 + VS16 是 emoji 呈现：终端画两列，逐字符相加只会算出一列。"""
+    assert char_width("\u2764") == 1
+    assert char_width("\u2764\ufe0f") == 2
+    assert text_width("a\u2764\ufe0fb") == 4
+
+
+def test_zero_width_marks_join_their_base() -> None:
+    """组合符、ZWJ、肤色修饰符都归到基字符那一簇，宽度只算基字符的。"""
+    assert list(clusters("e\u0301")) == ["e\u0301"]
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+    assert list(clusters(family)) == [family]
+    assert text_width(family) == 2
+    assert text_width("\U0001f44d\U0001f3fb") == 2
+
+
+def test_regional_indicators_pair_into_one_cluster() -> None:
+    assert list(clusters("\U0001f1e8\U0001f1f3")) == ["\U0001f1e8\U0001f1f3"]
+    assert text_width("\U0001f1e8\U0001f1f3") == 2
+
+
+def test_control_chars_never_join_the_previous_cluster() -> None:
+    """ESC 这类控制符零列，但不是修饰符：并进上一簇会把转义序列拆散。"""
+    assert list(clusters("a\x1bb")) == ["a", "\x1b", "b"]
+
+
+def test_ambiguous_width_leaves_marks_alone() -> None:
+    """保守宽度只放大真正占列的字符：组合符跟着基字符走。"""
+    assert conservative_char_width("±") == 2
+    assert conservative_char_width("e\u0301") == 1
+
+
+def test_wrap_never_splits_a_cluster() -> None:
+    """折行以簇为单位：基字符与其修饰符必须留在同一行。"""
+    out, lines = wrap_multi_lines("a\u2764\ufe0fb", 2)
+
+    rows = out.split("\r\n")
+    assert lines == len(rows) == 3
+    assert all(text_width(row) <= 2 for row in rows)
+    # VS16 永远跟着它的基字符：单独出现在行尾或行首都说明被切开了。
+    assert all("\ufe0f" not in row or "\u2764" in row for row in rows)
+    assert all("\u2764" not in row or "\ufe0f" in row for row in rows)
 
 
 def test_wrap_multi_lines() -> None:
