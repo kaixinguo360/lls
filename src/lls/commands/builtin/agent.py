@@ -623,6 +623,15 @@ class _Painter:
         self._call_name = ""
         self._painted = 0.0
 
+    def begin(self) -> None:
+        """立刻画出这一轮的第一帧，不等模型回话。
+
+        提示行在回车时已经收起，第一次 STEP 事件却要等首字节回来（前头还有
+        压缩、拼上下文这些要联网的步骤）。中间那一大段屏幕上什么都没有，
+        看着就像程序卡住了。
+        """
+        self._paint(force=True)
+
     def on_event(self, event: AgentEvent) -> None:
         if event.kind is AgentEventKind.STEP:
             self._step = event.step
@@ -655,9 +664,12 @@ class _Painter:
         if not action and self._call:
             # 参数还在流里：先把「正在拼哪个调用、拼到哪」显示出来。
             action = (self._call_name + " " + self._call).strip()
+        # 还没开始第一步时不写「第 0 步」：那会儿只是把状态占上，
+        # 数字要等真正开始算才出现。
+        prefix = f"(agent {self._step}) " if self._step else "(agent) "
         lines = [
             _line(
-                f"(agent {self._step}) ",
+                prefix,
                 action or "waiting...",
                 columns,
             )
@@ -673,11 +685,11 @@ def _hands_over(line: Any) -> bool:
     """这一行进来后会立刻换成另一个覆盖层吗？
 
     斜杠命令不交给模型：它们要么自己画屏（``/status`` 的翻看、``/help``
-    的消息框），要么下一轮提示原地重画。所以先别把提示占的行还给子进程
-    —— 那一帧还原会闪出子进程画面。成了任务的行照旧还原：接下来是子进程
-    的输出，屏幕该还给模型。
+    的消息框），要么下一轮提示原地重画。成了任务的行也立刻换成状态覆盖层
+    （见 :meth:`_Painter.begin`）。两种都别先把提示占的行还给子进程：那一
+    帧还原会闪一下空白，紧接着又画回来。
     """
-    return isinstance(line, str) and line.startswith("/")
+    return isinstance(line, str)
 
 
 class _Session:
@@ -1025,6 +1037,10 @@ class _Session:
     async def _one(self, task: str) -> None:
         """执行一轮任务。异常路径只影响本轮，不影响已经写下的事件。"""
         self._last_task = task
+        # 先画状态，再去忙那些要等的事（快照、压缩、拼上下文）：提示行已经
+        # 收起，等下去的那几秒屏幕上不能是空的。
+        painter = _Painter(self._s)
+        painter.begin()
         # 提交任务时同批到达的按键还留在键盘缓冲里；转回原始队列，
         # 否则本轮的中断检测看不到它们（两个队列不互通）。
         self._s.requeue_pending_keys()
@@ -1040,7 +1056,6 @@ class _Session:
             window = self._prepare_window(pending)
         self._submit(task, screen)
 
-        painter = _Painter(self._s)
         agent = Agent(
             self._provider,
             self._model,

@@ -615,6 +615,16 @@ def test_painter_previews_the_latest_reasoning() -> None:
     assert "START" not in shown
 
 
+def test_painter_paints_waiting_before_the_model_answers() -> None:
+    """开跑之前就得有状态行：提示行已收起，首字节回来前屏幕上不能是空的。"""
+    services = FakeServices([])
+    painter = agent_cmd._Painter(services)
+
+    painter.begin()
+
+    assert services.painted == ["(agent) waiting..."]
+
+
 # ---- 提示词与显示预算一致 ----
 
 

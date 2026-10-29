@@ -332,9 +332,13 @@ def test_slash_lines_are_handed_over() -> None:
 
     assert _hands_over("/status") is True
     assert _hands_over("/s") is True
-    assert _hands_over("") is False
-    assert _hands_over("看看 README") is False
     assert _hands_over("//原样交给模型") is True
+    # 成了任务的行也立刻换成状态覆盖层（_Painter.begin 马上画上去）：
+    # 先还原再重画，中间那一帧是空白。
+    assert _hands_over("看看 README") is True
+    assert _hands_over("") is True
+    # 取消、退出这些哨兵值不进这一轮，行照旧还给子进程
+    assert _hands_over(None) is False
 
 
 # ---- 纯展示的覆盖层：子进程一输出就补画回来 ----
