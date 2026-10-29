@@ -141,7 +141,7 @@ class HistoryStore:
     def load(self, history_id: str, *, session: bool = False) -> list[str]:
         """读出可召回的历史（旧在前）；文件不在或读不了就是空列表。"""
         path = self.path_for(history_id, session=session)
-        entries, terminated = _read_entries(path)
+        entries, terminated, raw = _read_entries(path)
         if terminated:
             self._unterminated.discard(path)
         elif entries or _size(path):
@@ -151,8 +151,10 @@ class HistoryStore:
             return []
         self._last[path] = values[-1]
         if len(entries) > self._max_entries or _size(path) > self._max_bytes:
-            # 只在冷路径上压缩：不挡输入，也不会越攒越大。
-            self._compact(path, values)
+            # 只在冷路径上压缩：不挡输入，也不会越攒越大。写回去的是原样的
+            # 那几行字节，而不是重新编码一遍：重新编码会带上新的 ts/cwd，
+            # 长度差一两个字节就被当成「能变小」，其实什么也没丢掉。
+            self._compact(path, raw[-self._max_entries :])
         return values
 
     # ---- 写 ----
@@ -195,9 +197,12 @@ class HistoryStore:
             pass
         self._ready.add(directory)
 
-    def _compact(self, path: Path, values: list[str]) -> None:
-        """只留 ``values`` 重写文件：临时文件 + rename，读者看不到半成品。"""
-        payload = b"".join(_encode(value) for value in values)
+    def _compact(self, path: Path, lines: list[bytes]) -> None:
+        """只留 ``lines``（原样的行，含换行）重写文件。
+
+        临时文件 + rename，读者看不到半成品。
+        """
+        payload = b"".join(lines)
         # 行很长时按字节数触发的压缩其实什么都丢不掉，重写一遍只是白写，
         # 而且下次载入还会触发 —— 真能变小才动手。
         if len(payload) >= _size(path):
@@ -255,11 +260,12 @@ def _size(path: Path) -> int:
         return 0
 
 
-def _read_entries(path: Path) -> tuple[list[str], bool]:
-    """读 JSONL，返回 (可用内容, 文件是否以换行结尾)。
+def _read_entries(path: Path) -> tuple[list[str], bool, list[bytes]]:
+    """读 JSONL，返回 (可用内容, 文件是否以换行结尾, 那些行的原始字节)。
 
     解析不了的行跳过 —— 进程被杀时留下半行是正常现象；「是否以换行结尾」
-    交给调用方决定下次追加要不要先补一个换行。
+    交给调用方决定下次追加要不要先补一个换行。原始字节给压缩用：原样写回
+    才能算准「重写会不会真的变小」。
     """
     try:
         size = _size(path)
@@ -272,8 +278,9 @@ def _read_entries(path: Path) -> tuple[list[str], bool]:
             else:
                 chunk = fh.read()
     except OSError:
-        return [], True
+        return [], True, []
     values: list[str] = []
+    raw: list[bytes] = []
     for line in chunk.splitlines():
         try:
             record = json.loads(line)
@@ -282,4 +289,5 @@ def _read_entries(path: Path) -> tuple[list[str], bool]:
         text = record.get("text") if isinstance(record, dict) else None
         if isinstance(text, str) and text:
             values.append(text)
-    return values, chunk.endswith(b"\n")
+            raw.append(line + b"\n")
+    return values, chunk.endswith(b"\n"), raw
