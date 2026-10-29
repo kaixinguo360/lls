@@ -195,7 +195,7 @@ def test_retry_with_nothing_to_continue_says_so(monkeypatch, tmp_path) -> None:
 
     services, _ = _run(monkeypatch, provider, ["/retry", "/exit"], keeper)
 
-    assert services.messages == ["还没有可以接着跑的一轮"]
+    assert services.messages == ["这一轮已经结束，没有可以接着执行的内容"]
     assert provider.requests == []
     keeper.current().close()
 
@@ -242,7 +242,7 @@ def test_rm_with_an_argument_only_shows_the_usage(monkeypatch, tmp_path) -> None
     services, _ = _run(monkeypatch, ScriptedProvider([]), ["/rm abc", "/exit"], keeper)
 
     assert keeper.current_id() is not None
-    assert services.messages == ["用法：/rm（删本会话，不带参数）"]
+    assert services.messages == ["用法：/rm（删除本会话，不需要参数）"]
     keeper.current().close()
 
 
@@ -470,7 +470,7 @@ def test_a_busy_session_lets_you_pick_another_one(monkeypatch, tmp_path) -> None
 
     # 选中另一条后直接进去了，被占用的那条还归对方。
     assert SessionStore(root=tmp_path).current_id() == spare.id
-    assert seen["header"] == "busy: {} - pick another session:".format(busy.id)
+    assert seen["header"] == "会话 {} 正被另一个进程占用，请另选一条：".format(busy.id)
     assert "占用" in services.messages[-1]
     holder.close()
 

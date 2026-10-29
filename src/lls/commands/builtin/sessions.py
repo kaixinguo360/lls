@@ -30,7 +30,7 @@ async def cmd_sessions(s: Services, args: str | None) -> CommandResult:
     keeper = store()
     metas = keeper.list(include_archived=include_all)
     if not metas:
-        await s.show_message("还没有会话；直接 agent 会新开一条")
+        await s.show_message("还没有会话；直接运行 agent 会新开一条")
         return CommandResult()
     current = keeper.current_id()
     rows = ["会话（* 为当前）："]

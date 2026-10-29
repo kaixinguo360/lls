@@ -36,7 +36,7 @@ _ELLIPSIS_WIDTH = sum(conservative_char_width(c) for c in ELLIPSIS)
 _MARK = "> "
 _BLANK = "  "
 
-DEFAULT_FOOTER = "up/down select - Enter switch - q cancel"
+DEFAULT_FOOTER = "up/down: select, Enter: switch, q: cancel"
 EMPTY_ROW = "(none)"
 
 _BY_CONTROL = {

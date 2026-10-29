@@ -110,9 +110,9 @@ _SLASH_COMMANDS = (
     ("sessions", ("ls", "resume"), "_slash_sessions", "选一条会话切过去：/sessions"),
     ("new", (), "_slash_new", "开一条新会话并切过去：/new [标题]"),
     ("fork", (), "_slash_fork", "从当前会话分叉：/fork [--at <seq>]"),
-    ("rm", (), "_slash_rm", "删掉本会话，办完退出 agent：/rm"),
-    ("archive", (), "_slash_archive", "归档本会话并退出 agent：/archive"),
-    ("retry", (), "_slash_retry", "接着本轮继续执行"),
+    ("rm", (), "_slash_rm", "删除本会话（要确认），随后退出 agent"),
+    ("archive", (), "_slash_archive", "归档本会话（要确认），随后退出 agent"),
+    ("retry", (), "_slash_retry", "接着本轮继续执行：/retry"),
     ("exit", ("quit", "q"), "_slash_exit", "退出 agent 模式"),
 )
 
@@ -145,14 +145,14 @@ def _unknown_command(name):
     打错的 ``/modle`` 若悄悄变成任务，模型会拿它当指令去执行，代价比一句
     报错大得多；而报错是可恢复的 —— 这行已经进了输入历史，↑ 就能改。
     """
-    rows = ["未知命令：/{}（没有发给模型）".format(name)]
+    rows = ["没有这个命令：/{}（这一行没有发给模型）".format(name)]
     close = difflib.get_close_matches(
         name, sorted(item[0] for item in _SLASH_COMMANDS), n=1, cutoff=0.6
     )
     if close:
-        rows.append("是不是想用 /{}？".format(close[0]))
-    rows.append("/help 看全部命令。")
-    rows.append("这行确实要发给模型时，行首再加一个斜杠：//{}".format(name))
+        rows.append("是不是想输入 /{}？".format(close[0]))
+    rows.append("/help 列出全部命令。")
+    rows.append("要把这一行原样交给模型，行首再加一个斜杠：//{}".format(name))
     return "\n".join(rows)
 
 
@@ -810,7 +810,7 @@ class _Session:
             if aliases:
                 alias = " ({})".format("、".join("/" + item for item in aliases))
             rows.append("  /{}{}  {}".format(name, alias, summary))
-        rows.append("//开头：去掉一个斜杠原样当任务；/usr/bin 这类路径也当任务。")
+        rows.append("行首 // 表示去掉一个斜杠后原样交给模型；/usr/bin 这类路径也照原样发出。")
         await self._s.show_message("\n".join(rows))
         return _CANCEL
 
@@ -825,7 +825,7 @@ class _Session:
     def _transcript(self) -> List[str]:
         """整条会话的对话与备注，只用 ``(agent)`` 那三种前缀。"""
         if self._session is None:
-            return [NOTE_PREFIX + "本次会话不落盘，没有可翻看的历史"]
+            return [NOTE_PREFIX + "本次会话不保存到磁盘，没有可翻看的历史"]
         rows = self._entry_rows(self._session.log(ALL_TURNS))
         return rows or [NOTE_PREFIX + "还没有对话"]
 
@@ -848,7 +848,7 @@ class _Session:
     def _status_footer(self) -> str:
         """末行唯一的一条状态：标题、模型、窗口用量。"""
         if self._session is None:
-            return "不落盘 · {} · 预算 {} tok".format(self._model, self._budget)
+            return "不保存 · {} · 预算 {} tok".format(self._model, self._budget)
         meta = self._session.meta
         window = self._window or self._session.window(self._budget)
         return " · ".join(
@@ -861,7 +861,7 @@ class _Session:
 
     async def _slash_title(self, args: str) -> Any:
         if self._session is None:
-            await self._s.show_message("本次会话不落盘，改不了标题")
+            await self._s.show_message("本次会话不保存到磁盘，改不了标题")
             return _CANCEL
         text = args.strip()
         if not text:
@@ -889,7 +889,7 @@ class _Session:
             await self._s.show_message("\n".join(rows))
             return _CANCEL
         if self._catalog is None:
-            await self._s.show_message("这次会话拿不到模型配置，改不了模型")
+            await self._s.show_message("本次会话读不到模型配置，改不了模型")
             return _CANCEL
         try:
             provider_id, model_id = self._catalog.resolve_spec(spec)
@@ -917,16 +917,16 @@ class _Session:
 
     async def _slash_compact(self, args: str) -> Any:
         if self._session is None:
-            await self._s.show_message("本次会话不落盘，没有可压缩的历史")
+            await self._s.show_message("本次会话不保存到磁盘，没有可压缩的历史")
             return _CANCEL
         self._compacted_now = False
         compressed = await self._compact(self._prepare_window(()), (), force=True)
         after = self._prepare_window(())
         if compressed:
-            await self._s.show_message("已压缩，窗口 {}".format(after.describe()))
+            await self._s.show_message("已压缩，当前窗口 {}".format(after.describe()))
         else:
             await self._s.show_message(
-                "没压缩：历史还短（不到 {} tok）或者已经压到底；当前 {}".format(
+                "无需压缩：历史还不够长（不到 {} tok），或已经压到最小；当前窗口 {}".format(
                     MIN_COMPACT_TOKENS, after.describe()
                 )
             )
@@ -945,7 +945,7 @@ class _Session:
     async def _slash_sessions(self, args: str) -> Any:
         """列出全部会话，光标上下选，回车切过去。"""
         if self._keeper is None:
-            await self._s.show_message("没有可用的会话仓库")
+            await self._s.show_message("会话存储不可用")
             return _CANCEL
         current = self._session.id if self._session is not None else ""
         chosen = await _choose_session(self._s, self._keeper, current)
@@ -965,7 +965,7 @@ class _Session:
 
     async def _slash_fork(self, args: str) -> Any:
         if self._keeper is None or self._session is None:
-            await self._s.show_message("本次会话不落盘，分不了叉")
+            await self._s.show_message("本次会话不保存到磁盘，没法分叉")
             return _CANCEL
         at_seq = 0
         rest = args.strip()
@@ -981,10 +981,10 @@ class _Session:
             await self._s.show_message("error: {}".format(e))
             return _CANCEL
         await self._s.show_message(
-            "已分叉到 {}（来自 {}{}）".format(
+            "已分叉到 {}，来自会话 {}{}".format(
                 forked.id,
                 self._session.id,
-                "，到 seq {}".format(at_seq) if at_seq else "，全部",
+                "（到 seq {} 为止）".format(at_seq) if at_seq else "（全部事件）",
             )
         )
         raise _Switch(("open", forked.id))
@@ -1007,23 +1007,22 @@ class _Session:
         """删掉本会话：确认后删，然后离开 agent 模式。
 
         只认自己，不带参数 —— 会话 id 记不住，也不该为了删一条会话先
-        ``/exit``。删完这条就没了，手上没有上下文可接着用：直接退出去，
-        让人自己决定还进不进 ``agent``（要新会话就 ``/new``，那是有意的）。
-        不能顺手开一条空会话 —— 删掉的正是「不想留」的东西，回来却又多出
-        一条新的，等于删了个寂寞。
+        ``/exit``。删完这条就没有上下文可接着用了，所以直接退出 agent：要不要
+        再进来由用户自己决定（确实要新会话再用 ``/new``）。这里不顺手开一条
+        空会话 —— 删掉的正是「不想留」的那一条，回来却多出一条，等于没删。
         """
         if args.strip():
-            await self._s.show_message("用法：/rm（删本会话，不带参数）")
+            await self._s.show_message("用法：/rm（删除本会话，不需要参数）")
             return _CANCEL
         if self._keeper is None:
-            await self._s.show_message("没有可用的会话仓库")
+            await self._s.show_message("会话存储不可用")
             return _CANCEL
         if self._session is None:
-            await self._s.show_message("本次会话不落盘，删不了")
+            await self._s.show_message("本次会话不保存到磁盘，没有可删的会话")
             return _CANCEL
         meta = self._session.meta
         if not await self._confirm(
-            "删除会话 {}（{}）？不可恢复".format(meta.id, meta.title or "无标题")
+            "删除会话 {}（{}）？删除后无法恢复".format(meta.id, meta.title or "无标题")
         ):
             return _CANCEL
         try:
@@ -1032,9 +1031,8 @@ class _Session:
             await self._s.show_message("error: {}".format(e))
             return _CANCEL
         await self._s.show_message(
-            "已删除会话 {}（{}）；已退出 agent，再进来另开一条".format(
-                gone.id, gone.title or "无标题"
-            )
+            "已删除会话 {}（{}）。".format(gone.id, gone.title or "无标题")
+            + "\n已退出 agent 模式；要继续用请重新运行 agent，新会话用 /new。"
         )
         return _EXIT
 
@@ -1046,17 +1044,17 @@ class _Session:
         所以同样退出去，不另外开一条新的。
         """
         if args.strip():
-            await self._s.show_message("用法：/archive（归档本会话，不带参数）")
+            await self._s.show_message("用法：/archive（归档本会话，不需要参数）")
             return _CANCEL
         if self._keeper is None:
-            await self._s.show_message("没有可用的会话仓库")
+            await self._s.show_message("会话存储不可用")
             return _CANCEL
         if self._session is None:
-            await self._s.show_message("本次会话不落盘，归档不了")
+            await self._s.show_message("本次会话不保存到磁盘，没有可归档的会话")
             return _CANCEL
         meta = self._session.meta
         if not await self._confirm(
-            "归档会话 {}（{}）？".format(meta.id, meta.title or "无标题")
+            "把会话 {}（{}）移入归档？".format(meta.id, meta.title or "无标题")
         ):
             return _CANCEL
         try:
@@ -1065,9 +1063,10 @@ class _Session:
             await self._s.show_message("error: {}".format(e))
             return _CANCEL
         await self._s.show_message(
-            "已归档会话 {}（{}）：agent --all 仍能看到；已退出 agent".format(
+            "已归档会话 {}（{}），默认列表里不再出现，agent --list --all 仍能看到。".format(
                 gone.id, gone.title or "无标题"
             )
+            + "\n已退出 agent 模式。"
         )
         return _EXIT
 
@@ -1078,7 +1077,7 @@ class _Session:
         模型：那一轮既没有任务也没有答复，回来只会把提示行又刷一遍。
         """
         if not self._log:
-            await self._s.show_message("还没有可以接着跑的一轮")
+            await self._s.show_message("这一轮已经结束，没有可以接着执行的内容")
             return _CANCEL
         return _CONTINUE
 
@@ -1390,20 +1389,19 @@ def _parse_args(args: str | None) -> _Options:
 
 
 def _session_label(meta: Any, current: bool = False, busy: bool = False) -> str:
-    """One line per session: fixed-width fields first, the title last.
+    """一条会话一行：定宽字段在前，标题在最后。
 
-    Only the title varies in length, so keeping it at the end lets every other
-    column line up; the caller clips it to the window width. The two-char
-    marker says "*" current and "!" taken by another process.
+    只有标题长短不定，放在末尾其余各列才对得齐；超宽由调用方裁掉。行首两个
+    字符的标记：``*`` 是当前会话，``!`` 是另一个进程正开着。
     """
     marker = ("*" if current else " ") + ("!" if busy else " ")
-    return "{} {}  {:>3} turns  {:>4.0f}KB  {}  {}".format(
+    return "{} {}  {:>3} 轮  {:>4.0f}KB  {}  {}".format(
         marker,
         meta.id,
         meta.turns,
         meta.size / 1024.0,
         _stamp(meta.updated_at),
-        meta.title or "(untitled)",
+        meta.title or "（无标题）",
     )
 
 
@@ -1413,16 +1411,16 @@ async def _choose_session(
     current: str = "",
     busy: str = "",
     footer: str = "",
-    header: str = "pick a session:",
+    header: str = "选择会话（↑↓ 移动，回车切换）：",
 ) -> Any:
-    """Show the picker over every session and return the chosen meta.
+    """把全部会话摆出来让人选，返回选中的 meta。
 
-    The cursor starts on ``current``; ``busy`` only adds the "!" marker, so a
-    session another process holds can still be picked on purpose.
+    光标停在 ``current`` 上；``busy`` 只加一个 ``!`` 标记 —— 被另一个进程占着
+    的会话仍然可以被选中，那是用户自己的决定。
     """
     metas = keeper.list()
     if not metas:
-        await services.show_message("还没有会话；直接 agent 会新开一条")
+        await services.show_message("还没有会话；直接运行 agent 会新开一条")
         return None
     labels = [
         _session_label(meta, meta.id == current, meta.id == busy) for meta in metas
@@ -1488,7 +1486,7 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
         metas = keeper.list(include_archived=opts.all)
         await s.show_message(
             "\n".join([_session_label(m) for m in metas])
-            or "还没有会话；直接 agent 会新开一条"
+            or "还没有会话；直接运行 agent 会新开一条"
         )
         return CommandResult()
 
@@ -1535,9 +1533,9 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
                 keeper.current_id(),
                 busy=busy,
                 header=(
-                    "pick a session:"
+                    "选择会话（↑↓ 移动，回车切换）："
                     if not busy
-                    else "busy: {} - pick another session:".format(busy)
+                    else "会话 {} 正被另一个进程占用，请另选一条：".format(busy)
                 ),
             )
             if chosen is None:
