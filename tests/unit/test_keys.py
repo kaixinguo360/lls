@@ -213,3 +213,27 @@ def test_any_split_point_gives_same_result(raw: bytes) -> None:
         keys = kp.feed(raw[:cut]) + kp.feed(raw[cut:])
         results.add((tuple(k.control for k in keys), "".join(k.char for k in keys)))
     assert len(results) == 1, f"{raw!r} 切分后结果不一致: {results}"
+
+
+# ---- ESC 歧义：按「到达时刻」判 ESCDELAY ----
+
+def test_escdelay_is_measured_from_the_escape_arrival() -> None:
+    """后续字节处理得晚不算独立 Esc：判据是它离那个 ESC 有多久。"""
+    kp = KeyParser()
+    assert kp.feed(b"\x1b", ts=10.0) == []
+    assert kp.escape_deadline(0.1) == pytest.approx(10.1)
+    # 到达时刻落在窗口内（哪怕实际处理时早已过点）→ 仍是上方向键
+    assert [k.control for k in kp.feed(b"[A", ts=10.02)] == ["up"]
+    assert kp.escape_deadline(0.1) is None
+
+
+def test_a_lone_escape_stays_pending_until_the_deadline() -> None:
+    """单独的 ESC 一直挂到 ESCDELAY 到点，过后由调用方判为 Esc 键。"""
+    kp = KeyParser()
+    assert kp.feed(b"\x1b", ts=10.0) == []
+    assert kp.pending_escape == b"\x1b"
+    assert kp.escape_deadline(0.1) == pytest.approx(10.1)
+    key = kp.flush_escape()
+    assert key is not None and key.control == "escape"
+    assert kp.escape_deadline(0.1) is None
+    assert kp.pending_escape == b""

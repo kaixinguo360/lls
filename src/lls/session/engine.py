@@ -21,6 +21,7 @@ import select
 import signal
 import sys
 import time
+from collections import deque
 from typing import Any, Callable
 
 from lls.edit import HistoryStore, LineEditor
@@ -37,9 +38,12 @@ from .services import Handler, Services
 
 __all__ = ["Engine"]
 
-# 收到 ESC 后等待后续字节的时间。方向键等序列几乎立刻到达，
-# 超过这个时间仍未收全就判定为独立 Esc 键（readline / tmux 的做法）。
-ESC_PENDING_TIMEOUT = 0.05
+# 收到 ESC 后等后续字节的时间：readline 的 ESCDELAY，tmux 取同值。
+# 方向键这类序列几乎立刻到达，超过这个时间仍未收全就判为独立 Esc 键。
+#
+# 判据是**字节到达时刻之差**，不是「又等了多久」：字节一到就给时间戳，晚到
+# 的 "[A" 即使被调度拖住几十毫秒才处理，也仍按它与 ESC 的实际间隔算。
+ESCDELAY = 0.1
 
 #: 没有持久化时给编辑器用的作用域名，占位而已，不落盘。
 _GLOBAL_SCOPE = "global"
@@ -122,9 +126,14 @@ class _PendingWrites:
 class Engine:
     """终端引擎。"""
 
-    # 在 run() 里创建，不在 __init__：Event / Queue 在 3.8 上构造时就会绑定
-    # 当时的事件循环，而本类通常先于 asyncio.run() 构造。
-    _stdin_q: asyncio.Queue
+    # 在 run() 里创建，不在 __init__：Event 在 3.8 上构造时就会绑定当时的事件
+    # 循环，而本类通常先于 asyncio.run() 构造。
+    #
+    # stdin 缓冲每项是 ``(到达时刻, 字节)``，用 deque 而不是 asyncio.Queue：
+    # 等待只需要「等一个 Event」，取走的字节不会再被取消丢掉（旧写法每次
+    # ensure_future(queue.get()) 再 cancel，取到值的瞬间被取消就丢字节）。
+    _stdin_buf: deque[tuple[float, bytes]]
+    _stdin_ready: asyncio.Event
     _exit_event: asyncio.Event
 
     def __init__(
@@ -202,9 +211,10 @@ class Engine:
     # ---- 主入口 ----
 
     async def run(self) -> int:
-        # 必须在运行中的循环里创建：3.8 上 Event / Queue 构造时就绑定当前循环，
-        # 而本类通常在 asyncio.run() 之前构造好，绑过去的循环随后并不执行。
-        self._stdin_q = asyncio.Queue()
+        # 必须在运行中的循环里创建：3.8 上 Event 构造时就绑定当前循环，而本类
+        # 通常在 asyncio.run() 之前构造好，绑过去的循环随后并不执行。
+        self._stdin_buf = deque()
+        self._stdin_ready = asyncio.Event()
         self._exit_event = asyncio.Event()
 
         winsize = Winsize(rows=self.screen.rows, columns=self.screen.columns)
@@ -322,8 +332,9 @@ class Engine:
         if take_pending is not None:
             pending = take_pending()
             if pending:
-                # 查询期间用户可能已经敲了键，交给主循环，不丢失
-                self._stdin_q.put_nowait(pending)
+                # 查询期间用户可能已经敲了键，交给主循环，不丢失。它们是缓冲里
+                # 最老的字节，放队首。
+                self._push_stdin(pending, front=True)
         row, column = position
         if row > 1 or column > 1:
             self.screen.feed(f"\x1b[{row};{column}H".encode())
@@ -611,6 +622,23 @@ class Engine:
 
     # ---- 输入回调 ----
 
+    def _push_stdin(
+        self, data: bytes, *, ts: float | None = None, front: bool = False
+    ) -> None:
+        """把一段 stdin 字节连同**到达时刻**放进缓冲，并唤醒等待者。
+
+        ``front`` 用于把比缓冲里一切都老的内容放回队首（光标查询期间用户敲
+        的键就属于这种）。
+        """
+        if not data:
+            return
+        item = (time.monotonic() if ts is None else ts, data)
+        if front:
+            self._stdin_buf.appendleft(item)
+        else:
+            self._stdin_buf.append(item)
+        self._stdin_ready.set()
+
     def _on_stdin_readable(self) -> None:
         if self._exit_event.is_set():
             return
@@ -618,12 +646,10 @@ class Engine:
             data = os.read(sys.stdin.fileno(), 10240)
         except (OSError, BlockingIOError):
             return
-        if data:
-            self._stdin_q.put_nowait(data)
+        self._push_stdin(data)
 
     def push_keys(self, data: bytes) -> None:
-        if data:
-            self._stdin_q.put_nowait(data)
+        self._push_stdin(data)
 
     # ---- 信号 ----
 
@@ -1094,8 +1120,7 @@ class Engine:
             return
         data = b"".join(k.raw for k in self._key_buf)
         self._key_buf.clear()
-        if data:
-            self._stdin_q.put_nowait(data)
+        self._push_stdin(data)
 
     # ---- 键读取 ----
 
@@ -1106,52 +1131,69 @@ class Engine:
                 return self._key_buf.pop(0)
             if self._exit_event.is_set():
                 return None
-            data = await self._wait_stdin()
-            if data is None:
+            got = await self._wait_stdin()
+            if got is None:
                 return None
-            self._key_buf.extend(self._key_parser.feed(data))
+            ts, data = got
+            if not data:
+                continue
+            self._key_buf.extend(self._key_parser.feed(data, ts))
+            # 收到 ESC 但还没决定它是独立按键还是序列前缀：等到 ESCDELAY。
+            # 等的是「那个 ESC 的到达时刻 + ESCDELAY」这个**时刻**，而不是从
+            # 现在起再等一段：后续字节只要是在窗口内到达的，哪怕被调度拖到
+            # 窗口之后才取出来，也不会被当成独立 Esc。
+            while not self._key_buf and self._key_parser.pending_escape:
+                deadline = self._key_parser.escape_deadline(ESCDELAY)
+                remain = ESCDELAY if deadline is None else deadline - time.monotonic()
+                if remain <= 0:
+                    break
+                got = await self._wait_stdin(remain)
+                if got is None:
+                    return None
+                ts, more = got
+                if not more:
+                    break                      # 超时：后续字节没来
+                self._key_buf.extend(self._key_parser.feed(more, ts))
             if not self._key_buf and self._key_parser.pending_escape:
-                # 收到 ESC 但还没决定它是独立按键还是序列前缀：
-                # 等一个短超时，看后续字节是否到来（方向键的 "[A" 等几乎立刻到达）。
-                more = await self._wait_stdin(ESC_PENDING_TIMEOUT)
-                if more:
-                    self._key_buf.extend(self._key_parser.feed(more))
-                # 仍未收全则判定为独立 Esc（readline / tmux 的做法）
-                if not self._key_buf and self._key_parser.pending_escape:
-                    flushed = self._key_parser.flush_escape()
-                    if flushed is not None:
-                        self._key_buf.append(flushed)
+                # 过了 ESCDELAY 仍未收全：判为独立 Esc（readline / tmux 的做法）
+                flushed = self._key_parser.flush_escape()
+                if flushed is not None:
+                    self._key_buf.append(flushed)
 
     async def read_chars(self, timeout: float | None = None) -> bytes | None:
         """读一段原始输入字节（不解析按键）。超时返回空字节，退出返回 None。"""
-        data = await self._wait_stdin(timeout)
-        return data
+        got = await self._wait_stdin(timeout)
+        return None if got is None else got[1]
 
-    async def _wait_stdin(self, timeout: float | None = None) -> bytes | None:
-        """等一段 stdin 字节。子进程退出返回 None，超时返回 b""。"""
-        if timeout is not None and self._stdin_q.empty():
-            get_task = asyncio.ensure_future(self._stdin_q.get())
-            exit_task = asyncio.ensure_future(self._exit_event.wait())
-            done, pending = await asyncio.wait(
-                {get_task, exit_task},
-                timeout=timeout,
-                return_when=asyncio.FIRST_COMPLETED,
+    async def _wait_stdin(
+        self, timeout: float | None = None
+    ) -> tuple[float, bytes] | None:
+        """等一段 stdin 字节，返回 ``(到达时刻, 数据)``。
+
+        子进程退出返回 None；超时返回 ``(现在, b"")``。
+
+        这里只等一个 Event：字节在缓冲里，超时只是「这段等待结束了」，不会
+        把已经取到的东西取消掉。旧写法每次 ``ensure_future(queue.get())`` 再
+        ``cancel()``，get 恰好在取消前完成时那一块字节就永远消失了 —— 长行、
+        粘贴、方向键连按时偶尔少一段，根因就在这里。
+        """
+        if self._stdin_buf:
+            return self._stdin_buf.popleft()
+        if self._exit_event.is_set():
+            return None
+        self._stdin_ready.clear()
+        ready = asyncio.ensure_future(self._stdin_ready.wait())
+        exited = asyncio.ensure_future(self._exit_event.wait())
+        try:
+            await asyncio.wait(
+                {ready, exited}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
             )
-            for t in pending:
-                t.cancel()
-            if get_task in done:
-                return get_task.result()
-            if exit_task in done:
-                return None
-            return b""
-        get_task = asyncio.ensure_future(self._stdin_q.get())
-        exit_task = asyncio.ensure_future(self._exit_event.wait())
-        done, pending = await asyncio.wait(
-            {get_task, exit_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for t in pending:
-            t.cancel()
-        if get_task in done:
-            return get_task.result()
-        return None
+        finally:
+            ready.cancel()
+            exited.cancel()
+        if self._stdin_buf:
+            return self._stdin_buf.popleft()
+        if self._exit_event.is_set():
+            return None
+        return (time.monotonic(), b"")
 

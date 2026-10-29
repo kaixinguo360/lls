@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 
 import pyte
 
@@ -272,9 +273,10 @@ def test_a_tall_message_stops_at_the_bottom_of_the_screen() -> None:
 # ---- 读输入后把覆盖层原地交给下一个界面 ----
 
 def _loop_engine():
-    """3.8 上 Event/Queue 构造时就绑定循环，只能在运行中的循环里建。"""
+    """3.8 上 Event 构造时就绑定循环，只能在运行中的循环里建。"""
     engine, screen, console = _overlay_engine()
-    engine._stdin_q = asyncio.Queue()
+    engine._stdin_buf = deque()
+    engine._stdin_ready = asyncio.Event()
     engine._exit_event = asyncio.Event()
     return engine, screen, console
 

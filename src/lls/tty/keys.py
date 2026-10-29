@@ -30,6 +30,7 @@ r"""按键编解码：字节流 ↔ Key 事件。
 from __future__ import annotations
 
 import codecs
+import time
 from typing import Sequence
 
 from .backend import Key
@@ -85,9 +86,13 @@ def _is_final(byte: int) -> bool:
 class KeyParser:
     """增量解析按键字节流，产出 Key 事件。
 
-    ``feed`` 接受任意切分的字节块（对应一次 read）。语法未收全时内部挂起，
-    等后续字节；调用方在看到 :attr:`pending_escape` 非空且暂无更多字节时，
-    等一个短超时后调用 :meth:`flush_escape` 把挂起内容判为独立 Esc 键。
+    ``feed`` 接受任意切分的字节块（对应一次 read），并带上这段字节的
+    **到达时刻**。语法未收全时内部挂起，同时记下那个 ``ESC`` 是哪一刻到的；
+    调用方按 :meth:`escape_deadline` 算出等到何时，过点仍收不全就调
+    :meth:`flush_escape` 把挂起内容判为独立 Esc 键。
+
+    时刻由解析器记，判定就不受调度延迟影响：晚到的 ``"[A"`` 哪怕过了几十
+    毫秒才被处理，判据仍是「它离那个 ESC 有多久」，不会被误判成 Esc 键。
     """
 
     def __init__(self) -> None:
@@ -96,6 +101,9 @@ class KeyParser:
         self._buf = b""
         # 上一个字节是 \r 时为真：紧随其后的 \n 属于同一个回车，不能算两次。
         self._after_cr = False
+        # 本块字节的到达时刻，以及挂起序列的起始时刻（那个 ESC 的到达时刻）。
+        self._chunk_ts = 0.0
+        self._esc_ts: float | None = None
 
     @property
     def pending_escape(self) -> bytes:
@@ -104,7 +112,14 @@ class KeyParser:
 
     # ---- 输入 ----
 
-    def feed(self, data: bytes) -> list[Key]:
+    def feed(self, data: bytes, ts: float | None = None) -> list[Key]:
+        """喂一段字节，返回解析出的按键。
+
+        ``ts`` 是这段字节的到达时刻（:func:`time.monotonic`），只用于给挂起
+        的控制序列打时间戳：判定「ESC 之后过了多久」以它为准。不给就按调用
+        到这里的时刻算，等同旧行为。
+        """
+        self._chunk_ts = time.monotonic() if ts is None else ts
         keys: list[Key] = []
         for byte in data:
             keys.extend(self._feed_byte(byte))
@@ -132,6 +147,7 @@ class KeyParser:
         if byte == 0x1B:
             self._state = _ESC
             self._buf = b"\x1b"
+            self._esc_ts = self._chunk_ts
             return []
         name = _CONTROL_NAMES.get(byte)
         if name is not None:
@@ -190,6 +206,7 @@ class KeyParser:
         """
         self._state = _GROUND
         self._buf = b""
+        self._esc_ts = None
         return [
             Key(control="escape", raw=b"\x1b"),
             *self._feed_ground(byte),
@@ -200,6 +217,7 @@ class KeyParser:
         seq = self._buf
         self._state = _GROUND
         self._buf = b""
+        self._esc_ts = None
         name = _KEY_SEQUENCES.get(seq)
         if name is not None:
             return [Key(control=name, raw=seq)]
@@ -210,9 +228,16 @@ class KeyParser:
         seq = self._buf
         self._state = _GROUND
         self._buf = b""
+        self._esc_ts = None
         return [Key(control="unknown", raw=seq)]
 
     # ---- 超时 ----
+
+    def escape_deadline(self, escdelay: float) -> float | None:
+        """挂起序列最晚该等到哪一刻；没有挂起返回 None。纯计算，便于单测。"""
+        if self._state == _GROUND or self._esc_ts is None:
+            return None
+        return self._esc_ts + escdelay
 
     def flush_escape(self) -> Key | None:
         """把挂起内容判为终结。
@@ -225,6 +250,7 @@ class KeyParser:
         seq = self._buf
         self._state = _GROUND
         self._buf = b""
+        self._esc_ts = None
         if seq == b"\x1b":
             return Key(control="escape", raw=seq)
         return Key(control="unknown", raw=seq)
