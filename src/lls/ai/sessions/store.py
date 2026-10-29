@@ -625,6 +625,29 @@ class SessionStore:
         forget_session(meta.id)
         return meta
 
+    def archive(self, spec: str) -> SessionMeta:
+        """把一条会话移进 ``_archive/``：不删，``list --all`` 仍看得到。
+
+        归档过的不再出现在默认列表里，也不再算进 ``keep`` 的条数 —— 它只是
+        收起来，不是删掉。当前会话被归档时同样清掉 index 里的 current。
+        """
+        meta = self.resolve(spec)
+        if meta.archived:
+            return meta
+        source = self._path_of(meta)
+        archive = self._root / ARCHIVE_DIR
+        try:
+            archive.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(archive / meta.id))
+        except OSError as e:
+            raise SessionError("归档失败：{}: {}".format(source, e))
+        meta.archived = True
+        if self.current_id() == meta.id:
+            self._index = {"version": 1, "current": ""}
+            self._write_index()
+        forget_session(meta.id)
+        return meta
+
     def archive_overflow(self) -> List[str]:
         """超出 ``keep`` 的会话移到 ``_archive/``：不删，``list --all`` 仍在。"""
         metas = self.list()
@@ -725,6 +748,11 @@ class SessionStore:
 
     def write_meta(self, meta: SessionMeta) -> None:
         path = self._path_of(meta) / META_NAME
+        if not path.parent.is_dir():
+            # 这条会话已经不在了（刚删掉、或被归档挪走）：别把它写回来 ——
+            # 一次 write_meta 就能在原地长出一个空目录。
+            self.forget(meta.id)
+            return
         try:
             _atomic_write(path, json.dumps(meta.to_json(), ensure_ascii=False))
         except OSError as e:

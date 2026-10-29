@@ -643,3 +643,21 @@ def test_current_pointer_is_only_a_cache(tmp_path: Path) -> None:
     reopened = SessionStore(root=tmp_path)
     assert reopened.current_id() is None
     assert repr(reopened.list()[0].id) == repr(session.id)
+
+
+def test_a_continued_turn_opens_its_own_entry(tmp_path: Path) -> None:
+    """``/retry`` 接着跑的那一段没有 user 事件：答复与收尾仍要折进覆盖层。
+
+    既不能丢（旧写法只认「手上有任务」），也不能并进上一轮 —— 中断前已经
+    写下的那句答复，``/status`` 还要翻得到。
+    """
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    session.append_user("任务")
+    session.append_assistant("答复一")
+    session.append_turn_end("aborted", "已中断")
+    session.append_assistant("答复二")
+    session.append_turn_end("ok")
+
+    assert session.log(2) == [("任务", "答复一", "已中断"), ("任务", "答复二", "")]
+    session.close()

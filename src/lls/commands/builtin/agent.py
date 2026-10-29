@@ -110,7 +110,8 @@ _SLASH_COMMANDS = (
     ("sessions", ("ls", "resume"), "_slash_sessions", "选一条会话切过去：/sessions"),
     ("new", (), "_slash_new", "开一条新会话并切过去：/new [标题]"),
     ("fork", (), "_slash_fork", "从当前会话分叉：/fork [--at <seq>]"),
-    ("rm", (), "_slash_rm", "删除一条会话：/rm <id>"),
+    ("rm", (), "_slash_rm", "删除本会话（要确认）：/rm"),
+    ("archive", (), "_slash_archive", "归档本会话，移出列表：/archive"),
     ("retry", (), "_slash_retry", "接着本轮继续执行"),
     ("exit", ("quit", "q"), "_slash_exit", "退出 agent 模式"),
 )
@@ -988,20 +989,39 @@ class _Session:
         )
         raise _Switch(("open", forked.id))
 
+    async def _confirm(self, question: str) -> bool:
+        """问一句 y/N，只有明确答 y 才返回 True。
+
+        什么都不输入、按 Ctrl-C、或者答了别的话，一律当作「不」：这里问的
+        都是要动手删除、归档的事，默认必须是不动它。
+        """
+        answer = await self._s.read_line(
+            question + " [y/N] ",
+            cancel="",
+            history_id="agent-confirm",
+            keep_history=False,
+        )
+        return isinstance(answer, str) and answer.strip().lower() in ("y", "yes")
+
     async def _slash_rm(self, args: str) -> Any:
-        spec = args.strip()
+        """删掉本会话：确认后退出，换一条新的接着用。
+
+        只认自己，不带参数 —— 会话 id 记不住，也不该为了删一条会话先
+        ``/exit``。删完这条就没了，只能开新的。
+        """
+        if args.strip():
+            await self._s.show_message("用法：/rm（删本会话，不带参数）")
+            return _CANCEL
         if self._keeper is None:
             await self._s.show_message("没有可用的会话仓库")
             return _CANCEL
-        if not spec:
-            await self._s.show_message("用法：/rm <id>（当前会话要先 /exit）")
+        if self._session is None:
+            await self._s.show_message("本次会话不落盘，删不了")
             return _CANCEL
-        meta, err = self._find_meta(spec)
-        if meta is None:
-            await self._s.show_message(err)
-            return _CANCEL
-        if self._session is not None and meta.id == self._session.id:
-            await self._s.show_message("{} 是当前会话，删不了；先 /exit".format(meta.id))
+        meta = self._session.meta
+        if not await self._confirm(
+            "删除会话 {}（{}）？不可恢复".format(meta.id, meta.title or "无标题")
+        ):
             return _CANCEL
         try:
             gone = self._keeper.drop(meta.id)
@@ -1011,10 +1031,49 @@ class _Session:
         await self._s.show_message(
             "已删除会话 {}（{}）".format(gone.id, gone.title or "无标题")
         )
-        return _CANCEL
+        raise _Switch(("new", ""))
+
+    async def _slash_archive(self, args: str) -> Any:
+        """把本会话收进归档，退出后换一条新的接着用。
+
+        归档不是删除：目录移进 ``_archive/``，默认列表里不再出现，
+        ``agent --all`` 仍然看得到。
+        """
+        if args.strip():
+            await self._s.show_message("用法：/archive（归档本会话，不带参数）")
+            return _CANCEL
+        if self._keeper is None:
+            await self._s.show_message("没有可用的会话仓库")
+            return _CANCEL
+        if self._session is None:
+            await self._s.show_message("本次会话不落盘，归档不了")
+            return _CANCEL
+        meta = self._session.meta
+        if not await self._confirm(
+            "归档会话 {}（{}）？".format(meta.id, meta.title or "无标题")
+        ):
+            return _CANCEL
+        try:
+            gone = self._keeper.archive(meta.id)
+        except SessionError as e:
+            await self._s.show_message("error: {}".format(e))
+            return _CANCEL
+        await self._s.show_message(
+            "已归档会话 {}（{}）：agent --all 仍能看到".format(
+                gone.id, gone.title or "无标题"
+            )
+        )
+        raise _Switch(("new", ""))
 
     async def _slash_retry(self, args: str) -> Any:
-        """接着本轮往下执行，等同于这一轮还没结束。不新增任何消息。"""
+        """接着本轮往下执行，等同于这一轮还没结束。不新增任何消息。
+
+        没有可接着跑的一轮（新会话、还没提过任务）时直说，别拿空历史去问
+        模型：那一轮既没有任务也没有答复，回来只会把提示行又刷一遍。
+        """
+        if not self._log:
+            await self._s.show_message("还没有可以接着跑的一轮")
+            return _CANCEL
         return _CONTINUE
 
     async def _one(self, task: Any) -> None:
@@ -1220,11 +1279,19 @@ class _Session:
         return ""
 
     def _record(self, task: str, reply: str, note: str = "") -> None:
-        """覆盖层用的两行；有会话时它就是事件流折出来的最后两条。"""
+        """覆盖层用的两行；有会话时它就是事件流折出来的最后两条。
+
+        ``task`` 为空表示这是接着跑的那一段（``/retry``），没有新的任务行：
+        另起一条同名任务，和 :func:`log_entries` 折事件时一样，别留下一条
+        空任务的行，也别把中断前那句答复顶掉。
+        """
         if self._session is not None:
             self._log = self._session.log(LOG_ENTRIES)
             return
-        self._log.append((task, reply, note))
+        if task:
+            self._log.append((task, reply, note))
+        else:
+            self._log.append((self._log[-1][0] if self._log else "", reply, note))
         self._log = self._log[-max(1, LOG_ENTRIES):]
 
     def _prompt_text(self) -> str:

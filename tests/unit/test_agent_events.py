@@ -171,6 +171,87 @@ def test_retry_continues_without_adding_a_message(monkeypatch, tmp_path) -> None
     session.close()
 
 
+def test_retry_paints_its_reply_into_the_prompt(monkeypatch, tmp_path) -> None:
+    """``/retry`` 之后提示层要换成接着跑出来的答复。
+
+    旧写法只把「手上有任务」的答复折进覆盖层：接着跑的那一轮没有新的 user
+    事件，答复与收尾都被丢掉，提示行一直停在中断前的样子 —— 看起来就是
+    ``/retry`` 什么也没刷新。
+    """
+    keeper = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复一"), _text("答复二")])
+
+    services, _ = _run(monkeypatch, provider, ["任务一", "/retry", "/exit"], keeper)
+
+    assert "答复二" in services.prompts[-1]
+    assert "答复一" in services.prompts[-1]      # 中断前那句不并被顶掉
+    keeper.current().close()
+
+
+def test_retry_with_nothing_to_continue_says_so(monkeypatch, tmp_path) -> None:
+    """新会话里空着 ``/retry``：明说没得接，别拿空历史去问模型。"""
+    keeper = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([])              # 一旦发请求就会炸
+
+    services, _ = _run(monkeypatch, provider, ["/retry", "/exit"], keeper)
+
+    assert services.messages == ["还没有可以接着跑的一轮"]
+    assert provider.requests == []
+    keeper.current().close()
+
+
+def test_rm_deletes_this_session_and_hands_back_a_fresh_one(monkeypatch, tmp_path) -> None:
+    """``/rm`` 只认本会话：确认后删掉，接着开一条新的，不用先 /exit。"""
+    keeper = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复")])
+
+    _run(monkeypatch, provider, ["任务一", "/rm", "y", "/exit"], keeper)
+
+    alive = keeper.list(include_archived=True)
+    assert len(alive) == 1                       # 带任务的那条没了
+    reopened = keeper.get(alive[0].id)
+    assert [event.type for event in reopened.events()] == ["session_start"]
+    reopened.close()
+
+
+def test_rm_keeps_the_session_when_the_answer_is_not_yes(monkeypatch, tmp_path) -> None:
+    """默认是不动它：答别的、或干脆回车，都不能把会话删掉。"""
+    keeper = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复")])
+
+    _run(monkeypatch, provider, ["任务一", "/rm", "", "/exit"], keeper)
+
+    alive = keeper.list(include_archived=True)
+    assert len(alive) == 1
+    kept = keeper.get(alive[0].id)
+    assert any(event.type == "user" for event in kept.events())
+    kept.close()
+
+
+def test_rm_with_an_argument_only_shows_the_usage(monkeypatch, tmp_path) -> None:
+    keeper = SessionStore(root=tmp_path)
+
+    services, _ = _run(monkeypatch, ScriptedProvider([]), ["/rm abc", "/exit"], keeper)
+
+    assert services.messages == ["用法：/rm（删本会话，不带参数）"]
+    keeper.current().close()
+
+
+def test_archive_moves_the_session_out_of_the_default_list(monkeypatch, tmp_path) -> None:
+    """``/archive`` 是移走不是删掉：默认列表里不再出现，``--all`` 还看得到。"""
+    keeper = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复")])
+
+    _run(monkeypatch, provider, ["任务一", "/archive", "y", "/exit"], keeper)
+
+    assert len(keeper.list()) == 1               # 只剩刚开的那条
+    everything = keeper.list(include_archived=True)
+    assert len(everything) == 2
+    archived = [meta for meta in everything if meta.archived]
+    assert len(archived) == 1
+    assert (tmp_path / "_archive" / archived[0].id / "events.jsonl").is_file()
+
+
 def test_the_transcript_survives_into_the_next_process(monkeypatch, tmp_path) -> None:
     first = SessionStore(root=tmp_path)
     _run(monkeypatch, ScriptedProvider([_text("答复一")]), ["/exit"], first, args="任务一")

@@ -365,19 +365,39 @@ def _drop_unpaired(messages: List[Message]) -> List[Message]:
 
 
 def log_entries(events: Iterable[Event], keep: int = 2) -> List[Tuple[str, str, str]]:
-    """折出覆盖层用的 ``(任务, 答复, 备注)``，只留最近 ``keep`` 条。"""
-    entries: List[Tuple[str, str, str]] = []
-    task: Optional[str] = None
-    reply = ""
+    """折出覆盖层用的 ``(任务, 答复, 备注)``，只留最近 ``keep`` 条。
+
+    一轮可以分几段写：``/retry`` 接着跑的那一轮没有新的 ``user`` 事件，答复
+    与 ``turn_end`` 直接跟在上一轮后面。这一段既不能丢（旧写法只认「有任务
+    在手」，接着跑的那段全军覆没，覆盖层停在中断前的样子），也不能并进上一
+    轮（``/status`` 要翻得到中断前已经写下的答复）：同名的任务另开一条。
+    """
+    entries: List[List[str]] = []
+    task: Optional[str] = None     # 最近一条用户任务；续写的那一段沿用
+    current: Optional[List[str]] = None  # 正在写的那一条；收尾后置空
     for event in events:
         if event.type == "user":
-            task, reply = event.content, ""
-        elif event.type == "assistant" and task is not None and event.content:
-            reply = event.content
-        elif event.type == "turn_end" and task is not None:
-            note = event.note or ("" if event.status == "ok" else event.status)
-            entries.append((task, reply, note))
-            task, reply = None, ""
-    if task is not None:
-        entries.append((task, reply, "未完成"))
-    return entries[-max(1, keep):]
+            task = event.content
+            current = [task, "", ""]
+            entries.append(current)
+            continue
+        if event.type == "assistant":
+            if not event.content:
+                continue
+            if current is None:
+                if task is None:
+                    continue    # 切片开头的零散事件：没有可归的轮次
+                current = [task, "", ""]
+                entries.append(current)
+            current[1] = event.content
+        elif event.type == "turn_end":
+            if current is None:
+                if task is None:
+                    continue
+                current = [task, "", ""]
+                entries.append(current)
+            current[2] = event.note or ("" if event.status == "ok" else event.status)
+            current = None
+    if current is not None:
+        current[2] = "未完成"
+    return [(task, reply, note) for task, reply, note in entries][-max(1, keep):]
