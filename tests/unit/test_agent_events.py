@@ -201,7 +201,7 @@ def test_retry_with_nothing_to_continue_says_so(monkeypatch, tmp_path) -> None:
 
 
 def test_rm_deletes_this_session_and_leaves(monkeypatch, tmp_path) -> None:
-    """``/rm`` 只删本会话，然后退出 —— 不能顺手再开一条空的。
+    """``/rm`` 只删本会话；一条都不剩时才退出，不能顺手再开一条空的。
 
     删掉的正是「不想留」的那条，回来却又多出一条新的，等于没删。
     """
@@ -249,7 +249,8 @@ def test_rm_with_an_argument_only_shows_the_usage(monkeypatch, tmp_path) -> None
 def test_archive_moves_the_session_out_of_the_default_list(monkeypatch, tmp_path) -> None:
     """``/archive`` 是移走不是删掉：默认列表里不再出现，``--all`` 还看得到。
 
-    和 ``/rm`` 一样办完就退出：收起来的那条不再接着用，别再开一条新的。
+    和 ``/rm`` 一样：收起来的那条不再接着用，但也不顺手开一条新的；
+    一条都不剩时才退出 agent。
     """
     keeper = SessionStore(root=tmp_path)
     provider = ScriptedProvider([_text("答复")])
@@ -261,6 +262,60 @@ def test_archive_moves_the_session_out_of_the_default_list(monkeypatch, tmp_path
     archived = keeper.list(include_archived=True)
     assert len(archived) == 1 and archived[0].archived
     assert (tmp_path / "_archive" / archived[0].id / "events.jsonl").is_file()
+
+
+def test_rm_offers_the_remaining_sessions_instead_of_leaving(
+    monkeypatch, tmp_path
+) -> None:
+    """``/rm`` 删完不退出：把剩下的会话摆出来，挑中的那条接着用。"""
+    keeper = SessionStore(root=tmp_path)
+    kept = keeper.create("stub", "stub-model", title="留着的那条")
+    kept.close()
+    doomed = keeper.create("stub", "stub-model", title="要删的那条")
+    doomed.close()
+    provider = ScriptedProvider([_text("答复")])
+
+    async def choose(services, items, labels, **kwargs):
+        services.messages.append(kwargs.get("header", ""))
+        return next(meta for meta in items if meta.id == kept.id)
+
+    monkeypatch.setattr(agent_cmd, "pick", choose)
+    services, result = _run(
+        monkeypatch, provider, ["任务一", "/rm", "y", "/exit"], keeper
+    )
+
+    assert [meta.id for meta in keeper.list()] == [kept.id]   # 只删了那一条
+    assert keeper.current_id() == kept.id                     # 挑中的成了当前会话
+    assert result.handler == "default"                        # 第二条里 /exit 才退出
+    assert any("已删除" in text for text in services.messages)
+
+
+def test_archive_offers_the_remaining_sessions_instead_of_leaving(
+    monkeypatch, tmp_path
+) -> None:
+    """``/archive`` 同样：收起来之后让人挑一条接着用，不退出。"""
+    keeper = SessionStore(root=tmp_path)
+    kept = keeper.create("stub", "stub-model", title="留着的那条")
+    kept.close()
+    doomed = keeper.create("stub", "stub-model", title="要收的那条")
+    doomed.close()
+    provider = ScriptedProvider([_text("答复")])
+
+    async def choose(services, items, labels, **kwargs):
+        services.messages.append(kwargs.get("header", ""))
+        return next(meta for meta in items if meta.id == kept.id)
+
+    monkeypatch.setattr(agent_cmd, "pick", choose)
+    services, result = _run(
+        monkeypatch, provider, ["任务一", "/archive", "y", "/exit"], keeper
+    )
+
+    assert [meta.id for meta in keeper.list()] == [kept.id]      # 只收起了那一条
+    archived = keeper.list(include_archived=True)
+    assert [meta.id for meta in archived if meta.archived] == [doomed.id]
+    assert keeper.current_id() == kept.id
+    assert result.handler == "default"
+    assert any("已归档" in text for text in services.messages)
 
 
 def test_the_transcript_survives_into_the_next_process(monkeypatch, tmp_path) -> None:
