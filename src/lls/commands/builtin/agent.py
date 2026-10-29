@@ -623,7 +623,7 @@ PLANNING = "planning a call..." # 工具调用的参数在流里，还没拼完
 # ---- 状态覆盖层 ----
 
 class _Painter:
-    """把循环进度画成一两行覆盖层；全屏程序下不画。"""
+    """把循环进度画成一行覆盖层；全屏程序下不画。"""
 
     def __init__(self, services: Services) -> None:
         self._s = services
@@ -668,6 +668,8 @@ class _Painter:
             self._phase = AWAITING
             self._paint(force=True)
         elif event.kind is AgentEventKind.TEXT:
+            # 正文开始了，推理是过去式：别让它继续占那一行。
+            self._think = ""
             if self._phase != REPLYING:
                 self._phase = REPLYING
                 self._paint(force=True)
@@ -709,16 +711,15 @@ class _Painter:
         # 还没开始第一步时不写「第 0 步」：那会儿只是把状态占上，
         # 数字要等真正开始算才出现。
         prefix = f"(agent {self._step}) " if self._step else "(agent) "
-        lines = [
-            _line(
-                prefix,
-                action or self._phase,
-                columns,
-            )
-        ]
-        if self._think:
-            lines.append(_tail_line("(agent-think) ", self._think, columns))
-        self._s.draw_overlay("\n".join(lines))
+        if action:
+            line = _line(prefix, action, columns)
+        elif self._think:
+            # 推理不另占一行：接在当前这一相后面，超宽时留末尾 —— 读的人关心
+            # 最新想到哪。状态词短，让它留在前头，否则这行只剩没头没尾的碎字。
+            line = _tail_line(prefix + self._phase + " ", self._think, columns)
+        else:
+            line = _line(prefix, self._phase, columns)
+        self._s.draw_overlay(line)
 
 
 # ---- 会话 ----

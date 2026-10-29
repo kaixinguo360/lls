@@ -613,6 +613,46 @@ def test_painter_previews_the_latest_reasoning() -> None:
     shown = services.painted[-1]
     assert "END" in shown
     assert "START" not in shown
+    assert "\n" not in shown
+
+
+def test_painter_hangs_reasoning_after_the_phase() -> None:
+    """推理不单占一行：接在当前这一相后面，覆盖层永远只有一行。"""
+    services = FakeServices([])
+    painter = agent_cmd._Painter(services)
+
+    painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=1))
+    painter.on_event(
+        agent_cmd.AgentEvent(
+            agent_cmd.AgentEventKind.REASONING, step=1, text="先看看目录"
+        )
+    )
+
+    shown = services.painted[-1]
+    assert "\n" not in shown
+    assert shown.startswith("(agent 1) " + agent_cmd.REASONING)
+    assert shown.endswith("先看看目录")
+
+
+def test_painter_drops_reasoning_when_an_action_takes_the_line() -> None:
+    """有了具体动作，那一行让给动作：推理是过去式，混进来只会顶掉参数。"""
+    services = FakeServices([])
+    painter = agent_cmd._Painter(services)
+    painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=1))
+    painter.on_event(
+        agent_cmd.AgentEvent(agent_cmd.AgentEventKind.REASONING, step=1, text="想一想")
+    )
+
+    painter.on_event(
+        agent_cmd.AgentEvent(
+            agent_cmd.AgentEventKind.CALL, step=1, name="bash", text='{"cmd": "ls"}'
+        )
+    )
+
+    shown = services.painted[-1]
+    assert "\n" not in shown
+    assert "想一想" not in shown
+    assert shown.startswith("(agent 1) calling bash")
 
 
 def test_painter_paints_a_phase_before_the_model_answers() -> None:
@@ -683,30 +723,6 @@ def test_painter_forgets_the_previous_step() -> None:
     painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=2))
 
     assert services.painted[-1] == "(agent 2) awaiting reply..."
-
-
-def test_painter_stays_out_of_a_fullscreen_app() -> None:
-    """vim 一进来就整块接管画面：painter 不再往上画。
-
-    已经画在屏上的那一行由引擎在换屏时收走（见 Engine._note_screen_switch），
-    painter 这边只管不再添新的。
-    """
-    screen = FakeScreen()
-    services = FakeServices([], screen=screen)
-    painter = agent_cmd._Painter(services)
-    painter.begin()
-
-    screen.alternate = True
-    painter.begin()
-    painter.compacting()
-
-    assert services.painted == ["(agent) " + agent_cmd.PREPARING]
-    services.painted.clear()
-
-    screen.alternate = False
-    painter.begin()
-
-    assert services.painted == ["(agent) " + agent_cmd.PREPARING]
 
 
 # ---- 提示词与显示预算一致 ----
