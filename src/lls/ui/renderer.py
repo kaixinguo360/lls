@@ -4,8 +4,7 @@
 
 * **纯计算**：``wrap_multi_lines`` / ``overlay_anchor`` 与 :mod:`lls.ui.width` ——
   给定文本与终端宽度，算出该占几行、覆盖层该从哪一行开始，不碰终端；
-* **写终端**：``LinePrinter``（覆盖层绘制）、``render_row_cells``（把模型
-  单元格编码成带样式的字节）。
+* **写终端**：``render_row_cells``（把模型的单元格编码成带样式的字节）。
 
 覆盖层的几何约束由 ``overlay_anchor`` 统一负责：放不下就整体上移，绝不越过
 屏幕底部 —— 一旦越界终端会滚动，物理行与模型行随即错位。
@@ -13,14 +12,11 @@
 
 from __future__ import annotations
 
-from lls.tty import Console
-
 from .width import Measure, char_width, conservative_char_width
 
 SGR_RESET = "\x1b[0m"
 
 __all__ = [
-    "LinePrinter",
     "SGR_RESET",
     "char_width",
     "conservative_char_width",
@@ -122,58 +118,6 @@ def overlay_anchor(cursor_y: int, lines_needed: int, rows: int) -> int:
     if lines_needed >= rows:
         return 0
     return max(0, min(cursor_y, rows - lines_needed))
-
-
-class LinePrinter:
-    """在宿主终端上绘制多行文本。"""
-
-    def __init__(self, console: Console) -> None:
-        self._console = console
-
-    def print_lines(
-        self,
-        text: str,
-        cursor: int | None = None,
-        width: int = 80,
-        anchor_row: int | None = None,
-        max_rows: int | None = None,
-    ) -> tuple[int, int]:
-        """打印多行文本并把光标定位到 ``cursor``（字符索引）。返回 (行数, 光标行数)。
-
-        ``anchor_row`` 给定时先绝对定位到该行行首再绘制（覆盖层用），
-        否则沿用相对移动（从当前光标处向上回退）。
-
-        ``max_rows`` 给定且 ``anchor_row`` 也给定（即覆盖层）时，超出屏幕
-        的行不再写：绝对定位写到屏幕之外会被终端夹到末行，几行叠在最后一
-        行上，看着像乱码。此时返回的 ``lines_all`` 是在屏行数 —— 调用方按
-        它记覆盖层占了几行。
-
-        **每一行都先清空再写**：文本变短（退格、重折行）时若只清首行，
-        后面几行的旧字符会留在屏上。
-        """
-        w = self._console
-        line, lines_all = wrap_multi_lines(text, width)
-        if anchor_row is not None:
-            rows = line.split("\r\n")
-            if max_rows is not None:
-                rows = rows[: max(0, max_rows - anchor_row)]
-                lines_all = len(rows)
-            for index, row in enumerate(rows):
-                w.write(f"\x1b[{anchor_row + 1 + index};1H".encode())
-                w.write(b"\x1b[2K")
-                w.write(row.encode())
-        else:
-            w.write(b"\x1b[2K\r")
-            w.write(line.encode())
-        if cursor is not None and cursor != len(text):
-            for _ in range(lines_all - 1):
-                w.write(b"\r\x1b[1A")
-            line_prev, lines_cur = wrap_multi_lines(text[:cursor], width)
-            w.write(b"\r")
-            w.write(line_prev.encode())
-        else:
-            lines_cur = lines_all
-        return lines_all, lines_cur
 
 
 # ---- 按屏幕模型渲染（模型是画面的唯一来源）----

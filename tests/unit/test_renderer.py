@@ -9,11 +9,8 @@ import pyte
 
 from lls.session.engine import Engine, _PendingWrites
 from lls.term import PyteScreenModel
-from lls.ui import (
-    LinePrinter,
-    char_width,
-    wrap_multi_lines,
-)
+from lls.session.overlay import Overlay
+from lls.ui import char_width, wrap_multi_lines
 
 
 class FakeConsole:
@@ -62,48 +59,62 @@ def test_wrap_replays_style_on_each_line() -> None:
     assert all(row.startswith("\x1b[1m") and row.endswith("\x1b[0m") for row in rows)
 
 
-# ---- LinePrinter ----
+# ---- Overlay：覆盖层自己的模型 ----
 
-def test_print_lines_writes_content() -> None:
-    c = FakeConsole()
-    p = LinePrinter(c)
-    p.print_lines("hello", None, 80)
-    out = c.snapshot()
-    assert b"\x1b[2K\r" in out  # 清当前行 + 回车
-    assert b"hello" in out
+def _row_text(ov: Overlay, row: int) -> str:
+    return "".join(c.data for c in ov.row_cells(row)).rstrip()
 
 
-def test_print_lines_cursor_positioning() -> None:
-    """光标不在末尾时：回车 + 写前缀定位（不用反色高亮）。
+def test_overlay_wraps_at_the_width() -> None:
+    ov = Overlay(rows=4, columns=4)
+    ov.set("abcdefgh")
 
-    单行（lines_all=1）时不上移，直接 ``\\r`` + 写前缀 ``text[:cursor]``。
-    """
-    c = FakeConsole()
-    p = LinePrinter(c)
-    p.print_lines("> abcd", cursor=4, width=80)
-    out = c.snapshot()
-    # 写完整内容后回车，再写前缀 "> ab"，光标停在 x=4
-    assert b"> abcd" in out
-    assert out.endswith(b"\r> ab")
-    assert b"\x1b[7m" not in out  # 不用反色高亮
+    assert ov.lines == 2
+    assert _row_text(ov, 0) == "abcd"
+    assert _row_text(ov, 1) == "efgh"
 
 
-def test_print_lines_clears_each_wrapped_row() -> None:
-    """退格让一行变短时，旧字符不能留在后面几行上。"""
-    c = FakeConsole()
-    p = LinePrinter(c)
-    p.print_lines("abcdefgh", None, 4, anchor_row=0)
-    first = c.snapshot()
+def test_overlay_cursor_is_the_insertion_point() -> None:
+    ov = Overlay(rows=4, columns=10)
+    ov.set("> abcd", cursor=4)
 
-    p.print_lines("abcdef", None, 4, anchor_row=0)
-    second = c.snapshot()
+    c = ov.cursor()
+    assert c is not None
+    assert (c.y, c.x) == (ov.anchor, 4)
 
-    assert second.count(b"\x1b[2K") == 2  # 两行都先清后写
-    screen = pyte.Screen(4, 2)
-    stream = pyte.ByteStream(screen)
-    stream.feed(first)
-    stream.feed(second)
-    assert [line.rstrip() for line in screen.display] == ["abcd", "ef"]
+
+def test_overlay_without_cursor_does_not_own_one() -> None:
+    ov = Overlay(rows=4, columns=10)
+    ov.set("err: boom")
+
+    assert ov.owns_cursor is False
+    assert ov.cursor() is None
+
+
+def test_overlay_keeps_sgr_style() -> None:
+    ov = Overlay(rows=4, columns=10)
+    ov.set("\x1b[1mhi\x1b[0m")
+
+    cells = ov.row_cells(0)
+    assert cells[0].data == "h" and cells[0].bold is True
+    assert cells[2].bold is False
+
+
+def test_overlay_does_not_count_trailing_blank_rows() -> None:
+    ov = Overlay(rows=6, columns=10)
+    ov.set("a\nb\nc\n\n\n")
+
+    assert ov.lines == 3
+
+
+def test_overlay_clear_forgets_the_content() -> None:
+    ov = Overlay(rows=6, columns=10)
+    ov.set("hello")
+    ov.clear()
+
+    assert ov.visible is False
+    assert ov.text is None
+    assert ov.anchor is None
 
 
 # ---- 覆盖层变矮：多出来的旧行必须按模型恢复 ----
@@ -193,16 +204,14 @@ def test_resize_redraws_the_overlay_at_the_new_width() -> None:
     screen.feed(b"one")
     text = ">" + "a" * 18  # 20 列下是一行
     engine.draw_overlay(text)
-    assert engine._overlay_lines == 1
-    # 覆盖层只在读提示符期间存在（read_line 会登记 active_prompt）。
-    engine._active_prompt = ("", text, len(text), 1, 1)
+    assert engine.overlay.lines == 1
     console.snapshot()
 
     screen.resize(6, 10)  # 宿主终端变窄
     engine._relayout_overlay()
 
     rows = _emulate(console.snapshot(), rows=6, columns=10)
-    assert engine._overlay_lines == 2
+    assert engine.overlay.lines == 2
     assert rows[0].rstrip() == ">aaaaaaaaa"
     assert rows[1].rstrip() == "aaaaaaaaa"
 
@@ -214,14 +223,14 @@ def test_message_overlay_reflows_when_the_window_narrows() -> None:
     engine, _screen, console = _overlay_engine(rows=8, columns=40)
     text = "y" * 38
     engine.draw_overlay(text)
-    assert engine._overlay_lines == 1
+    assert engine.overlay.lines == 1
     console.snapshot()
 
     engine.screen.resize(8, 20)
     engine._relayout_overlay()
 
     rows = _emulate(console.snapshot(), rows=8, columns=20)
-    assert engine._overlay_lines == 2
+    assert engine.overlay.lines == 2
     assert rows[0].rstrip() == "y" * 20
     assert rows[1].rstrip() == "y" * 18
 
@@ -265,7 +274,7 @@ def test_a_tall_message_stops_at_the_bottom_of_the_screen() -> None:
     engine.draw_overlay("\n".join("line {}".format(i) for i in range(12)))
 
     out = console.snapshot()
-    assert engine._overlay_lines == 6
+    assert engine.overlay.lines == 6
     assert b"\x1b[6;1H" in out
     assert b"\x1b[7;1H" not in out
 
@@ -309,7 +318,7 @@ def test_handoff_keeps_the_prompt_rows_for_the_next_screen() -> None:
     assert line == "/s"
     # 提示行原地留着，没被子进程的画面顶掉
     assert rows[2].rstrip() == "> /s"
-    assert engine._overlay_anchor_row is not None
+    assert engine.overlay.anchor is not None
 
 
 def test_no_handoff_gives_the_rows_back_like_before() -> None:
@@ -322,7 +331,7 @@ def test_no_handoff_gives_the_rows_back_like_before() -> None:
     assert line == "list files"
     assert rows[0].rstrip() == "one"
     assert rows[2].rstrip() == "three"
-    assert engine._overlay_anchor_row is None
+    assert engine.overlay.anchor is None
 
 
 # ---- 哪些行会换成另一个覆盖层 ----
@@ -387,7 +396,7 @@ def test_output_without_any_overlay_draws_nothing_extra() -> None:
     engine.render_from_model()
     console.snapshot()
 
-    engine._redraw_overlay_now()
+    engine.render_from_model()
 
     assert console.data == b""
 

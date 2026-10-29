@@ -1,14 +1,13 @@
 """透传输出通路：子进程字节与覆盖层必须**同一帧**下发。
 
-覆盖层浮在物理画面上，子进程的字节会把它冲掉。旧做法是「等输出静默
-``OVERLAY_REDRAW_DELAY`` 再补画」，而每来一批输出都会把定时器取消重排 ——
-持续输出时（间隔短于该延迟）永远轮不到重画，覆盖层只在间隙里闪一下。
-所以这里改成：先把这一批喂给模型，再把「子进程字节 + 覆盖层」写成一笔。
+透传时终端由子进程的字节直接画，它会把覆盖层冲掉，所以每写完一笔就把
+覆盖层按它自己记的锚点补回去，两件事写在同一笔里（否则终端会在中间刷新
+一次，看到的是「覆盖层被冲掉」的那半帧）。
 
 本文件守住新通路的三个不变量：
 
-1. 子进程字节与覆盖层重画落在**同一次** console.write 里（有覆盖层时）；
-2. 模型还没追上（积压非空）时不按过时光标定锚，退回静默兜底；
+1. 子进程字节与覆盖层补画落在**同一次** console.write 里（有覆盖层时）；
+2. 补画只认覆盖层自己的锚点，不看底部模型是不是已经追上；
 3. 洪流下积压**有界**，且任何一次喂模型都不再把整份积压一次塞进去。
 """
 
@@ -71,58 +70,37 @@ def _engine():
     )
     console = FakeConsole()
     engine._exit_event = _Live()  # type: ignore[assignment]
-    engine._console = console  # type: ignore[assignment]
-    engine._out.attach(console)  # type: ignore[arg-type]
+    engine._attach_console(console)  # type: ignore[arg-type]
     return engine, screen, console
 
 
 def test_passthrough_bytes_and_overlay_share_one_frame() -> None:
-    """输出到达时，子进程字节与覆盖层重画写在同一笔里。
-
-    分两笔的话，终端会在中间刷新一次 —— 那一帧上覆盖层是被冲掉的，
-    持续输出时看起来就是「覆盖层一直在闪」。
-    """
+    """输出到达时，子进程字节与覆盖层补画写在同一笔里。"""
     engine, _screen, console = _engine()
-    drawn: list[str] = []
-    engine._active_prompt = (":", "abc", 4, 1, 1)  # type: ignore[assignment]
-    engine.draw_overlay = (  # type: ignore[assignment]
-        lambda text, cursor=None: drawn.append(text) or (3, 1)
-    )
+    engine.draw_overlay(":abc", 4)
+    console.writes.clear()
     engine._read_all_available = lambda: b"line-1\r\n"  # type: ignore[assignment]
 
     engine._on_master_readable()
 
-    # 一笔写出（整段还夹在同步输出里，见 _PendingWrites._flush）
     assert len(console.writes) == 1, "子进程字节与覆盖层被拆成了多笔"
     assert b"line-1\r\n" in console.writes[0]
-    assert drawn == [":abc"], "输出到达后没有把覆盖层补回去"
+    assert b":abc" in console.writes[0], "输出到达后没有把覆盖层补回去"
 
 
-def test_overlay_skipped_while_model_lags() -> None:
-    """模型还落后（积压非空）时不立刻重画，改为静默兜底。
+def test_overlay_repaints_at_its_own_anchor_not_the_lagging_model() -> None:
+    """补画只认覆盖层自己记的锚点：模型还落在后面也不影响。"""
+    engine, screen, console = _engine()
+    engine.draw_overlay(":abc", 4)
+    assert engine.overlay.anchor == 3
 
-    此刻的光标属于上一批数据，按它定锚会把覆盖层画到过时的行列上。
-    """
-    engine, _screen, console = _engine()
-    engine._active_prompt = (":", "", 1, 1, 1)  # type: ignore[assignment]
-    engine._backlog += b"x" * 10
-    scheduled: list[float] = []
+    screen.cursor = SimpleNamespace(y=20, x=5)  # 模型已被后来的输出带走
+    console.writes.clear()
 
-    class FakeLoop:
-        def call_later(self, delay, callback):
-            scheduled.append(delay)
-            return SimpleNamespace(cancel=lambda: None)
+    engine._repaint_overlay()
 
-    engine._loop = FakeLoop()  # type: ignore[assignment]
-    drawn: list[str] = []
-    engine.draw_overlay = (  # type: ignore[assignment]
-        lambda text, cursor=None: drawn.append(text) or (3, 1)
-    )
-
-    engine._redraw_overlay_now()
-
-    assert drawn == [], "模型落后时仍按过时光标画了覆盖层"
-    assert scheduled == [engine_mod.OVERLAY_REDRAW_DELAY], "没有退回静默兜底"
+    assert b"\x1b[4;1H" in console.writes[0]
+    assert b"\x1b[21;1H" not in console.writes[0]
 
 
 def test_flush_backlog_bounds_what_it_feeds() -> None:

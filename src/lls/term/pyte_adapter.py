@@ -231,6 +231,18 @@ class PyteScreenModel:
     def clear_dirty(self) -> None:
         self._cur.dirty.clear()
 
+    def reset(self) -> None:
+        """回到干净状态：两张屏清空、光标归位、解析器状态丢弃。
+
+        覆盖层每换一屏内容都从零开始喂（它的模型就是那一屏），所以需要这条
+        比 ``resize`` 更彻底的路径。
+        """
+        for screen in (self._main, self._alt):
+            screen.reset()
+        self._cur = self._main
+        self._stream = self._streams[id(self._main)]
+        self._pending = b""
+
     def feed(self, data: bytes) -> None:
         """喂入字节流；在开关序列处切换缓冲区（支持开关与内容同块）。"""
         buf = self._pending + data

@@ -27,13 +27,9 @@ from typing import Any, Callable
 from lls.edit import HistoryStore, LineEditor
 from lls.term import ScreenModel
 from lls.tty import Console, Key, KeyParser, PtySession, TerminalBackend, Winsize
-from lls.ui import (
-    LinePrinter,
-    overlay_anchor,
-    render_row_cells,
-    wrap_multi_lines,
-)
+from lls.ui import render_row_cells
 
+from .overlay import Overlay
 from .services import Handler, Services
 
 __all__ = ["Engine"]
@@ -47,10 +43,6 @@ ESCDELAY = 0.1
 
 #: 没有持久化时给编辑器用的作用域名，占位而已，不落盘。
 _GLOBAL_SCOPE = "global"
-
-# 子进程输出后，等这么久没有新输出才重绘覆盖层。
-# 目的是让程序（尤其全屏程序）的整屏重绘完整落地，避免覆盖层插在中间。
-OVERLAY_REDRAW_DELAY = 0.05
 
 # char 模式下模型追赶子进程的调度参数。
 #
@@ -167,7 +159,6 @@ class Engine:
         self._pty_fd = -1
         self._console: Console | None = None
         self._out = _PendingWrites()
-        self._printer: LinePrinter | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
         self._key_parser = KeyParser()
@@ -183,17 +174,18 @@ class Engine:
         # 输入历史落盘；None 表示不持久化（只在本次进程里召回）。
         self._history = history
 
-        # 覆盖层几何：位置由模型实时光标推导，只记录当前帧的实际占用。
-        self._active_prompt: tuple[str, str, int, int, int] | None = None
-        self._overlay_anchor_row: int | None = None
-        self._overlay_lines = 0
-        self._overlay_timer: asyncio.TimerHandle | None = None
-        # 覆盖层的内容也要记住：窗口一改尺寸，引擎得能按新尺寸重画它。
-        # ``_overlay_text`` 是最近一次画上去的文本（消息框、预览、提示行），
-        # ``_overlay_source`` 由需要自己排版的界面（翻看器）提交：给了源就
-        # 以它为准，它按新的行列数重排并返回该画的那一屏。
-        self._overlay_text: str | None = None
+        # 覆盖层：提示行、消息框、翻看器都浮在子进程画面之上，由它自己的
+        # 屏幕模型记住内容、折行与光标（见 :class:`~.overlay.Overlay`）。
+        # 渲染时与底部模型合成，物理光标也听它的。
+        #
+        # 接上宿主终端时才建（见 ``_attach_console``）：构造函数只做赋值，
+        # 连屏幕尺寸都不读 —— 它可能在任何循环、任何终端之前被调用。
+        self._overlay: Overlay | None = None
+        # 自己排版的界面（翻看器）提交的「按新尺寸重排这一屏」回调；给了源
+        # 就以它为准，它按新的行列数重排并返回该画的那一屏。
         self._overlay_source: Callable[[int, int], str] | None = None
+        # 因为覆盖层收起、变矮或移走而需要按模型重铺的行。
+        self._stale_rows: set[int] = set()
 
         # 等待喂给模型的字节（显示优先时，模型在后面追赶）。
         self._backlog = bytearray()
@@ -201,6 +193,12 @@ class Engine:
         self._services = Services(self)
 
     # ---- 只读属性 ----
+
+    @property
+    def overlay(self) -> Overlay:
+        """覆盖层（接上宿主终端之后才存在）。"""
+        assert self._overlay is not None
+        return self._overlay
 
     @property
     def exited(self) -> bool:
@@ -353,9 +351,6 @@ class Engine:
             self.screen.clear_dirty()
 
     async def _cleanup(self) -> None:
-        if self._overlay_timer is not None:
-            self._overlay_timer.cancel()
-            self._overlay_timer = None
         if self._loop is not None:
             for fd in (self._pty_fd, sys.stdin.fileno()):
                 if fd >= 0:
@@ -386,8 +381,8 @@ class Engine:
             # 先喂模型，是为了让覆盖层贴住子进程当前光标；喂的是**有预算**的
             # 一小片（解析是纯 Python，整屏重绘约 10ms，不许在写终端前同步
             # 追平，否则事件循环被占住、读不到下一批输出，画面一顿一顿）。
-            # 追不平（积压非空）时 _redraw_overlay_now 会退回静默兜底，绝不按
-            # 过时光标定锚。
+            # 覆盖层贴的是它自己画上去时定的锚点（_repaint_overlay），不再
+            # 依赖模型是否追上，所以这里不存在「按过时光标定锚」的问题。
             #
             # 不补画的话，子进程的字节会把覆盖层冲掉 —— 持续输出下几乎看不到
             # 它（实测 10ms/行时可见率仅 22%，改成同帧补画后 100%）。
@@ -395,7 +390,7 @@ class Engine:
             self._pump_backlog()
             with self._out.frame():
                 self._out.write(data)
-                self._redraw_overlay_now()
+                self._repaint_overlay()
         else:
             # 渲染模式：不写子进程字节，终端内容一律由模型投影而来。
             # 透传会让「子进程画的」与「覆盖层画的」争用同一个终端。
@@ -406,13 +401,12 @@ class Engine:
     def _attach_console(self, console: Console) -> None:
         """接上宿主终端。
 
-        从此**所有**写终端都经过帧缓冲（``self._out``）：打印器拿到的也是
-        它，而不是裸 console —— 否则覆盖层那一串写会绕开合并，一帧又变回
-        分好几次下发。
+        从此**所有**写终端都经过帧缓冲（``self._out``）：一次合成算出来的
+        整段画面攒到最外层退出时一笔下发（还夹在同步输出里）。
         """
         self._console = console
         self._out.attach(console)
-        self._printer = LinePrinter(self._out)
+        self._overlay = Overlay(self.screen.rows, self.screen.columns)
 
     def _read_all_available(self) -> bytes | None:
         """在很短的窗口内读走子进程所有输出，**合并成一块**。
@@ -533,119 +527,76 @@ class Engine:
 
     # ---- 渲染 ----
 
-    def render_from_model(
-        self, *, keep_overlay: bool = True, leave_cursor: bool = True
-    ) -> None:
-        """把模型内容投影到物理终端。
+    def render_from_model(self) -> None:
+        """把模型内容投影到物理终端：底部模型与覆盖层合成一帧。
 
-        不写子进程的原始字节，只写「模型算出来的画面」：
+        1. dirty 行取自底部模型（pyte 精确标记的变化行）；
+        2. 覆盖层此刻占的那几行整行取自覆盖层模型 —— 它和底层一样不透明，
+           否则子进程的旧内容会从空白处透出来；
+        3. 收起、变矮或移走的覆盖层曾经占的行按底部模型重铺；
+        4. 整段攒成一笔下发（还在同步输出里，终端不会画出半帧）；
+        5. 物理光标放到该显示的位置（见 ``_place_physical_cursor``）。
 
-        1. 覆盖层占用的行并入 dirty —— 它们既要腾出来，又要按模型显示，
-           所以「让出覆盖层」和「重绘内容」是同一次写，不是两次；
-        2. 重绘所有 dirty 行（pyte 精确标记变化的行）；
-        3. 把物理光标放到模型光标处。
-
-        这样物理终端恒等于模型，覆盖层是唯一浮在上面的东西。
-
-        ``keep_overlay=False``：只让出画面，不重新调度覆盖层绘制。
-        ``leave_cursor=False``：不动光标，调用方紧接着会自行定位。
+        覆盖层不再是「画上去再补一刀」：它就是画面的一部分，合成一次即可。
         """
         if self._console is None:
             return
         # 渲染与光标定位都基于模型，因此模型必须已经完整。
         self.flush_backlog()
-        dirty = set(self.screen.dirty)
-        if self._overlay_anchor_row is not None and self._overlay_lines:
-            top = self._overlay_anchor_row
-            bottom = min(top + self._overlay_lines, self.screen.rows)
-            dirty.update(range(top, bottom))
-        self._overlay_anchor_row = None
-        self._overlay_lines = 0
+        ov = self.overlay
+        rows = self.screen.rows
+        if ov.visible and not ov.owns_cursor:
+            # 纯展示的覆盖层贴着子进程当前行：输出往下走，它也跟下去。
+            moved_from = ov.move_to(self.screen.cursor.y)
+            if moved_from is not None and moved_from != ov.anchor:
+                self._stale_rows.update(range(moved_from, min(moved_from + ov.lines, rows)))
+        top = 0 if ov.anchor is None else ov.anchor
+        dirty = set(self.screen.dirty) | self._stale_rows
+        self._stale_rows.clear()
+        if ov.visible:
+            dirty.update(range(top, min(top + ov.lines, rows)))
         self.screen.clear_dirty()
 
-        if not dirty and not leave_cursor and not keep_overlay:
+        # 什么都没变：一笔都不用写（光标上一帧已经放到该去的地方）。
+        if not dirty:
             return
         with self._out.frame():
             if dirty:
-                out = []
+                out: list[str] = []
                 for row in sorted(dirty):
-                    if not 0 <= row < self.screen.rows:
+                    if not 0 <= row < rows:
                         continue
-                    out.append(f"\x1b[{row + 1};1H")
-                    out.append(render_row_cells(self.screen.row_cells(row)))
+                    out.append("\x1b[{};1H".format(row + 1))
+                    if ov.visible and top <= row < top + ov.lines:
+                        out.append(render_row_cells(ov.row_cells(row - top)))
+                    else:
+                        out.append(render_row_cells(self.screen.row_cells(row)))
                     out.append("\x1b[0K")
                 if out:
                     self._out.write("".join(out).encode())
-            if leave_cursor:
-                self._place_physical_cursor()
-            if keep_overlay:
-                # 与「铺模型行」同一笔写下去：留到下一帧再画，中间那一次
-                # 刷新就会露出没有覆盖层的半帧。
-                self._redraw_overlay_now()
-
-    def _schedule_overlay_redraw(self) -> None:
-        """输出到达后（重新）安排一次覆盖层重绘，等输出静默才真正执行。"""
-        if self._overlay_timer is not None:
-            self._overlay_timer.cancel()
-            self._overlay_timer = None
-        if self._loop is None:
-            self._flush_overlay_redraw()
-            return
-        self._overlay_timer = self._loop.call_later(
-            OVERLAY_REDRAW_DELAY, self._flush_overlay_redraw
-        )
-
-    def _redraw_overlay_now(self) -> None:
-        """立刻把覆盖层补回画面（与刚铺的画面合并成一笔写）。
-
-        模型还没追上子进程时（积压非空，说明洪流正打到一半）不敢用它的光标
-        定锚：那会把覆盖层画到过时的行列上。这种情况退回
-        :meth:`_schedule_overlay_redraw`，等输出静默再补一次 —— 洪流下宁可
-        少画几帧，也不可画错位置。
-
-        其余情况（交互命令、慢速输出）一律当场画：旧做法统一等
-        ``OVERLAY_REDRAW_DELAY`` 静默，而每来一批输出都会把定时器取消重排，
-        间隔短于该延迟就永远轮不到重画，覆盖层于是只在间隙里闪一下。
-
-        「有没有覆盖层」不看提示行：agent 进度行、消息框、翻看器都是别处
-        ``draw_overlay`` 画上去的，同样要补画（见 :meth:`_flush_overlay_redraw`）。
-        """
-        if self._console is None or not self._has_overlay():
-            return
-        if self._backlog:
-            self._schedule_overlay_redraw()
-            return
-        if self._overlay_timer is not None:
-            self._overlay_timer.cancel()
-            self._overlay_timer = None
-        self._flush_overlay_redraw()
-
-    def _flush_overlay_redraw(self) -> None:
-        """重画覆盖层，让它浮在最新画面上（静默兜底路径也走这里）。
-
-        基准直接取模型光标 —— 那就是子进程当前所在的位置，覆盖层贴着它显示。
-        覆盖层的绘制不写模型，模型光标始终代表子进程的真实位置。
-        """
-        self._overlay_timer = None
-        if self._console is None:
-            return
-        active = self._active_prompt
-        if active is not None:
-            prompt, text, cursor, _lines_all, _lines_cur = active
-            _, new_all = self.draw_overlay(prompt + text, cursor)
-            self._active_prompt = (prompt, text, cursor, new_all, new_all)
-            return
-        content = self._overlay_content()
-        if content is None:
-            return
-        # 消息框、翻看器、agent 进度行都是「画一次就摆在那儿」的覆盖层，没有
-        # 提示行要跟着重排。子进程每写一笔，覆盖层占的那几行就按模型铺回去了
-        # —— 不补画的话它只在两笔输出之间的间隙里闪一下（输出一慢就几乎看不
-        # 见），所以这里按上次的文本/源重画，和那一笔输出写在同一个 frame 里。
-        with self._out.frame():
-            self.draw_overlay(content)
-            # 纯展示的覆盖层不占光标位置：子进程接着从模型光标处写。
             self._place_physical_cursor()
+
+    def _repaint_overlay(self) -> None:
+        """按覆盖层自己的模型补画回去（只有透传时才需要）。
+
+        透传时终端由子进程的字节直接画，它会把覆盖层冲掉。这里只重画覆盖层
+        占的那几行，位置取它自己记的锚点 —— 不依赖底部模型是否已经追上，
+        因此不会有「按过时光标定锚」的问题。
+        """
+        ov = self.overlay
+        if not ov.visible or ov.anchor is None:
+            return
+        out: list[str] = []
+        for offset in range(ov.lines):
+            row = ov.anchor + offset
+            if not 0 <= row < self.screen.rows:
+                continue
+            out.append("\x1b[{};1H".format(row + 1))
+            out.append(render_row_cells(ov.row_cells(offset)))
+            out.append("\x1b[0K")
+        if out:
+            self._out.write("".join(out).encode())
+        self._place_physical_cursor()
 
     # ---- 输入回调 ----
 
@@ -691,48 +642,23 @@ class Engine:
         self._relayout_overlay()
 
     def _relayout_overlay(self) -> None:
-        """窗口尺寸变了：覆盖层的锚点与行数都是按旧宽度算的。
+        """窗口尺寸变了：覆盖层按新尺寸重排，和模型一起铺一遍。
 
-        模型 resize 之后整屏都会标成 dirty，所以这里不是「补一次擦除」，
-        而是当场按新尺寸重铺一遍：物理画面刚被终端改过，覆盖层也必须
-        立刻贴到新位置上 —— 否则它会按旧宽度折行、停在旧行，看上去
-        像卡住了。两件事写在同一次写里，不留中间态。
+        模型 resize 之后整屏都会标成 dirty，所以这里不必「补一次擦除」：
+        覆盖层按新行列数重喂（折行、光标都由 pyte 重算），再和模型合成一次
+        —— 两件事写在同一次写里，不留中间态。
         """
         if self._console is None:
             return
-        self._overlay_anchor_row = None
-        self._overlay_lines = 0
-        # 覆盖层按旧尺寸排出，必须重算：提示行有原始文本与光标，直接重画；
-        # 消息框之类重画记下的文本（按新宽度折行）；自己排版的界面（翻看器）
-        # 走它给的源，从原始内容重新排版。
-        content = self._overlay_content()
-        if self._active_prompt is None and content is None:
-            # 透传时屏幕归子进程管（它自己会收到 SIGWINCH 重画），没有覆盖层
-            # 要贴上去就不必再按模型铺一遍 —— 拖动窗口时这类重绘会连着来。
-            if not self._passthrough():
-                self.render_from_model(keep_overlay=False)
-            return
-        # 一次写里完成：先按模型铺满新尺寸的画面，再把覆盖层画回去。
-        with self._out.frame():
-            self.render_from_model(keep_overlay=False)
-            if self._active_prompt is not None:
-                self._flush_overlay_redraw()
-            elif content is not None:
-                self.draw_overlay(content)
-
-    def _has_overlay(self) -> bool:
-        """画面上是否还浮着一层东西（提示行、消息框、翻看器、进度行）。"""
-        return (
-            self._active_prompt is not None
-            or self._overlay_source is not None
-            or self._overlay_text is not None
-        )
-
-    def _overlay_content(self) -> str | None:
-        """按当前尺寸重算覆盖层该画的内容；没有覆盖层时返回 None。"""
+        rows, columns = self.screen.rows, self.screen.columns
+        # 先按新宽度把旧内容重喂一遍（anchor 随之重算）。
+        self.overlay.resize(rows, columns)
         if self._overlay_source is not None:
-            return self._overlay_source(self.screen.rows, self.screen.columns)
-        return self._overlay_text
+            # 自己排版的界面（翻看器）从原始内容重排，而不是二次折行。
+            self.overlay.set(
+                self._overlay_source(rows, columns), None, self.screen.cursor.y
+            )
+        self.render_from_model()
 
     def _on_sigchld(self) -> None:
         """SIGCHLD：有子进程状态变化，但**未必**是 PTY 子进程。
@@ -868,7 +794,8 @@ class Engine:
 
         子进程已退出时不等待按键（否则会一直卡在这里）。
         """
-        assert self._printer is not None
+        if self._console is None:
+            return
         self.draw_overlay(text)
         try:
             if not self._exit_event.is_set():
@@ -877,84 +804,46 @@ class Engine:
             self.restore()
 
     def restore(self) -> None:
-        """收起覆盖层，按模型还原它占的行，并把物理光标定位到模型光标。"""
-        self._forget_overlay()
-        self.render_from_model(keep_overlay=False)
-
-    def _forget_overlay(self) -> None:
-        """忘掉当前覆盖层的内容：收起之后它就没了，尺寸变化也不该再画回来。"""
-        self._overlay_text = None
+        """收起覆盖层：它占的行按模型还原，光标回到模型光标。"""
         self._overlay_source = None
+        self._drop_overlay()
+        self.render_from_model()
+
+    def _drop_overlay(self) -> None:
+        """让覆盖层让出它占的行（内容一并忘掉，改尺寸时不会再画回来）。"""
+        ov = self.overlay
+        if ov.visible and ov.anchor is not None:
+            self._stale_rows.update(
+                range(ov.anchor, min(ov.anchor + ov.lines, self.screen.rows))
+            )
+        ov.clear()
 
     # ---- 覆盖层 ----
 
     def draw_overlay(self, text: str, cursor: int | None = None) -> tuple[int, int]:
-        """绘制覆盖层内容，自约束位置。
+        """画一屏覆盖层，位置自约束。返回 ``(anchor, lines)``。
 
-        覆盖层（命令行、消息、预览）都浮在画面上，是临时显示。它若不自己约束
-        位置，画到屏幕底之外就会让终端滚动、把上方内容顶走，物理画面与屏幕
-        模型随之错位 —— 之后子进程的回显会被写进错误的行/列。
+        内容喂进覆盖层自己的屏幕模型：折行、颜色、宽字符、光标位置全由 pyte
+        算，这里只负责定锚点 —— 贴着子进程当前所在的行（模型的实时光标），
+        放不下就整体上移，绝不画到屏幕之外（那会让终端滚动、物理画面与模型
+        错位）。绘制与底部模型合成在同一帧里，不写底部模型。
 
-        因此这里由覆盖层自己负责：
-
-        1. 算出需要几行、上一帧占了哪几行，按**行区间**精确擦除（位置可能变）；
-        2. 用 :func:`overlay_anchor` 定出起始行：靠近基准行，放不下就整体上移；
-        3. 以绝对定位绘制。
-
-        **不写模型**：覆盖层是浮动层，不是子进程的画面。模型光标始终是子进程
-        的真实位置。
-
-        **位置只取模型的实时光标**，不记住「进入时的位置」：覆盖层是浮动的，
-        就该贴着子进程当前所在的行。
-
-        ``cursor`` 为 None 时表示纯展示，光标停在文末。
-        返回 ``(anchor, lines_all)``。
+        ``cursor`` 是文本里的字符下标；为 None 表示纯展示（消息框、翻看器），
+        它不占光标位置，物理光标仍按底部模型放置。
         """
-        assert self._printer is not None
-        # 位置取自模型光标，因此模型必须已经完整。透传模式下模型在后追赶，
-        # 这里先排空再取光标；已排空时是空操作。
+        if self._console is None:
+            return (0, 0)
+        # 锚点取自模型光标，因此模型必须已经完整（透传时它在后面追赶）。
         self.flush_backlog()
-        if self._overlay_timer is not None:
-            # 即将重绘，取消挂起的延迟重绘，避免同一帧画两次
-            self._overlay_timer.cancel()
-            self._overlay_timer = None
-        width = self.screen.columns
-        _, lines_needed = wrap_multi_lines(text, width)
-        anchor = overlay_anchor(self.screen.cursor.y, lines_needed, self.screen.rows)
-        # 「让出旧位置」只在真的换位置或变矮时做：
-        # 若新锚点与旧锚点完全相同、高度也没减，直接覆盖即可（每一行都会先清空）。
-        # 变矮时多出来的旧行必须按模型恢复，否则会一直留着上一帧的内容。
-        with self._out.frame():
-            if (
-                self._overlay_anchor_row != anchor
-                or self._overlay_lines > lines_needed
-            ):
-                # 让出旧位置（并入 dirty 一次写回），不重画覆盖层、不动光标
-                # —— 紧接着 print_lines 会画到新锚点
-                self.render_from_model(keep_overlay=False, leave_cursor=False)
-            lines_all, lines_cur = self._printer.print_lines(
-                text,
-                cursor,
-                width,
-                anchor_row=anchor,
-                # 纯展示的覆盖层（消息、预览）不超过一屏：高的内容截在
-                # 屏幕底部，不留几层叠在末行上的残影。提示行不动：它的
-                # 光标要靠完整行数回算。
-                max_rows=None if cursor is not None else self.screen.rows,
+        ov = self.overlay
+        if ov.visible and ov.anchor is not None:
+            # 变矮或换位置时，旧行区间要还给模型。
+            self._stale_rows.update(
+                range(ov.anchor, min(ov.anchor + ov.lines, self.screen.rows))
             )
-            if cursor is None:
-                # 纯展示的覆盖层没有插入点：print_lines 画完光标停在文末，
-                # 子进程接下来从模型光标处写，物理光标得先回去 —— 否则每画
-                # 一次都会把光标甩到覆盖层末尾，随后的输出又把它带走，看着
-                # 就是光标在子进程输出时乱跳、只在覆盖层重画时回到原处。
-                self._place_physical_cursor()
-        self._overlay_anchor_row = anchor
-        self._overlay_lines = lines_all
-        # 记下画的是什么：窗口改尺寸时按新宽度重画同一段内容（见
-        # :meth:`_relayout_overlay`）。翻看器这类自己排版的界面会另给源，
-        # 那时以源为准。
-        self._overlay_text = text
-        return anchor, lines_all
+        ov.set(text, cursor, self.screen.cursor.y)
+        self.render_from_model()
+        return (0 if ov.anchor is None else ov.anchor), ov.lines
 
     def set_overlay_source(self, source: Callable[[int, int], str] | None) -> None:
         """登记「按新尺寸重画这一屏」的回调：``source(rows, columns) -> 文本``。
@@ -966,15 +855,16 @@ class Engine:
         self._overlay_source = source
 
     def _place_physical_cursor(self) -> None:
-        """把物理光标放到模型光标处。
+        """把物理光标放到该显示的位置。
 
-        覆盖层绘制会移动物理光标；子进程回显必须落在模型光标的位置，
-        否则内容会被写到错误的行列。这里显式对齐一次。
+        覆盖层有自己的插入点（提示行）时听它的：那才是用户盯着的那个光标。
+        否则（消息框、翻看器）用底部模型的光标 —— 子进程的下一笔回显必须
+        落在模型光标处。
         """
         if self._console is None:
             return
-        c = self.screen.cursor
-        self._out.write(f"\x1b[{c.y + 1};{c.x + 1}H".encode())
+        c = self.overlay.cursor() or self.screen.cursor
+        self._out.write("\x1b[{};{}H".format(c.y + 1, c.x + 1).encode())
 
     # ---- 行读取 ----
 
@@ -1034,44 +924,33 @@ class Engine:
         editor = self._editor_for(history_id, session=session)
         editor.reset(value)
 
-        assert self._printer is not None
         shown: tuple[str, int] = ("", 0)
+        handed_over = False
 
         def _draw() -> None:
-            """按当前编辑状态重画提示行，并登记活跃覆盖层。
+            """按当前编辑状态重画提示行。
 
             ``shown`` 记住画出去的是哪一版：缓冲里还有键时会跳过重画，
             交接前要据此补最后一帧。
             """
             nonlocal shown
-            anchor, lines_all = self.draw_overlay(
-                prompt + editor.text, len(prompt) + editor.cursor
-            )
+            self.draw_overlay(prompt + editor.text, len(prompt) + editor.cursor)
             shown = (editor.text, editor.cursor)
-            # **立刻**登记活跃覆盖层，而不是等到第一次按键之后。
-            # 否则「刚进入、用户在等、子进程此时输出」的窗口里 _active_prompt
-            # 仍是 None，输出会直接透传并把覆盖层冲掉。
-            self._active_prompt = (
-                prompt,
-                editor.text,
-                len(prompt) + editor.cursor,
-                lines_all,
-                lines_all,
-            )
 
         def _leave(result: Any) -> Any:
-            """离开输入循环：按模型还原覆盖层，或把它原地交给调用方。
+            """离开输入循环：收起覆盖层，或把它原地交给调用方。
 
-            交接时不还原，锚点与行数留在原地：调用方的 ``draw_overlay``
-            若锚点相同、行数够，就直接原地覆盖，物理画面上不会出现
-            「先露出子进程画面、再被新覆盖层盖住」的那一帧。
+            交接时不动它：下一个界面（翻看器、状态行）自己 ``draw_overlay``
+            顶替这一屏，中间不会露出子进程画面。
             """
+            nonlocal handed_over
             if handoff is None or not handoff(result):
-                self.render_from_model(keep_overlay=False)
+                self.restore()
                 return result
+            handed_over = True
             if (editor.text, editor.cursor) != shown:
                 # 缓冲里还有键时省下的重画要在这里补上：交出去的是这一帧
-                # 的位置与行数，别停在按键之前的样子上。
+                # 的样子，别停在按键之前。
                 _draw()
             return result
 
@@ -1139,10 +1018,11 @@ class Engine:
                 # 内容变化后重新布局：行数可能变，位置随之上下调整。
                 _draw()
         finally:
-            # 覆盖层不再显示，后续输出无需再绕过它；内容也一并忘掉，
-            # 免得之后改尺寸时又把它当成「当前覆盖层」画回来。
-            self._active_prompt = None
-            self._forget_overlay()
+            # 覆盖层的内容只在这一行输入期间有意义（交接出去时除外）：
+            # 一并忘掉，免得之后改尺寸时又把它当成「当前覆盖层」重排回来。
+            if not handed_over:
+                self._overlay_source = None
+                self.overlay.clear()
 
     def record_history(
         self, value: str, history_id: str, *, history_scope: str = "global"
