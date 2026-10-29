@@ -635,6 +635,8 @@ class _Painter:
         self._call_name = ""
         self._started = 0.0
         self._painted = 0.0
+        # 已经为全屏程序把覆盖层收掉了吗（见 _paint）。
+        self._hid = False
 
     def begin(self) -> None:
         """立刻画出这一轮的第一帧，不等模型回话。
@@ -702,8 +704,14 @@ class _Painter:
             return
         self._painted = now
         if getattr(self._s.screen, "alternate", False):
-            # 全屏程序自己拥有画面；覆盖层只会把它弄花。
+            # 全屏程序自己拥有画面；覆盖层只会把它弄花。已经画上去的那一行
+            # 也要收掉：覆盖层归合成帧管之后，不画并不会让它消失，它会一直
+            # 贴在 vim 的画面上。退出全屏后下一帧自然画回来。
+            if not self._hid:
+                self._hid = True
+                self._s.restore_context()
             return
+        self._hid = False
         columns = max(1, self._s.screen.columns)
         action = self._action
         if not action and self._call:

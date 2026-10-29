@@ -53,6 +53,7 @@ class FakeServices:
         self.written = []
         self.painted = []
         self.messages = []
+        self.restored = 0
         self._chars = []
 
     def queue_chars(self, *values) -> None:
@@ -81,7 +82,7 @@ class FakeServices:
         pass
 
     def restore_context(self) -> None:
-        pass
+        self.restored += 1
 
     def requeue_pending_keys(self) -> None:
         pass
@@ -683,6 +684,30 @@ def test_painter_forgets_the_previous_step() -> None:
     painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=2))
 
     assert services.painted[-1] == "(agent 2) awaiting reply..."
+
+
+def test_painter_takes_the_overlay_back_when_a_fullscreen_app_starts() -> None:
+    """vim 一进来就接管整块屏幕：那一行得收掉。
+
+    覆盖层归合成帧管之后，「不画」不等于「消失」—— 上一次画上去的那行会
+    一直被补在 vim 的画面上。所以收一次，而不是每帧都收。
+    """
+    screen = FakeScreen()
+    services = FakeServices([], screen=screen)
+    painter = agent_cmd._Painter(services)
+    painter.begin()
+
+    screen.alternate = True
+    painter.begin()
+    painter.begin()
+
+    assert services.restored == 1
+    assert services.painted == ["(agent) preparing..."]   # 全屏程序下不再画
+
+    screen.alternate = False
+    painter.begin()
+
+    assert services.painted[-1] == "(agent) preparing..."
 
 
 # ---- 提示词与显示预算一致 ----
