@@ -931,6 +931,12 @@ class Engine:
                 # 光标要靠完整行数回算。
                 max_rows=None if cursor is not None else self.screen.rows,
             )
+            if cursor is None:
+                # 纯展示的覆盖层没有插入点：print_lines 画完光标停在文末，
+                # 子进程接下来从模型光标处写，物理光标得先回去 —— 否则每画
+                # 一次都会把光标甩到覆盖层末尾，随后的输出又把它带走，看着
+                # 就是光标在子进程输出时乱跳、只在覆盖层重画时回到原处。
+                self._place_physical_cursor()
         self._overlay_anchor_row = anchor
         self._overlay_lines = lines_all
         # 记下画的是什么：窗口改尺寸时按新宽度重画同一段内容（见

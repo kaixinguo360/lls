@@ -386,3 +386,19 @@ def test_output_without_any_overlay_draws_nothing_extra() -> None:
     engine._redraw_overlay_now()
 
     assert console.data == b""
+
+def test_display_only_overlay_leaves_the_cursor_where_the_child_writes() -> None:
+    """纯展示的覆盖层画完不能把光标留在文末。
+
+    否则子进程的下一笔输出从覆盖层末尾接着写，输出期间物理光标一直在错
+    位置，要等覆盖层重画才回原位 —— 用户看到的就是光标乱跳。
+    """
+    engine, screen, console = _overlay_engine()
+    screen.feed(b"one\r\ntwo\r\nthree")
+    console.snapshot()
+
+    engine.draw_overlay("(agent 1) waiting...")
+
+    emulated = pyte.Screen(20, 8)
+    pyte.ByteStream(emulated).feed(bytes(console.data))
+    assert (emulated.cursor.y, emulated.cursor.x) == (screen.cursor.y, screen.cursor.x)
