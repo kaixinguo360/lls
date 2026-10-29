@@ -67,7 +67,7 @@ class Window:
     """需要让用户知道的一句话（例如单轮就超预算）。"""
 
     def describe(self) -> str:
-        """一行摘要，用于 ``/context`` 与 turn_end 备注。"""
+        """一行摘要，用于 turn_end 备注。"""
         parts = ["{} 条消息 / {}/{} tok".format(len(self.messages), self.used, self.budget)]
         if self.dropped:
             parts.append("裁掉 {} 条".format(self.dropped))

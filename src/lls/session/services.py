@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
+from lls.tty import Key
+
 from lls.term import ScreenModel
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -83,6 +85,15 @@ class Services:
     async def read_chars(self, timeout: float | None = None) -> bytes | None:
         """读一段原始输入字节（不解析按键）。超时返回 ``b""``，退出返回 None。"""
         return await self._engine.read_chars(timeout)
+
+    async def read_key(self) -> Key | None:
+        """读一个已解析的按键；子进程退出返回 None。
+
+        方向键、Home/End 这类序列可能被终端拆成几次 read，引擎会等到序列
+        收全再产出；单独的 Esc 靠一个短超时判定。需要「按键语义」而非原始
+        字节的界面（分页器、选择框）应当用这个，不要自己拼转义序列。
+        """
+        return await self._engine.read_key()
 
     async def read_line(
         self,

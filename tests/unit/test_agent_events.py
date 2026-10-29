@@ -9,6 +9,7 @@ from lls.ai.sessions import SessionBusy, SessionStore
 from lls.ai.sessions.events import INTERRUPT_MARKER
 from lls.commands.builtin import agent as agent_cmd
 from lls.commands.builtin import sessions as sessions_cmd
+from lls.tty import Key
 
 
 class FakeScreen:
@@ -26,6 +27,8 @@ class FakeServices:
         self._answers = list(answers)
         self.prompts = []
         self.messages = []
+        self.painted = []
+        self._key = None
 
     async def read_line(self, prompt, **kwargs):
         self.prompts.append(prompt)
@@ -35,7 +38,12 @@ class FakeServices:
         await asyncio.sleep(0)
         return b""
 
+    async def read_key(self):
+        await asyncio.sleep(0)
+        return self._key or Key(control="escape", raw=b"\x1b")
+
     def draw_overlay(self, text, cursor=None):
+        self.painted.append(text)
         return 0, len(text.split("\n"))
 
     def flush_model(self) -> None:
@@ -130,7 +138,7 @@ def test_a_completed_turn_writes_events_with_usage(monkeypatch, tmp_path) -> Non
     assert events[2].screen == events[1].seq
     assert events[3].usage == {"prompt": 9, "completion": 4}
     assert events[4].status == "ok"
-    # 常规一轮不写备注：条数与预算由 /context 算，耗时由前后两条 ts 相减。
+    # 常规一轮不写备注：条数与预算由 /status 看，耗时由前后两条 ts 相减。
     assert events[4].note == ""
     assert session.meta.turns == 1
     session.close()
@@ -244,7 +252,7 @@ def test_an_interrupted_reply_keeps_what_was_already_shown(monkeypatch, tmp_path
     session.close()
 
 
-# ---- 参数、/context、/title ----
+# ---- 参数、/status、/title ----
 
 
 def test_session_list_shows_id_title_and_turns(monkeypatch, tmp_path) -> None:
@@ -273,19 +281,29 @@ def test_resume_and_title_flags(monkeypatch, tmp_path) -> None:
     assert keeper.open(session_id).meta.title == "新标题"
 
 
-def test_context_reports_the_window(monkeypatch, tmp_path) -> None:
+def test_status_pages_the_window(monkeypatch, tmp_path) -> None:
     keeper = SessionStore(root=tmp_path)
-    _run(monkeypatch, ScriptedProvider([_text("答复")]), ["/exit"], keeper, args="任务一")
+    provider = ScriptedProvider([_text("答复"), _text("答复"), _text("答复")])
+    _run(monkeypatch, provider, ["任务二", "任务三", "/exit"], keeper, args="任务一")
 
     services = FakeServices([])
     monkeypatch.setattr(agent_cmd, "store", lambda: keeper)
     monkeypatch.setattr(agent_cmd, "default_catalog", lambda: FakeCatalog(ScriptedProvider([_text("答复")])))
-    services._answers = ["/context", "/exit"]
+    services._answers = ["/s", "/exit"]
+    # 翻看用 read_key：方向键/退出都要走解析后的按键
+    services._key = Key(char="q", raw=b"q")
     asyncio.run(agent_cmd.cmd_agent(services, None))
 
-    report = services.messages[-1]
-    assert "窗口" in report
-    assert "轮" in report
+    screen = services.painted[-1].split("\n")
+    body = "\n".join(screen)
+    # 三条会话都翻得到：提示只留最近两条，pager 要给出全部
+    assert "(agent) 任务一" in body
+    assert "(agent) 任务三" in body
+    assert "(agent-reply) " in body
+    assert "窗口" not in body
+    # 覆盖层恰好一屏：正文 + 末行状态
+    assert len(screen) == services.screen.rows
+    assert "tok" in screen[-1]
 
 
 def test_a_busy_session_is_reported_instead_of_stolen(monkeypatch, tmp_path) -> None:

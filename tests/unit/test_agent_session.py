@@ -69,6 +69,10 @@ class FakeServices:
             return self._chars.pop(0)
         return b""
 
+    async def read_key(self):
+        await asyncio.sleep(0)
+        return None
+
     def draw_overlay(self, text, cursor=None):
         self.painted.append(text)
         return 0, len(text.split("\n"))

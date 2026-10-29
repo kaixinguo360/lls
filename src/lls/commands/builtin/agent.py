@@ -24,7 +24,7 @@ import difflib
 import json
 import math
 import time
-from typing import Any
+from typing import Any, List
 
 from lls.ai import (
     Agent,
@@ -55,6 +55,8 @@ from lls.session.services import Services
 from lls.tty import KeyParser, encode_keys
 from lls.ui import SGR_RESET, conservative_char_width, strip_sgr, wrap_multi_lines
 
+from .agent_pager import page
+
 __all__ = ["cmd_agent"]
 
 # ---- 常量 ----
@@ -84,6 +86,7 @@ READ_QUIET = 0.25         # 画面多久不变算静默
 MAX_WAIT = 60.0           # read_terminal 的 wait_seconds 上限
 PAINT_INTERVAL = 0.1      # 状态覆盖层刷新间隔
 LOG_ENTRIES = 2           # 会话提示里显示最近几条
+ALL_TURNS = 10 ** 9       # /status 翻看时取全部轮次
 # 丢掉的上下文少于这个量就不值得压：摘要请求本身也要花 token，压掉的
 # 还没摘要贵，不如直接截断。
 MIN_COMPACT_TOKENS = 1024
@@ -96,8 +99,7 @@ REPEAT_REMIND_AT = 3      # 连续相同调用第几次开始提醒
 # 加一条命令只需在这里加一行，再写一个 ``_slash_<名字>`` 方法。
 _SLASH_COMMANDS = (
     ("help", ("h", "?"), "_slash_help", "列出这些命令"),
-    ("status", ("st",), "_slash_status", "会话 id、模型、预算与最近一轮"),
-    ("context", ("ctx",), "_slash_context", "这一轮带上了哪些上下文、裁掉多少"),
+    ("status", ("s",), "_slash_status", "整屏翻看全部对话"),
     ("title", (), "_slash_title", "查看或修改标题：/title [文字]"),
     ("model", (), "_slash_model", "查看或切换模型：/model [provider/model]"),
     ("compact", (), "_slash_compact", "立刻把最旧的一段历史压成摘要"),
@@ -777,33 +779,47 @@ class _Session:
     async def _slash_exit(self, args: str) -> Any:
         return _EXIT
 
-    async def _slash_context(self, args: str) -> Any:
-        await self._s.show_message(self._context_text())
+    async def _slash_status(self, args: str) -> Any:
+        """``/status``：整屏翻看全部对话，排版与输入时的提示一致。"""
+        await page(self._s, self._transcript(), self._status_footer())
         return _CANCEL
 
-    async def _slash_status(self, args: str) -> Any:
+    def _transcript(self) -> List[str]:
+        """整条会话的对话与备注，只用 ``(agent)`` 那三种前缀。"""
         if self._session is None:
-            rows = ["会话：不落盘（本次运行不记历史）"]
-        else:
-            meta = self._session.meta
-            rows = [
-                "会话：{}（{}）· {} 轮 · {:.0f}KB".format(
-                    meta.id, meta.title or "无标题", meta.turns, meta.size / 1024.0
-                )
+            return [NOTE_PREFIX + "本次会话不落盘，没有可翻看的历史"]
+        rows = self._entry_rows(self._session.log(ALL_TURNS))
+        return rows or [NOTE_PREFIX + "还没有对话"]
+
+    def _entry_rows(self, entries: Any) -> List[str]:
+        """按输入提示的版式摊开若干轮：任务一行，答复折行，备注一行。"""
+        columns = max(1, self._s.screen.columns)
+        latest = -1
+        for index, (_, reply, _) in enumerate(entries):
+            if reply:
+                latest = index
+        rows: List[str] = []
+        for index, (task, reply, note) in enumerate(entries):
+            rows.append(_line("(agent) ", task, columns))
+            if reply:
+                rows.extend(_reply_rows(reply, columns, bold=index == latest))
+            if note:
+                rows.append(_line(NOTE_PREFIX, note, columns))
+        return rows
+
+    def _status_footer(self) -> str:
+        """末行唯一的一条状态：标题、模型、窗口用量。"""
+        if self._session is None:
+            return "不落盘 · {} · 预算 {} tok".format(self._model, self._budget)
+        meta = self._session.meta
+        window = self._window or self._session.window(self._budget)
+        return " · ".join(
+            [
+                _flat(meta.title) or meta.id,
+                self._model,
+                "{}/{} tok".format(window.used, window.budget),
             ]
-        rows.append(
-            "模型：{}（provider {}）".format(self._model, self._provider_id or "-")
         )
-        rows.append("预算：{} tok · 工具 {} 个".format(self._budget, len(self._tools)))
-        last = self._session.last_turn_end() if self._session is not None else None
-        if last is not None:
-            rows.append(
-                "最近一轮：{}（{}）".format(last.status or "ok", last.note or "无备注")
-            )
-        if self._last_task:
-            rows.append("上一轮任务：" + _clip(self._last_task, max(16, self._s.screen.columns - 8)))
-        await self._s.show_message("\n".join(rows))
-        return _CANCEL
 
     async def _slash_title(self, args: str) -> Any:
         if self._session is None:
@@ -981,29 +997,6 @@ class _Session:
             return _CANCEL
         # 返回原文：``run`` 会把它当任务再跑一遍，提示符里也看得到。
         return self._last_task
-
-    def _context_text(self) -> str:
-        """``/context``：这次请求送了多少、丢了什么、用掉多少。"""
-        if self._session is None:
-            return "本次会话不落盘，没有可报告的上下文"
-        meta = self._session.meta
-        window = self._window or self._session.window(self._budget)
-        rows = [
-            "会话 {}（{}）".format(meta.id, meta.title or "无标题"),
-            "模型 {} · {} 轮 · {} 字节".format(meta.model or "-", meta.turns, meta.size),
-            "窗口 {}".format(window.describe()),
-        ]
-        usage = self._session.usage()
-        if usage:
-            rows.append(
-                "上次用量 prompt {} / completion {}".format(
-                    usage.get("prompt", 0), usage.get("completion", 0)
-                )
-            )
-        last = self._session.last_turn_end()
-        if last is not None and last.note:
-            rows.append("最近一轮：" + last.note)
-        return "\n".join(rows)
 
     async def _one(self, task: str) -> None:
         """执行一轮任务。异常路径只影响本轮，不影响已经写下的事件。"""
@@ -1184,7 +1177,7 @@ class _Session:
     def _turn_note(self, window: Any) -> str:
         """这一轮要不要在覆盖层留一句话：裁过、压过、或窗口有话要说时才留。
 
-        常规的一轮没什么可说：条数与预算 ``/context`` 随时能算，耗时也能由
+        常规的一轮没什么可说：条数与预算看 ``/status`` 末行，耗时也能由
         前后两条 ``ts`` 相减得到；每轮都写，覆盖层就只剩噪声。
         """
         if window is None:
@@ -1204,26 +1197,13 @@ class _Session:
         self._log = self._log[-max(1, LOG_ENTRIES):]
 
     def _prompt_text(self) -> str:
-        columns = max(1, self._s.screen.columns)
-        rows: list = []
-        latest = -1
-        for index, (_, reply, _) in enumerate(self._log):
-            if reply:
-                latest = index
-        for index, (task, reply, note) in enumerate(self._log):
-            rows.append(_line("(agent) ", task, columns))
-            if reply:
-                rows.extend(_reply_rows(reply, columns, bold=index == latest))
-            # 备注只在有事要说的轮次才有（见 ``_turn_note``）；照实显示，
-            # 上一轮的告警留到被下一次顶掉。
-            if note:
-                rows.append(_line(NOTE_PREFIX, note, columns))
         # 高度只由屏幕实际行数决定，不再有固定上限：覆盖层比屏幕高就会贴
         # 顶，多出来的行被挤到屏幕外，终端随之滚动 —— 物理行与模型行错位。
         # 所以约束只有两条：上面留几行给子进程画面，以及（连同行尾的提示
         # 符）整体不越过屏幕。矮终端上这两条自然把预算收紧。
         limit = max(3, self._s.screen.rows - MODEL_ROWS_KEPT)
         limit = min(limit, max(1, self._s.screen.rows - 1))
+        rows = self._entry_rows(self._log)
         if len(rows) > limit:
             rows = rows[-limit:]
         if not rows:
