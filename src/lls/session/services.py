@@ -74,6 +74,14 @@ class Services:
         """在模型光标处画覆盖层，返回 ``(起始行, 行数)``。不写模型。"""
         return self._engine.draw_overlay(text, cursor)
 
+    def set_overlay_source(self, source: Any = None) -> None:
+        """登记「按新尺寸重画这一屏」的回调：``source(rows, columns) -> 文本``。
+
+        给需要自己排版的界面（翻看器）用：窗口尺寸一变，引擎按新行列数回调
+        它，由它从原始内容重排。收起时传 None。
+        """
+        self._engine.set_overlay_source(source)
+
     # ---- 子进程 ----
 
     def write(self, data: bytes, *, enter: bool = False) -> None:

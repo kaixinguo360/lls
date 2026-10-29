@@ -152,11 +152,15 @@ class FakeServices:
         self.screen = FakeScreen()
         self._keys = list(keys)
         self.frames = []
+        self.source = None
         self.restored = 0
 
     def draw_overlay(self, text, cursor=None):
         self.frames.append(text)
         return 0, len(text.split("\n"))
+
+    def set_overlay_source(self, source=None) -> None:
+        self.source = source
 
     async def read_key(self):
         return self._keys.pop(0) if self._keys else None
@@ -195,6 +199,29 @@ def test_page_resizes_with_the_window() -> None:
 
     asyncio.run(run())
     assert all(len(frame.split("\n")) == 4 for frame in services.frames[1:])
+
+
+def test_page_registers_a_relayout_source_until_it_closes() -> None:
+    """翻看器把「按新尺寸重排」交给引擎：窗口一变就立刻回调，不用等轮询。"""
+    services = FakeServices([_key(char="q")])
+    seen = {}
+
+    async def run() -> None:
+        task = asyncio.ensure_future(
+            page(services, ["line {}".format(i) for i in range(50)], "底栏")
+        )
+        await asyncio.sleep(0)
+        seen["source"] = services.source
+        await task
+
+    asyncio.run(run())
+
+    source = seen["source"]
+    assert source is not None
+    # 出参是整屏：行数跟着新尺寸走，正文按新宽度重排
+    assert len(source(4, 30).split("\n")) == 4
+    assert len(source(12, 10).split("\n")) == 12
+    assert services.source is None
 
 
 def test_resize_stays_at_the_bottom_until_scrolled_up() -> None:

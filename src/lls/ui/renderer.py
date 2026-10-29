@@ -136,11 +136,17 @@ class LinePrinter:
         cursor: int | None = None,
         width: int = 80,
         anchor_row: int | None = None,
+        max_rows: int | None = None,
     ) -> tuple[int, int]:
         """打印多行文本并把光标定位到 ``cursor``（字符索引）。返回 (行数, 光标行数)。
 
         ``anchor_row`` 给定时先绝对定位到该行行首再绘制（覆盖层用），
         否则沿用相对移动（从当前光标处向上回退）。
+
+        ``max_rows`` 给定且 ``anchor_row`` 也给定（即覆盖层）时，超出屏幕
+        的行不再写：绝对定位写到屏幕之外会被终端夹到末行，几行叠在最后一
+        行上，看着像乱码。此时返回的 ``lines_all`` 是在屏行数 —— 调用方按
+        它记覆盖层占了几行。
 
         **每一行都先清空再写**：文本变短（退格、重折行）时若只清首行，
         后面几行的旧字符会留在屏上。
@@ -149,6 +155,9 @@ class LinePrinter:
         line, lines_all = wrap_multi_lines(text, width)
         if anchor_row is not None:
             rows = line.split("\r\n")
+            if max_rows is not None:
+                rows = rows[: max(0, max_rows - anchor_row)]
+                lines_all = len(rows)
             for index, row in enumerate(rows):
                 w.write(f"\x1b[{anchor_row + 1 + index};1H".encode())
                 w.write(b"\x1b[2K")

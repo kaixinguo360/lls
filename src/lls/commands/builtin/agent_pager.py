@@ -217,11 +217,18 @@ def _size(services: Any) -> tuple:
 async def page(services: Any, lines: Sequence[str], footer: str = "") -> None:
     """铺满一屏显示 ``lines``，按 q/Esc/Ctrl-C 收起。
 
-    等键用 ``read_key``（方向键等序列由引擎拼装），同时隔 ``POLL_SECONDS``
-    看一次尺寸：窗口被拖动时按当前尺寸重排，始终只占一屏。
+    重排有两条路：窗口变化由引擎经 ``set_overlay_source`` 立刻回调 ``render``；
+    另有 ``POLL_SECONDS`` 的兜底轮询，宿主不送 SIGWINCH 时也能跟上尺寸。
     """
     rows, columns = _size(services)
     pager = Pager(lines, footer, rows=rows, columns=columns)
+
+    def render(rows: int, columns: int) -> str:
+        """按新尺寸重排后再取一屏：引擎在窗口变化时直接调它。"""
+        pager.resize(rows, columns)
+        return pager.frame()
+
+    services.set_overlay_source(render)
     services.draw_overlay(pager.frame())
     reader = asyncio.ensure_future(services.read_key())
     try:
@@ -242,4 +249,5 @@ async def page(services: Any, lines: Sequence[str], footer: str = "") -> None:
                 services.draw_overlay(pager.frame())
     finally:
         reader.cancel()
+        services.set_overlay_source(None)
         services.restore_context()

@@ -206,6 +206,69 @@ def test_resize_redraws_the_overlay_at_the_new_width() -> None:
     assert rows[1].rstrip() == "aaaaaaaaa"
 
 
+# ---- 纯展示的覆盖层也要跟着窗口尺寸重排 ----
+
+def test_message_overlay_reflows_when_the_window_narrows() -> None:
+    """消息框（show_message）不再随尺寸消失：按新宽度重画同一段文本。"""
+    engine, _screen, console = _overlay_engine(rows=8, columns=40)
+    text = "y" * 38
+    engine.draw_overlay(text)
+    assert engine._overlay_lines == 1
+    console.snapshot()
+
+    engine.screen.resize(8, 20)
+    engine._relayout_overlay()
+
+    rows = _emulate(console.snapshot(), rows=8, columns=20)
+    assert engine._overlay_lines == 2
+    assert rows[0].rstrip() == "y" * 20
+    assert rows[1].rstrip() == "y" * 18
+
+
+def test_overlay_source_relays_out_at_the_new_size() -> None:
+    """自己排版的界面（翻看器）按引擎给的新行列数重排，而不是二次折行。"""
+    engine, _screen, console = _overlay_engine(rows=8, columns=20)
+    seen = []
+
+    def source(rows: int, columns: int) -> str:
+        seen.append((rows, columns))
+        return "\n".join(["F{}x{}".format(rows, columns)] * rows)
+
+    engine.set_overlay_source(source)
+    console.snapshot()
+    engine.screen.resize(5, 30)
+    engine._relayout_overlay()
+
+    assert seen == [(5, 30)]
+    rows = _emulate(console.snapshot(), rows=8, columns=30)
+    assert [r.rstrip() for r in rows[:5]] == ["F5x30"] * 5
+
+
+def test_restore_forgets_the_overlay_so_it_is_not_drawn_again() -> None:
+    """收起之后再改尺寸，不能把已经收起的覆盖层又画回来。"""
+    engine, _screen, console = _overlay_engine(rows=8, columns=20)
+    engine.draw_overlay("err: gone")
+    engine.restore()
+    console.snapshot()
+
+    engine.screen.resize(8, 10)
+    engine._relayout_overlay()
+
+    assert b"gone" not in console.snapshot()
+
+
+def test_a_tall_message_stops_at_the_bottom_of_the_screen() -> None:
+    """比屏幕还高的覆盖层截在屏底：写到屏外会叠在末行上，看着像乱码。"""
+    engine, _screen, console = _overlay_engine(rows=6, columns=20)
+
+    engine.draw_overlay("\n".join("line {}".format(i) for i in range(12)))
+
+    out = console.snapshot()
+    assert engine._overlay_lines == 6
+    assert b"\x1b[6;1H" in out
+    assert b"\x1b[7;1H" not in out
+
+
 # ---- 读输入后把覆盖层原地交给下一个界面 ----
 
 def _loop_engine():

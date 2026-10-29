@@ -46,6 +46,9 @@ class FakeServices:
         self.painted.append(text)
         return 0, len(text.split("\n"))
 
+    def set_overlay_source(self, source=None) -> None:
+        pass
+
     def flush_model(self) -> None:
         pass
 
