@@ -9,15 +9,14 @@
 取自覆盖层模型，其余行取自底部模型。物理光标归最上面的一层：它在，光标就
 由它给；它不在，才用底部模型的光标。
 
-提示行这种「带着插入点」的覆盖层位置不是画上去就定死：它贴着子进程当前
-所在的行，子进程一挪，它就跟着挪（见 :meth:`Overlay.follow`）—— 否则用户
-得先敲一个键，位置才归位。消息框、翻看器不跟：它们画在哪就在哪。
+覆盖层的位置不是画上去就定死：它贴着子进程当前所在的行，子进程一挪
+（换行、CUP、切换备用屏），它就跟着挪（见 :meth:`Overlay.follow`）—— 否则
+用户得先敲一个键，位置才归位。
 
 不写底部模型 —— 覆盖层是浮层，不是子进程的画面。
 
-覆盖层也属于它画上去的那一屏：子进程切进备用屏（vim、less 这类全屏程序）
-时它会被收走（见 ``Engine._note_screen_switch``），否则那一行会被合成帧
-一直补在新画面上，退出全屏后还留着。
+覆盖层不区分主屏与备用屏：子进程切进备用屏（vim、less 这类全屏程序）时它
+照旧合成、照旧跟着光标走 —— 换屏只是底部模型换了内容，不改变这一层的行为。
 """
 
 from __future__ import annotations
@@ -44,8 +43,6 @@ class Overlay:
         self._cursor: Cursor | None = None
         self.anchor: int | None = None
         self.lines = 0
-        # 带插入点的覆盖层（提示行）跟着子进程光标走；纯展示的不跟。
-        self._interactive = False
 
     # ---- 只读 ----
 
@@ -81,7 +78,6 @@ class Overlay:
         """
         self._text = text
         self._base_row = base_row
-        self._interactive = cursor is not None
         self._cursor_index = len(text) if cursor is None else cursor
         self._model.reset()
         # 先喂到插入点：pyte 给出的光标位置就是插入点的行列。
@@ -97,18 +93,13 @@ class Overlay:
     def follow(self, base_row: int) -> int | None:
         """跟着子进程的光标走：锚点按 ``base_row`` 重算，返回旧锚点。
 
-        覆盖层占的正是子进程当前所在的那一行。子进程一写东西光标就下移（或
-        被 CUP 挪走），锚点必须跟着挪 —— 否则提示符留在旧行上，新写的内容
-        从覆盖层底下钻出来，看着就是「位置不对」，要等用户敲一个键、覆盖层
-        重画一次才归位。
+        覆盖层浮在子进程画面上，占的就是它光标所在的那几行。子进程一写东西
+        光标就下移（或被 CUP 挪走），锚点必须跟着挪 —— 否则浮层留在旧行上，
+        新写的内容从它底下钻出来，看着就是「位置不对」，要等用户敲一个键、
+        覆盖层重画一次才归位。换屏也只是光标换了位置，同样跟着走。
 
-        纯展示的覆盖层（消息框、翻看器）不跟：子进程的输出从它们下方走过去，
-        它们不能被顶走。只有带着插入点的提示行才跟 —— 用户就打在那一行上。
-
-        锚点没变（或这层不跟）就返回 None，调用方据此决定要不要重铺旧行。
+        锚点没变就返回 None，调用方据此决定要不要重铺旧行。
         """
-        if not self._interactive:
-            return None
         old = self.anchor
         self._base_row = base_row
         self.anchor = overlay_anchor(base_row, self.lines, self._rows)
@@ -122,9 +113,7 @@ class Overlay:
         self._columns = columns
         self._model.resize(rows, columns)
         if self._text is not None:
-            interactive = self._interactive
-            self.set(self._text, self._cursor_index if interactive else None, self._base_row)
-            self._interactive = interactive
+            self.set(self._text, self._cursor_index, self._base_row)
         else:
             self.anchor = None
             self.lines = 0
@@ -136,7 +125,6 @@ class Overlay:
         self._cursor = None
         self.anchor = None
         self.lines = 0
-        self._interactive = False
         self._model.reset()
 
     # ---- 内部 ----

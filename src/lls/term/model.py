@@ -108,7 +108,10 @@ class ScreenModel(Protocol):
 
     @property
     def alternate(self) -> bool:
-        """当前是否位于备用缓冲区（``?1049`` 等）。"""
+        """当前是否位于备用缓冲区（``?1049`` 等）。
+
+        只描述模型事实：渲染与覆盖层不看它，主屏与备用屏行为一致。
+        """
         ...
 
     @property

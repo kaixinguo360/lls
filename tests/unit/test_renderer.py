@@ -307,14 +307,14 @@ def test_message_overlay_owns_the_physical_cursor() -> None:
     assert b"\x1b[2;4H" in console.snapshot()
 
 
-# ---- 全屏程序（备用屏）：覆盖层不跟着过去 ----
+# ---- 全屏程序（备用屏）：与主屏同一套行为 ----
 
 VIM_ENTER = b"\x1b[?1049h\x1b[2J\x1b[HA hello\x1b[2;1H~"
 VIM_LEAVE = b"\x1b[?1049l"
 
 
-def test_a_fullscreen_app_takes_the_overlay_away() -> None:
-    """vim 一进来就整块接管画面：上一帧画上去的那行不能留在它屏上。"""
+def test_fullscreen_app_keeps_the_overlay() -> None:
+    """换屏不是覆盖层消失的理由：vim 进来后照旧合成在同一帧里。"""
     engine, screen, console = _overlay_engine()
     screen.feed(b"$ vim a.txt")
     engine.draw_overlay("(agent 1) planning")
@@ -324,12 +324,13 @@ def test_a_fullscreen_app_takes_the_overlay_away() -> None:
     engine.render_from_model()
 
     assert screen.alternate is True
-    assert engine.overlay.visible is False
-    assert b"planning" not in console.snapshot()
+    assert engine.overlay.visible is True
+    rows = _emulate(console.snapshot())
+    assert any("planning" in row for row in rows)
 
 
-def test_leaving_a_fullscreen_app_does_not_bring_the_overlay_back() -> None:
-    """退回主屏后也不回来：那一层属于它当时画上去的那一屏。"""
+def test_leaving_a_fullscreen_app_keeps_the_overlay() -> None:
+    """退回主屏后同样还在：这一层不区分主屏与备用屏。"""
     engine, screen, console = _overlay_engine()
     screen.feed(b"$ vim a.txt")
     engine.draw_overlay("(agent 1) planning")
@@ -341,11 +342,12 @@ def test_leaving_a_fullscreen_app_does_not_bring_the_overlay_back() -> None:
     engine.render_from_model()
 
     assert screen.alternate is False
-    assert engine.overlay.visible is False
-    assert b"planning" not in console.snapshot()
+    assert engine.overlay.visible is True
+    rows = _emulate(console.snapshot())
+    assert any("planning" in row for row in rows)
 
 
-def test_an_overlay_drawn_inside_a_fullscreen_app_is_kept() -> None:
+def test_overlay_drawn_inside_a_fullscreen_app_is_kept() -> None:
     """在 vim 里画的（消息框、选择框）画在换屏之后，照旧留着。"""
     engine, screen, console = _overlay_engine()
     screen.feed(VIM_ENTER)
@@ -356,7 +358,8 @@ def test_an_overlay_drawn_inside_a_fullscreen_app_is_kept() -> None:
     engine.render_from_model()
 
     assert engine.overlay.visible is True
-    assert any("小工具" in row for row in _emulate(console.snapshot()))
+    rows = _emulate(console.snapshot())
+    assert any("小工具" in row for row in rows)
 
 
 def _passthrough_engine():
@@ -383,12 +386,12 @@ class _Never:
         return False
 
 
-def test_passthrough_writes_no_overlay_into_the_fullscreen_app() -> None:
-    """透传时终端由 vim 自己画：一个字节的覆盖层都不许掺进去。"""
+def test_passthrough_repaints_overlay_in_fullscreen_app() -> None:
+    """透传时子进程字节照原样下去，覆盖层照旧补在它上面 —— 和主屏一个规矩。"""
     engine, screen, console = _passthrough_engine()
     engine._exit_event = _Never()
     pending: list[bytes] = []
-    engine._read_all_available = lambda: (pending.pop(0) if pending else None)
+    engine._read_all_available = lambda: pending.pop(0) if pending else None
 
     screen.feed(b"$ vim a.txt")
     engine.draw_overlay("(agent 1) planning")
@@ -399,10 +402,9 @@ def test_passthrough_writes_no_overlay_into_the_fullscreen_app() -> None:
     out = console.snapshot()
 
     assert screen.alternate is True
-    assert engine.overlay.visible is False
-    assert b"planning" not in out
-    assert out.endswith(b"\x1b[3;5Hx\x1b[?2026l")
-
+    assert engine.overlay.visible is True
+    assert b"planning" in out
+    assert VIM_ENTER in out
 
 # ---- 读输入后把覆盖层原地交给下一个界面 ----
 
@@ -475,10 +477,10 @@ def test_slash_lines_are_handed_over() -> None:
     assert _hands_over(None) is False
 
 
-# ---- 纯展示的覆盖层：子进程一输出就补画回来 ----
+# ---- 覆盖层跟着子进程光标走：输出流动时它跟着挪 ----
 
-def test_a_display_only_overlay_stays_put_while_output_flows() -> None:
-    """消息框、进度行画在哪就在哪：子进程的输出不会把它顶走。"""
+def test_the_overlay_follows_the_output_instead_of_staying_behind() -> None:
+    """子进程往下写，覆盖层跟着挪；它让出来的那行还给模型。"""
     engine, screen, console = _overlay_engine()
     screen.feed(b"one\r\ntwo")
     engine.draw_overlay("(agent 1) planning")
@@ -490,12 +492,13 @@ def test_a_display_only_overlay_stays_put_while_output_flows() -> None:
 
     rows = _emulate(console.snapshot())
     assert console.writes == 1                  # 铺模型与补画覆盖层同属一帧
-    assert rows[1].rstrip() == "(agent 1) planning"
-    assert rows[2].rstrip() == "three"          # 子进程写在自己的行上
+    assert engine.overlay.anchor == 2
+    assert rows[1].rstrip() == "two"            # 旧行还给模型
+    assert rows[2].rstrip() == "(agent 1) planning"
 
 
-def test_the_cursor_goes_back_to_the_model_after_repainting_a_message() -> None:
-    """纯展示的覆盖层不占光标：子进程接着从模型光标处写。"""
+def test_the_cursor_lands_inside_the_overlay_after_it_moves() -> None:
+    """挪过之后光标仍归浮层：落在它自己写完的地方。"""
     engine, screen, console = _overlay_engine()
     screen.feed(b"one\r\ntwo")
     engine.draw_overlay("err: something went wrong")
@@ -506,8 +509,10 @@ def test_the_cursor_goes_back_to_the_model_after_repainting_a_message() -> None:
 
     painted = pyte.Screen(20, 8)
     pyte.ByteStream(painted).feed(console.snapshot())
-    assert painted.cursor.y == screen.cursor.y
-    assert painted.cursor.x == screen.cursor.x
+    own = engine.overlay.cursor()
+    assert own is not None
+    assert (painted.cursor.y, painted.cursor.x) == (own.y, own.x)
+    assert painted.cursor.y >= engine.overlay.anchor
 
 
 def test_output_without_any_overlay_draws_nothing_extra() -> None:
@@ -522,7 +527,7 @@ def test_output_without_any_overlay_draws_nothing_extra() -> None:
     assert console.data == b""
 
 
-def test_display_only_overlay_owns_the_physical_cursor() -> None:
+def test_an_overlay_owns_the_physical_cursor() -> None:
     """浮层在，光标就归它：最上面那一层说了算，不借子进程的光标。"""
     engine, screen, console = _overlay_engine()
     screen.feed(b"one\r\ntwo\r\nthree")
@@ -533,7 +538,6 @@ def test_display_only_overlay_owns_the_physical_cursor() -> None:
     emulated = pyte.Screen(20, 8)
     pyte.ByteStream(emulated).feed(bytes(console.data))
     assert (emulated.cursor.y, emulated.cursor.x) == (2, 9)  # 框内写完的地方
-
 
 def test_a_batch_of_keys_repaints_the_prompt_once() -> None:
     """同一批到达的键只重画一帧。

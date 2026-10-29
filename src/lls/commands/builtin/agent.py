@@ -701,11 +701,6 @@ class _Painter:
         if not force and now - self._painted < PAINT_INTERVAL:
             return
         self._painted = now
-        if getattr(self._s.screen, "alternate", False):
-            # 全屏程序自己拥有画面；覆盖层只会把它弄花。已经在屏上的那一行
-            # 由引擎在换屏时收走（见 ``Engine._note_screen_switch``），这里
-            # 只管不再往上画。退出全屏后下一帧自然画回来。
-            return
         columns = max(1, self._s.screen.columns)
         action = self._action
         if not action and self._call:
