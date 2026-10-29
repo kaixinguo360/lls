@@ -110,8 +110,8 @@ _SLASH_COMMANDS = (
     ("sessions", ("ls", "resume"), "_slash_sessions", "选一条会话切过去：/sessions"),
     ("new", (), "_slash_new", "开一条新会话并切过去：/new [标题]"),
     ("fork", (), "_slash_fork", "从当前会话分叉：/fork [--at <seq>]"),
-    ("rm", (), "_slash_rm", "删除本会话（要确认）：/rm"),
-    ("archive", (), "_slash_archive", "归档本会话，移出列表：/archive"),
+    ("rm", (), "_slash_rm", "删掉本会话，办完退出 agent：/rm"),
+    ("archive", (), "_slash_archive", "归档本会话并退出 agent：/archive"),
     ("retry", (), "_slash_retry", "接着本轮继续执行"),
     ("exit", ("quit", "q"), "_slash_exit", "退出 agent 模式"),
 )
@@ -1004,10 +1004,13 @@ class _Session:
         return isinstance(answer, str) and answer.strip().lower() in ("y", "yes")
 
     async def _slash_rm(self, args: str) -> Any:
-        """删掉本会话：确认后退出，换一条新的接着用。
+        """删掉本会话：确认后删，然后离开 agent 模式。
 
         只认自己，不带参数 —— 会话 id 记不住，也不该为了删一条会话先
-        ``/exit``。删完这条就没了，只能开新的。
+        ``/exit``。删完这条就没了，手上没有上下文可接着用：直接退出去，
+        让人自己决定还进不进 ``agent``（要新会话就 ``/new``，那是有意的）。
+        不能顺手开一条空会话 —— 删掉的正是「不想留」的东西，回来却又多出
+        一条新的，等于删了个寂寞。
         """
         if args.strip():
             await self._s.show_message("用法：/rm（删本会话，不带参数）")
@@ -1029,15 +1032,18 @@ class _Session:
             await self._s.show_message("error: {}".format(e))
             return _CANCEL
         await self._s.show_message(
-            "已删除会话 {}（{}）".format(gone.id, gone.title or "无标题")
+            "已删除会话 {}（{}）；已退出 agent，再进来另开一条".format(
+                gone.id, gone.title or "无标题"
+            )
         )
-        raise _Switch(("new", ""))
+        return _EXIT
 
     async def _slash_archive(self, args: str) -> Any:
-        """把本会话收进归档，退出后换一条新的接着用。
+        """把本会话收进归档，然后离开 agent 模式。
 
         归档不是删除：目录移进 ``_archive/``，默认列表里不再出现，
-        ``agent --all`` 仍然看得到。
+        ``agent --all`` 仍然看得到。收起来的那条就是不想再接着用的，
+        所以同样退出去，不另外开一条新的。
         """
         if args.strip():
             await self._s.show_message("用法：/archive（归档本会话，不带参数）")
@@ -1059,11 +1065,11 @@ class _Session:
             await self._s.show_message("error: {}".format(e))
             return _CANCEL
         await self._s.show_message(
-            "已归档会话 {}（{}）：agent --all 仍能看到".format(
+            "已归档会话 {}（{}）：agent --all 仍能看到；已退出 agent".format(
                 gone.id, gone.title or "无标题"
             )
         )
-        raise _Switch(("new", ""))
+        return _EXIT
 
     async def _slash_retry(self, args: str) -> Any:
         """接着本轮往下执行，等同于这一轮还没结束。不新增任何消息。

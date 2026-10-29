@@ -200,28 +200,36 @@ def test_retry_with_nothing_to_continue_says_so(monkeypatch, tmp_path) -> None:
     keeper.current().close()
 
 
-def test_rm_deletes_this_session_and_hands_back_a_fresh_one(monkeypatch, tmp_path) -> None:
-    """``/rm`` 只认本会话：确认后删掉，接着开一条新的，不用先 /exit。"""
+def test_rm_deletes_this_session_and_leaves(monkeypatch, tmp_path) -> None:
+    """``/rm`` 只删本会话，然后退出 —— 不能顺手再开一条空的。
+
+    删掉的正是「不想留」的那条，回来却又多出一条新的，等于没删。
+    """
     keeper = SessionStore(root=tmp_path)
     provider = ScriptedProvider([_text("答复")])
 
-    _run(monkeypatch, provider, ["任务一", "/rm", "y", "/exit"], keeper)
+    _, result = _run(monkeypatch, provider, ["任务一", "/rm", "y"], keeper)
 
-    alive = keeper.list(include_archived=True)
-    assert len(alive) == 1                       # 带任务的那条没了
-    reopened = keeper.get(alive[0].id)
-    assert [event.type for event in reopened.events()] == ["session_start"]
-    reopened.close()
+    # handler="default" 就是「用户主动退出」，跟 /exit 一样。
+    assert result.handler == "default"
+    assert keeper.list(include_archived=True) == []
+    assert keeper.current_id() is None           # 当前会话指针也跟着清掉
+    left = [path.name for path in tmp_path.iterdir()]
+    assert left == ["index.json"]                 # 只剩索引，没有空会话目录
 
 
-def test_rm_keeps_the_session_when_the_answer_is_not_yes(monkeypatch, tmp_path) -> None:
-    """默认是不动它：答别的、或干脆回车，都不能把会话删掉。"""
+def test_rm_keeps_the_session_and_stays_when_the_answer_is_not_yes(
+    monkeypatch, tmp_path
+) -> None:
+    """默认是不动它：答别的、或干脆回车，都不能把会话删掉，也不能退出。"""
     keeper = SessionStore(root=tmp_path)
     provider = ScriptedProvider([_text("答复")])
 
-    _run(monkeypatch, provider, ["任务一", "/rm", "", "/exit"], keeper)
+    services, _ = _run(monkeypatch, provider, ["任务一", "/rm", "", "/exit"], keeper)
 
-    alive = keeper.list(include_archived=True)
+    assert keeper.current_id() is not None            # 会话还在，指针也没掉
+    assert len(services.prompts) > 2                  # 答完又回到了提示行
+    alive = keeper.list()
     assert len(alive) == 1
     kept = keeper.get(alive[0].id)
     assert any(event.type == "user" for event in kept.events())
@@ -233,22 +241,25 @@ def test_rm_with_an_argument_only_shows_the_usage(monkeypatch, tmp_path) -> None
 
     services, _ = _run(monkeypatch, ScriptedProvider([]), ["/rm abc", "/exit"], keeper)
 
+    assert keeper.current_id() is not None
     assert services.messages == ["用法：/rm（删本会话，不带参数）"]
     keeper.current().close()
 
 
 def test_archive_moves_the_session_out_of_the_default_list(monkeypatch, tmp_path) -> None:
-    """``/archive`` 是移走不是删掉：默认列表里不再出现，``--all`` 还看得到。"""
+    """``/archive`` 是移走不是删掉：默认列表里不再出现，``--all`` 还看得到。
+
+    和 ``/rm`` 一样办完就退出：收起来的那条不再接着用，别再开一条新的。
+    """
     keeper = SessionStore(root=tmp_path)
     provider = ScriptedProvider([_text("答复")])
 
-    _run(monkeypatch, provider, ["任务一", "/archive", "y", "/exit"], keeper)
+    _, result = _run(monkeypatch, provider, ["任务一", "/archive", "y"], keeper)
 
-    assert len(keeper.list()) == 1               # 只剩刚开的那条
-    everything = keeper.list(include_archived=True)
-    assert len(everything) == 2
-    archived = [meta for meta in everything if meta.archived]
-    assert len(archived) == 1
+    assert result.handler == "default"
+    assert keeper.list() == []
+    archived = keeper.list(include_archived=True)
+    assert len(archived) == 1 and archived[0].archived
     assert (tmp_path / "_archive" / archived[0].id / "events.jsonl").is_file()
 
 
