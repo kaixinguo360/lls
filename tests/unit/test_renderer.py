@@ -156,6 +156,22 @@ def test_shrinking_overlay_restores_the_rows_it_used_to_cover() -> None:
     assert rows[4].rstrip() == ""
 
 
+def test_overlay_follows_the_child_cursor_without_any_keypress() -> None:
+    """子进程写完东西光标下移，覆盖层要跟着走 —— 不能等用户敲一个键才归位。"""
+    engine, screen, console = _overlay_engine(rows=6, columns=20)
+    screen.feed(b"one")
+    engine.draw_overlay(":abc", cursor=4)   # 此刻光标在第 0 行
+    console.snapshot()
+
+    # 覆盖层画出来之后子进程才写：它的输出还在半路上，光标往下挪了三行。
+    screen.feed(b"\r\ntwo\r\nthree\r\n")
+    engine.render_from_model()
+
+    rows = _emulate(bytes(console.data), rows=6, columns=20)
+    assert [r.rstrip() for r in rows[:4]] == ["one", "two", "three", ":abc"]
+    assert engine.overlay.anchor == 3
+
+
 def test_backspace_clears_the_old_tail_of_a_wrapped_prompt() -> None:
     """退格后旧字符不能留在折行后的末行上（用户直接看到的症状）。"""
     engine, _screen, console = _overlay_engine(rows=6, columns=8)

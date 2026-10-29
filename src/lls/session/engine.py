@@ -545,6 +545,14 @@ class Engine:
         self.flush_backlog()
         ov = self.overlay
         rows = self.screen.rows
+        if ov.visible:
+            # 子进程把光标挪走了，覆盖层跟着挪：它占的就是「现在这一行」。
+            # 挪动之前占的旧行按底部模型重铺。
+            moved_from = ov.follow(self.screen.cursor.y)
+            if moved_from is not None:
+                self._stale_rows.update(
+                    range(moved_from, min(moved_from + ov.lines, rows))
+                )
         top = 0 if ov.anchor is None else ov.anchor
         dirty = set(self.screen.dirty) | self._stale_rows
         self._stale_rows.clear()
