@@ -595,8 +595,11 @@ class Engine:
         其余情况（交互命令、慢速输出）一律当场画：旧做法统一等
         ``OVERLAY_REDRAW_DELAY`` 静默，而每来一批输出都会把定时器取消重排，
         间隔短于该延迟就永远轮不到重画，覆盖层于是只在间隙里闪一下。
+
+        「有没有覆盖层」不看提示行：agent 进度行、消息框、翻看器都是别处
+        ``draw_overlay`` 画上去的，同样要补画（见 :meth:`_flush_overlay_redraw`）。
         """
-        if self._active_prompt is None or self._console is None:
+        if self._console is None or not self._has_overlay():
             return
         if self._backlog:
             self._schedule_overlay_redraw()
@@ -613,12 +616,25 @@ class Engine:
         覆盖层的绘制不写模型，模型光标始终代表子进程的真实位置。
         """
         self._overlay_timer = None
-        active = self._active_prompt
-        if active is None or self._console is None:
+        if self._console is None:
             return
-        prompt, text, cursor, _lines_all, _lines_cur = active
-        _, new_all = self.draw_overlay(prompt + text, cursor)
-        self._active_prompt = (prompt, text, cursor, new_all, new_all)
+        active = self._active_prompt
+        if active is not None:
+            prompt, text, cursor, _lines_all, _lines_cur = active
+            _, new_all = self.draw_overlay(prompt + text, cursor)
+            self._active_prompt = (prompt, text, cursor, new_all, new_all)
+            return
+        content = self._overlay_content()
+        if content is None:
+            return
+        # 消息框、翻看器、agent 进度行都是「画一次就摆在那儿」的覆盖层，没有
+        # 提示行要跟着重排。子进程每写一笔，覆盖层占的那几行就按模型铺回去了
+        # —— 不补画的话它只在两笔输出之间的间隙里闪一下（输出一慢就几乎看不
+        # 见），所以这里按上次的文本/源重画，和那一笔输出写在同一个 frame 里。
+        with self._out.frame():
+            self.draw_overlay(content)
+            # 纯展示的覆盖层不占光标位置：子进程接着从模型光标处写。
+            self._place_physical_cursor()
 
     # ---- 输入回调 ----
 
@@ -692,6 +708,14 @@ class Engine:
                 self._flush_overlay_redraw()
             elif content is not None:
                 self.draw_overlay(content)
+
+    def _has_overlay(self) -> bool:
+        """画面上是否还浮着一层东西（提示行、消息框、翻看器、进度行）。"""
+        return (
+            self._active_prompt is not None
+            or self._overlay_source is not None
+            or self._overlay_text is not None
+        )
 
     def _overlay_content(self) -> str | None:
         """按当前尺寸重算覆盖层该画的内容；没有覆盖层时返回 None。"""

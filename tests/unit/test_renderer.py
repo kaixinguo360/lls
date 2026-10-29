@@ -335,3 +335,54 @@ def test_slash_lines_are_handed_over() -> None:
     assert _hands_over("") is False
     assert _hands_over("看看 README") is False
     assert _hands_over("//原样交给模型") is True
+
+
+# ---- 纯展示的覆盖层：子进程一输出就补画回来 ----
+
+def test_a_display_only_overlay_survives_the_next_output_frame() -> None:
+    """agent 进度行、消息框这类覆盖层没有提示行，也要在输出后补画。
+
+    旧行为：``_redraw_overlay_now`` 只认提示行，别处画的覆盖层被子进程的
+    输出冲掉后就再也不回来 —— 只在下一笔输出之前的间隙里闪一下。
+    """
+    engine, screen, console = _overlay_engine()
+    screen.feed(b"one\r\ntwo")
+    engine.draw_overlay("(agent 1) waiting...")
+    console.snapshot()
+    console.writes = 0
+
+    screen.feed(b"\r\nthree")
+    engine.render_from_model()
+
+    rows = _emulate(console.snapshot())
+    assert console.writes == 1          # 铺模型与补画覆盖层同属一帧
+    assert rows[1].rstrip() == "two"    # 旧的覆盖层行已还给模型
+    assert rows[2].rstrip() == "(agent 1) waiting..."
+
+
+def test_the_cursor_goes_back_to_the_model_after_repainting_a_message() -> None:
+    """纯展示的覆盖层不占光标：子进程接着从模型光标处写。"""
+    engine, screen, console = _overlay_engine()
+    screen.feed(b"one\r\ntwo")
+    engine.draw_overlay("err: something went wrong")
+    console.snapshot()
+
+    screen.feed(b"\r\nthree")
+    engine.render_from_model()
+
+    painted = pyte.Screen(20, 8)
+    pyte.ByteStream(painted).feed(console.snapshot())
+    assert painted.cursor.y == screen.cursor.y
+    assert painted.cursor.x == screen.cursor.x
+
+
+def test_output_without_any_overlay_draws_nothing_extra() -> None:
+    """没有覆盖层时每帧都别白算一次（否则每次输出都多画一遍）。"""
+    engine, screen, console = _overlay_engine()
+    screen.feed(b"hello")
+    engine.render_from_model()
+    console.snapshot()
+
+    engine._redraw_overlay_now()
+
+    assert console.data == b""
