@@ -85,11 +85,7 @@ class SessionBusy(SessionError):
         self.session_id = session_id
         self.pid = pid
         where = "pid {}".format(pid) if pid else "另一个进程"
-        super().__init__(
-            "会话 {} 正被 {} 占用；用 --new 新开一条，或 --resume 换一条".format(
-                session_id, where
-            )
-        )
+        super().__init__("会话 {} 正被 {} 占用".format(session_id, where))
 
 
 def new_session_id() -> str:

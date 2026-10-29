@@ -321,8 +321,88 @@ def test_a_busy_session_is_reported_instead_of_stolen(monkeypatch, tmp_path) -> 
     monkeypatch.setattr(agent_cmd, "default_catalog", lambda: FakeCatalog(ScriptedProvider([])))
     asyncio.run(agent_cmd.cmd_agent(services, None))
 
+    # 不再直接退出：先说明被占用，再把会话列表摆出来让人换一条。
     assert "占用" in services.messages[-1]
+    assert services.painted
+    assert "!" + " " + session.id in services.painted[-1]
     other.close()
+
+
+def test_a_busy_session_lets_you_pick_another_one(monkeypatch, tmp_path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    busy = keeper.create("stub", "m")
+    busy.close()
+    spare = keeper.create("stub", "m")
+    spare.close()
+    keeper.set_current(busy.id)
+    holder = SessionStore(root=tmp_path).open(busy.id)
+    wanted = [meta for meta in keeper.list() if meta.id == spare.id][0]
+
+    seen = {}
+
+    async def choose(services, store_, current="", busy="", footer="", header=""):
+        seen["header"] = header
+        return wanted
+
+    services = FakeServices([])
+    monkeypatch.setattr(agent_cmd, "store", lambda: SessionStore(root=tmp_path))
+    monkeypatch.setattr(
+        agent_cmd, "default_catalog", lambda: FakeCatalog(ScriptedProvider([]))
+    )
+    monkeypatch.setattr(agent_cmd, "_choose_session", choose)
+    asyncio.run(agent_cmd.cmd_agent(services, None))
+
+    # 选中另一条后直接进去了，被占用的那条还归对方。
+    assert SessionStore(root=tmp_path).current_id() == spare.id
+    assert seen["header"] == "busy: {} - pick another session:".format(busy.id)
+    assert "占用" in services.messages[-1]
+    holder.close()
+
+
+def test_a_wrong_resume_spec_falls_back_to_the_picker(monkeypatch, tmp_path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    spare = keeper.create("stub", "m")
+    spare.close()
+
+    services = FakeServices([])
+    monkeypatch.setattr(agent_cmd, "store", lambda: SessionStore(root=tmp_path))
+    monkeypatch.setattr(
+        agent_cmd, "default_catalog", lambda: FakeCatalog(ScriptedProvider([]))
+    )
+    asyncio.run(agent_cmd.cmd_agent(services, "--resume nope"))
+
+    # 指错的 --resume 不退出：报出原因后同样摆列表，取消选就结束。
+    assert "nope" in services.messages[-1] or "会话" in services.messages[-1]
+    assert services.painted
+    assert spare.id in services.painted[-1]
+
+
+def test_a_missing_provider_also_offers_the_picker(monkeypatch, tmp_path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    session.close()
+
+    class Missing:
+        def resolve_spec(self, spec=None):
+            return "gone", "m"
+
+        def get(self, provider_id):
+            raise ConfigError("no such provider 'gone'")
+
+        def provider_config(self, provider_id):
+            raise ConfigError("no such provider 'gone'")
+
+        def context_limit(self):
+            return 0
+
+    services = FakeServices([])
+    monkeypatch.setattr(agent_cmd, "store", lambda: SessionStore(root=tmp_path))
+    monkeypatch.setattr(agent_cmd, "default_catalog", lambda: Missing())
+    asyncio.run(agent_cmd.cmd_agent(services, "--resume " + session.id))
+
+    assert "gone" in services.messages[-1]
+    assert services.painted
+    assert session.id in services.painted[-1]
 
 
 def test_a_missing_provider_names_the_session(monkeypatch, tmp_path) -> None:

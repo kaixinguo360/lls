@@ -41,6 +41,7 @@ from lls.ai import (
 from lls.ai.sessions import (
     COMPACT_TARGET_RATIO,
     COMPACT_TRIGGER_RATIO,
+    SessionBusy,
     SessionError,
     default_budget,
     fit,
@@ -56,6 +57,7 @@ from lls.tty import KeyParser, encode_keys
 from lls.ui import SGR_RESET, conservative_char_width, strip_sgr, wrap_multi_lines
 
 from .agent_pager import page
+from .agent_picker import pick
 
 __all__ = ["cmd_agent"]
 
@@ -104,8 +106,7 @@ _SLASH_COMMANDS = (
     ("model", (), "_slash_model", "查看或切换模型：/model [provider/model]"),
     ("compact", (), "_slash_compact", "立刻把最旧的一段历史压成摘要"),
     ("tools", (), "_slash_tools", "列出模型可用的工具"),
-    ("sessions", ("ls",), "_slash_sessions", "列出所有会话（--all 含归档）"),
-    ("resume", (), "_slash_resume", "切到另一条会话：/resume <id>"),
+    ("sessions", ("ls", "resume"), "_slash_sessions", "选一条会话切过去：/sessions"),
     ("new", (), "_slash_new", "开一条新会话并切过去：/new [标题]"),
     ("fork", (), "_slash_fork", "从当前会话分叉：/fork [--at <seq>]"),
     ("rm", (), "_slash_rm", "删除一条会话：/rm <id>"),
@@ -730,7 +731,7 @@ class _Session:
     async def run(self, first_task: str | None) -> bool:
         """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。
 
-        /resume 这类换会话的命令抛 ``_Switch``，由 ``cmd_agent`` 接住重开一条。
+        /sessions 选完会话这类命令抛 ``_Switch``，由 ``cmd_agent`` 接住重开一条。
         """
         task: Any = first_task.strip() if first_task else None
         while True:
@@ -941,13 +942,15 @@ class _Session:
         return _CANCEL
 
     async def _slash_sessions(self, args: str) -> Any:
+        """列出全部会话，光标上下选，回车切过去。"""
         if self._keeper is None:
             await self._s.show_message("没有可用的会话仓库")
             return _CANCEL
-        await self._s.show_message(
-            _session_rows(self._keeper, include_archived="--all" in args.split())
-        )
-        return _CANCEL
+        current = self._session.id if self._session is not None else ""
+        chosen = await _choose_session(self._s, self._keeper, current)
+        if chosen is None or chosen.id == current:
+            return _CANCEL
+        raise _Switch(("open", chosen.id))
 
     def _find_meta(self, spec: str) -> Any:
         """解析会话 id / 前缀 / 标题片段：返回 ``(meta, 错误文本)`` 之一。"""
@@ -955,23 +958,6 @@ class _Session:
             return self._keeper.resolve(spec), ""
         except SessionError as e:
             return None, "error: {}".format(e)
-
-    async def _slash_resume(self, args: str) -> Any:
-        spec = args.strip()
-        if self._keeper is None or self._session is None:
-            await self._s.show_message("本次会话不落盘，切不了会话")
-            return _CANCEL
-        if not spec:
-            await self._s.show_message("用法：/resume <id>（用 /sessions 看有哪些）")
-            return _CANCEL
-        meta, err = self._find_meta(spec)
-        if meta is None:
-            await self._s.show_message(err)
-            return _CANCEL
-        if meta.id == self._session.id:
-            await self._s.show_message("已经在会话 {} 里".format(meta.id))
-            return _CANCEL
-        raise _Switch(("open", meta.id))
 
     async def _slash_new(self, args: str) -> Any:
         raise _Switch(("new", args.strip()))
@@ -1324,30 +1310,47 @@ def _parse_args(args: str | None) -> _Options:
     return opts
 
 
-def _session_rows(keeper: Any, include_archived: bool = False) -> str:
-    """``sessions`` 的表格：id、标题、模型、轮数、大小、更新时间。"""
-    metas = keeper.list(include_archived=include_archived)
+def _session_label(meta: Any, current: bool = False, busy: bool = False) -> str:
+    """One line per session: fixed-width fields first, the title last.
+
+    Only the title varies in length, so keeping it at the end lets every other
+    column line up; the caller clips it to the window width. The two-char
+    marker says "*" current and "!" taken by another process.
+    """
+    marker = ("*" if current else " ") + ("!" if busy else " ")
+    return "{} {}  {:>3} turns  {:>4.0f}KB  {}  {}".format(
+        marker,
+        meta.id,
+        meta.turns,
+        meta.size / 1024.0,
+        _stamp(meta.updated_at),
+        meta.title or "(untitled)",
+    )
+
+
+async def _choose_session(
+    services: Any,
+    keeper: Any,
+    current: str = "",
+    busy: str = "",
+    footer: str = "",
+    header: str = "pick a session:",
+) -> Any:
+    """Show the picker over every session and return the chosen meta.
+
+    The cursor starts on ``current``; ``busy`` only adds the "!" marker, so a
+    session another process holds can still be picked on purpose.
+    """
+    metas = keeper.list()
     if not metas:
-        return "还没有会话；直接 agent 会新开一条"
-    current = keeper.current_id()
-    rows = ["会话（* 为当前）："]
-    for meta in metas:
-        mark = "*" if meta.id == current else " "
-        title = meta.title or "（无标题）"
-        rows.append(
-            "{} {}  {}  {}  {} 轮  {:.0f}KB  {}".format(
-                mark,
-                meta.id,
-                title[:28],
-                meta.model or "-",
-                meta.turns,
-                meta.size / 1024.0,
-                _stamp(meta.updated_at),
-            )
-        )
-    if not include_archived:
-        rows.append("（--all 含已归档）")
-    return "\n".join(rows)
+        await services.show_message("还没有会话；直接 agent 会新开一条")
+        return None
+    labels = [
+        _session_label(meta, meta.id == current, meta.id == busy) for meta in metas
+    ]
+    start = next((n for n, meta in enumerate(metas) if meta.id == current), 0)
+    extra = {} if not footer else {"footer": footer}
+    return await pick(services, metas, labels, cursor=start, header=header, **extra)
 
 
 def _stamp(value: float) -> str:
@@ -1403,7 +1406,11 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
 
     keeper = store()
     if opts.list_only:
-        await s.show_message(_session_rows(keeper, include_archived=opts.all))
+        metas = keeper.list(include_archived=opts.all)
+        await s.show_message(
+            "\n".join([_session_label(m) for m in metas])
+            or "还没有会话；直接 agent 会新开一条"
+        )
         return CommandResult()
 
     try:
@@ -1415,22 +1422,53 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
     task = opts.task
     exited = False
     while True:
+        # 进不去这条会话时先记下原因，随后把列表摆出来让人换一条：
+        # 占用、--resume 指错、这条会话的 provider 没了，都是换一条就能继续的。
+        why = ""
+        busy = ""
+        session = None
         try:
             session = _open_or_create(opts, catalog, keeper)
-        except (SessionError, ConfigError) as e:
+        except SessionBusy as e:
+            why, busy = "{}".format(e), e.session_id
+        except SessionError as e:
+            if not opts.resume:
+                await s.show_message("error: {}".format(e))
+                return CommandResult()
+            why = "error: {}".format(e)
+        except ConfigError as e:
+            # 模型 / provider 配置本身有问题，换会话也没用。
             await s.show_message("error: {}".format(e))
             return CommandResult()
-
-        try:
-            provider = catalog.get(session.meta.provider_id)
-        except ConfigError as e:
-            session.close()
-            await s.show_message(
-                "error: {}（会话 {} 的 provider 已不存在；用 agent --new 开新会话）".format(
-                    e, session.id
-                )
+        else:
+            try:
+                provider = catalog.get(session.meta.provider_id)
+            except ConfigError as e:
+                gone = session.id
+                session.close()
+                session = None
+                why = "error: {}（会话 {} 的 provider 已不存在）".format(e, gone)
+        if why:
+            await s.show_message(why)
+            chosen = await _choose_session(
+                s,
+                keeper,
+                keeper.current_id(),
+                busy=busy,
+                header=(
+                    "pick a session:"
+                    if not busy
+                    else "busy: {} - pick another session:".format(busy)
+                ),
             )
-            return CommandResult()
+            if chosen is None:
+                return CommandResult()
+            opts.new = False
+            opts.resume = chosen.id
+            opts.title = None
+            opts.model = None
+            continue
+        assert session is not None
 
         budget = _budget_for(catalog, session.meta.provider_id)
         worker = _Session(
