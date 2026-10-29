@@ -545,11 +545,6 @@ class Engine:
         self.flush_backlog()
         ov = self.overlay
         rows = self.screen.rows
-        if ov.visible and not ov.owns_cursor:
-            # 纯展示的覆盖层贴着子进程当前行：输出往下走，它也跟下去。
-            moved_from = ov.move_to(self.screen.cursor.y)
-            if moved_from is not None and moved_from != ov.anchor:
-                self._stale_rows.update(range(moved_from, min(moved_from + ov.lines, rows)))
         top = 0 if ov.anchor is None else ov.anchor
         dirty = set(self.screen.dirty) | self._stale_rows
         self._stale_rows.clear()
@@ -829,7 +824,7 @@ class Engine:
         错位）。绘制与底部模型合成在同一帧里，不写底部模型。
 
         ``cursor`` 是文本里的字符下标；为 None 表示纯展示（消息框、翻看器），
-        它不占光标位置，物理光标仍按底部模型放置。
+        光标落在内容末尾 —— 浮层在，光标就归它。
         """
         if self._console is None:
             return (0, 0)
@@ -857,9 +852,8 @@ class Engine:
     def _place_physical_cursor(self) -> None:
         """把物理光标放到该显示的位置。
 
-        覆盖层有自己的插入点（提示行）时听它的：那才是用户盯着的那个光标。
-        否则（消息框、翻看器）用底部模型的光标 —— 子进程的下一笔回显必须
-        落在模型光标处。
+        浮层在，光标就归它：提示行落在插入点，消息框、翻看器落在内容
+        末尾；浮层收起之后，才回到子进程的光标。
         """
         if self._console is None:
             return

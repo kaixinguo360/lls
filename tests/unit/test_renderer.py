@@ -83,12 +83,14 @@ def test_overlay_cursor_is_the_insertion_point() -> None:
     assert (c.y, c.x) == (ov.anchor, 4)
 
 
-def test_overlay_without_cursor_does_not_own_one() -> None:
+def test_overlay_without_insertion_point_puts_the_cursor_at_the_end() -> None:
+    """消息框、翻看器不指位置：光标落在它们写完的地方 —— 最上层说了算。"""
     ov = Overlay(rows=4, columns=10)
-    ov.set("err: boom")
+    ov.set("err\nboom")
 
-    assert ov.owns_cursor is False
-    assert ov.cursor() is None
+    c = ov.cursor()
+    assert c is not None
+    assert (c.y, c.x) == (ov.anchor + 1, 4)
 
 
 def test_overlay_keeps_sgr_style() -> None:
@@ -279,6 +281,16 @@ def test_a_tall_message_stops_at_the_bottom_of_the_screen() -> None:
     assert b"\x1b[7;1H" not in out
 
 
+def test_message_overlay_owns_the_physical_cursor() -> None:
+    """消息框不指光标位置，物理光标仍归它：落在框内写完的地方。"""
+    engine, screen, console = _overlay_engine(rows=8, columns=20)
+    screen.feed(b"one\r\ntwo")
+    console.snapshot()
+    engine.draw_overlay("err")
+
+    assert b"\x1b[2;4H" in console.snapshot()
+
+
 # ---- 读输入后把覆盖层原地交给下一个界面 ----
 
 def _loop_engine():
@@ -352,12 +364,8 @@ def test_slash_lines_are_handed_over() -> None:
 
 # ---- 纯展示的覆盖层：子进程一输出就补画回来 ----
 
-def test_a_display_only_overlay_survives_the_next_output_frame() -> None:
-    """agent 进度行、消息框这类覆盖层没有提示行，也要在输出后补画。
-
-    旧行为：``_redraw_overlay_now`` 只认提示行，别处画的覆盖层被子进程的
-    输出冲掉后就再也不回来 —— 只在下一笔输出之前的间隙里闪一下。
-    """
+def test_a_display_only_overlay_stays_put_while_output_flows() -> None:
+    """消息框、进度行画在哪就在哪：子进程的输出不会把它顶走。"""
     engine, screen, console = _overlay_engine()
     screen.feed(b"one\r\ntwo")
     engine.draw_overlay("(agent 1) waiting...")
@@ -368,9 +376,9 @@ def test_a_display_only_overlay_survives_the_next_output_frame() -> None:
     engine.render_from_model()
 
     rows = _emulate(console.snapshot())
-    assert console.writes == 1          # 铺模型与补画覆盖层同属一帧
-    assert rows[1].rstrip() == "two"    # 旧的覆盖层行已还给模型
-    assert rows[2].rstrip() == "(agent 1) waiting..."
+    assert console.writes == 1                  # 铺模型与补画覆盖层同属一帧
+    assert rows[1].rstrip() == "(agent 1) waiting..."
+    assert rows[2].rstrip() == "three"          # 子进程写在自己的行上
 
 
 def test_the_cursor_goes_back_to_the_model_after_repainting_a_message() -> None:
@@ -401,21 +409,18 @@ def test_output_without_any_overlay_draws_nothing_extra() -> None:
     assert console.data == b""
 
 
-def test_display_only_overlay_leaves_the_cursor_where_the_child_writes() -> None:
-    """纯展示的覆盖层画完不能把光标留在文末。
-
-    否则子进程的下一笔输出从覆盖层末尾接着写，输出期间物理光标一直在错
-    位置，要等覆盖层重画才回原位 —— 用户看到的就是光标乱跳。
-    """
+def test_display_only_overlay_owns_the_physical_cursor() -> None:
+    """浮层在，光标就归它：最上面那一层说了算，不借子进程的光标。"""
     engine, screen, console = _overlay_engine()
     screen.feed(b"one\r\ntwo\r\nthree")
     console.snapshot()
 
-    engine.draw_overlay("(agent 1) waiting...")
+    engine.draw_overlay("err: boom")
 
     emulated = pyte.Screen(20, 8)
     pyte.ByteStream(emulated).feed(bytes(console.data))
-    assert (emulated.cursor.y, emulated.cursor.x) == (screen.cursor.y, screen.cursor.x)
+    assert (emulated.cursor.y, emulated.cursor.x) == (2, 9)  # 框内写完的地方
+
 
 def test_a_batch_of_keys_repaints_the_prompt_once() -> None:
     """同一批到达的键只重画一帧。
