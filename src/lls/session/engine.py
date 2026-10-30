@@ -29,6 +29,7 @@ from lls.term import ScreenModel
 from lls.tty import Console, Key, KeyParser, PtySession, TerminalBackend, Winsize
 from lls.ui import render_row_cells
 
+from .errors import Interrupted, SessionEnded
 from .overlay import Overlay
 from .services import Handler, Services
 
@@ -163,6 +164,9 @@ class Engine:
 
         self._key_parser = KeyParser()
         self._key_buf: list[Key] = []
+        # 等网络这类「不是等输入」的时刻里按下的键：先攒着，等下一次真正
+        # 读输入时按原顺序交给编辑器/子进程（见 wait_keys）。
+        self._held_keys: list[Key] = []
 
         self._exit_status: int | None = None
         self._exit_code: int | None = None
@@ -1071,17 +1075,21 @@ class Engine:
         别的字；这些字节属于新的上下文（通常要交给子进程），直接丢弃会表现为
         「按键失灵」。
         """
-        if not self._key_buf:
-            return
-        data = b"".join(k.raw for k in self._key_buf)
+        data = b"".join(k.raw for k in self._held_keys)
+        data += b"".join(k.raw for k in self._key_buf)
+        self._held_keys.clear()
         self._key_buf.clear()
-        self._push_stdin(data)
+        self._push_stdin(data, front=True)
 
     # ---- 键读取 ----
 
     async def read_key(self) -> Key | None:
         """取一个键；子进程退出时返回 None。不丢键。"""
         while True:
+            if not self._key_buf and self._held_keys:
+                # 这些键比缓冲里的任何字节都老：先按原顺序交出。
+                self._key_buf.extend(self._held_keys)
+                self._held_keys.clear()
             if self._key_buf:
                 return self._key_buf.pop(0)
             if self._exit_event.is_set():
@@ -1114,6 +1122,51 @@ class Engine:
                 flushed = self._key_parser.flush_escape()
                 if flushed is not None:
                     self._key_buf.append(flushed)
+
+    async def wait_keys(self, timeout: float) -> None:
+        """等一段**不是**在等输入的时间（等网络、等摘要）。
+
+        与 ``read_key`` 的分工：同一时刻只有一个在读 stdin。界面在等别的
+        事时调用本方法 —— Ctrl-C 立刻生效（抛 :class:`Interrupted`），终端
+        对子进程查询的应答照常转交（子进程在等它），其余按键攒着，等下一次
+        真正读输入时按原顺序交出：既不丢键，也不会插进正在跑的请求里。
+
+        超时什么也不发生；子进程退出抛 :class:`SessionEnded`。
+        """
+        got = await self._wait_stdin(timeout)
+        if got is None:
+            raise SessionEnded("会话已结束")
+        ts, data = got
+        if not data:
+            return
+        try:
+            keys = self._key_parser.feed(data, ts)
+        except UnicodeDecodeError:
+            # 解不出的字节既不能当按键，也不能安全转交：丢弃。
+            return
+        deadline = self._key_parser.escape_deadline(ESCDELAY)
+        if (
+            self._key_parser.pending_escape
+            and deadline is not None
+            and time.monotonic() >= deadline
+        ):
+            # 过了 ESCDELAY 仍未收全：判为独立 Esc（与 read_key 同一判据）。
+            lone = self._key_parser.flush_escape()
+            if lone is not None:
+                keys.append(lone)
+
+        abort = False
+        for key in keys:
+            if key.control == "ctrl_c":
+                abort = True
+            elif key.control == "terminal_response":
+                self._pty_write(key.raw)
+            else:
+                # 同一批里先到的键照样留着：中断只放弃这一轮，不该吞掉用户
+                # 已经敲下去的字。
+                self._held_keys.append(key)
+        if abort:
+            raise Interrupted("已中断")
 
     async def read_chars(self, timeout: float | None = None) -> bytes | None:
         """读一段原始输入字节（不解析按键）。超时返回空字节，退出返回 None。"""

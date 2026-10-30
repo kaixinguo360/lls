@@ -19,10 +19,12 @@ from lls.tty import Key
 
 from lls.term import ScreenModel
 
+from .errors import Interrupted, SessionEnded
+
 if TYPE_CHECKING:  # pragma: no cover
     from .engine import Engine
 
-__all__ = ["Handler", "Services"]
+__all__ = ["Handler", "Interrupted", "Services", "SessionEnded"]
 
 
 class Handler(Protocol):
@@ -93,6 +95,16 @@ class Services:
     async def read_chars(self, timeout: float | None = None) -> bytes | None:
         """读一段原始输入字节（不解析按键）。超时返回 ``b""``，退出返回 None。"""
         return await self._engine.read_chars(timeout)
+
+    async def wait(self, timeout: float) -> None:
+        """等 ``timeout`` 秒，同时把键盘上的事处理掉。
+
+        界面在等网络这类**不是在等输入**的时刻用它，而不是自己
+        ``read_chars`` 再丢键：Ctrl-C 抛 :class:`Interrupted`，终端对子进程
+        查询的应答当场转交，其余按键留到下一次读输入（见
+        :meth:`Engine.wait_keys`）。子进程退出抛 :class:`SessionEnded`。
+        """
+        await self._engine.wait_keys(timeout)
 
     async def read_key(self) -> Key | None:
         """读一个已解析的按键；子进程退出返回 None。

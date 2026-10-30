@@ -12,16 +12,18 @@ import json
 from typing import NamedTuple, Sequence
 
 from lls.ai import (
-    ChunkKind,
+    AgentEvent,
+    AgentEventKind,
     Conversation,
     Message,
     Tool,
     ToolCall,
-    ToolCallMerger,
     default_catalog,
+    stream_reply,
 )
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
+from ..keys import Aborted, SessionClosed, poll_keys
 from lls.session.services import Services
 from lls.ui import (
     clusters,
@@ -230,10 +232,6 @@ def _paint_thinking(s: Services, text: str) -> None:
 # ---- 生成 ----
 
 
-class _Cancelled(Exception):
-    """用户在生成过程中按下 Ctrl-C。"""
-
-
 async def _stream_payload(
     s: Services, request: str, screen: str, history: Sequence[Message] = ()
 ) -> tuple[str, ToolCall]:
@@ -243,44 +241,35 @@ async def _stream_payload(
     """
     provider, model = default_catalog().resolve()
     messages = build_messages(request, screen, history)
-    merger = ToolCallMerger()
-    think = []  # type: List[str]
+    think: list[str] = []
+    tail = ""
 
-    async def consume() -> None:
-        async for chunk in provider.chat(
+    def on_event(event: AgentEvent) -> None:
+        """流式进度：调用分片拼到哪、推理想到哪。"""
+        nonlocal tail
+        if event.kind is AgentEventKind.CALL_DELTA:
+            tail = (tail + event.text)[-200:]
+            _paint(s, "gen-cmd", (event.name + " " + tail).strip() or "awaiting reply...")
+        elif event.kind is AgentEventKind.REASONING:
+            think.append(event.text)
+            _paint_thinking(s, "".join(think))
+
+    _paint(s, "gen-cmd", "awaiting reply...")
+    try:
+        _text, calls, _usage = await stream_reply(
+            provider,
             model,
             messages,
             tools=[EMIT_TOOL],
-            parallel_tool_calls=False,
-        ):
-            if chunk.kind is ChunkKind.TOOL_CALL_DELTA and chunk.fragment is not None:
-                merger.add(chunk.fragment)
-                name, tail = merger.progress()
-                _paint(s, "gen-cmd", (name + " " + tail).strip() or "awaiting reply...")
-            elif chunk.kind is ChunkKind.REASONING:
-                think.append(chunk.text)
-                _paint_thinking(s, "".join(think))
-            elif chunk.kind is ChunkKind.DONE:
-                return
-
-    _paint(s, "gen-cmd", "awaiting reply...")
-
-    task = asyncio.ensure_future(consume())
-    try:
-        while not task.done():
-            data = await s.read_chars(0.05)
-            if data is None or b"\x03" in data:
-                raise _Cancelled()
-        task.result()
+            on_event=on_event,
+            poll=lambda timeout: poll_keys(s, timeout),
+        )
     finally:
         # 取消后必须把它收掉：否则协程悬着，HTTP 连接也不会立刻关闭。
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        # 状态行不收：紧接着的确认菜单就是同一层的新一帧（read_line 自己画
-        # 上去顶替），先还原一次只会露出子进程画面。
 
-    calls = merger.calls()
     if not calls:
         raise RuntimeError("model returned no tool call")
     call = calls[0]
@@ -342,8 +331,10 @@ async def _produce(
         if payload is None:
             try:
                 payload, call = await _stream_payload(s, request, screen, history)
-            except _Cancelled:
+            except Aborted:
                 return _Outcome(note="生成已中断")
+            except SessionClosed:
+                return _Outcome()
 
         text = _menu_text(payload, hint, s.screen.columns)
         answer = await s.read_line(

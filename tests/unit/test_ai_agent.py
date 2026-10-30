@@ -23,6 +23,7 @@ from lls.ai import (
     Tool,
     ToolCall,
     ToolCallDelta,
+    stream_reply,
 )
 
 SYSTEM = "system prompt"
@@ -546,3 +547,54 @@ def test_result_carries_the_last_usage() -> None:
     result = asyncio.run(agent.run("任务"))
 
     assert result.usage == {"prompt": 7, "completion": 3}
+
+
+# ---- 一次可中断的流式请求 ----
+
+
+def test_stream_reply_reports_progress_and_returns_what_came_back() -> None:
+    provider = ScriptedProvider([[Chunk(ChunkKind.TEXT, "答复"), Chunk(ChunkKind.DONE)]])
+    events = []
+
+    text, calls, usage = asyncio.run(
+        stream_reply(
+            provider,
+            "m",
+            [Message("user", "任务")],
+            on_event=events.append,
+        )
+    )
+
+    assert text == "答复"
+    assert calls == []
+    assert usage is None
+    assert [event.kind for event in events] == [AgentEventKind.TEXT]
+
+
+def test_stream_reply_cancels_the_request_when_the_wait_asks_it_to() -> None:
+    """等的人一说中断，请求协程就得收掉：不能留着连接自己在跑。"""
+
+    class Hanging(ScriptedProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.closed = False
+
+        async def chat(self, model, messages, **params):
+            try:
+                await asyncio.sleep(30)
+                yield Chunk(ChunkKind.DONE)
+            finally:
+                self.closed = True
+
+    provider = Hanging()
+
+    async def wait(timeout: float) -> None:
+        await asyncio.sleep(0)
+        raise AgentCancelled("已中断")
+
+    async def run():
+        with pytest.raises(AgentCancelled):
+            await stream_reply(provider, "m", [Message("user", "任务")], poll=wait)
+        return provider
+
+    assert asyncio.run(run()).closed is True

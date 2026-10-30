@@ -67,12 +67,14 @@ class Window:
     """需要让用户知道的一句话（例如单轮就超预算）。"""
 
     def describe(self) -> str:
-        """一行摘要，用于 turn_end 备注。"""
+        """一行用量摘要。
+
+        只报数：压没压、为什么裁，都由调用方自己说，免得同一句话在一条
+        消息里出现两遍。
+        """
         parts = ["{} 条消息 / {}/{} tok".format(len(self.messages), self.used, self.budget)]
         if self.dropped:
             parts.append("裁掉 {} 条".format(self.dropped))
-        if self.compacted:
-            parts.append("已压缩")
         if self.note:
             parts.append(self.note)
         return "，".join(parts)

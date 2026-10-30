@@ -12,11 +12,12 @@ import json
 import pytest
 
 from lls.ai import Chunk, ChunkKind, ConfigError, ToolCall, ToolCallDelta
-from lls.commands import get_command
+from lls.commands import get_command, keys
 from lls.commands.builtin import agent as agent_cmd
 from lls.ui import strip_sgr
 from lls.ai.sessions import SessionStore
 from lls.ai.sessions.events import INTERRUPT_MARKER
+from lls.session.errors import Interrupted, SessionEnded
 from lls.tty import KeyNameError
 
 # ---- 桩 ----
@@ -54,6 +55,7 @@ class FakeServices:
         self.painted = []
         self.messages = []
         self._chars = []
+        self.held = []
 
     def queue_chars(self, *values) -> None:
         self._chars.extend(values)
@@ -62,12 +64,19 @@ class FakeServices:
         self.prompts.append(prompt)
         return self._answers.pop(0) if self._answers else None
 
-    async def read_chars(self, timeout=None):
+    async def wait(self, timeout=None) -> None:
+        """等一小段键盘：排在队里的那一段就是这时到达的输入。"""
         # 让出事件循环：真实实现会等输入，模型流任务才有机会推进。
         await asyncio.sleep(0)
-        if self._chars:
-            return self._chars.pop(0)
-        return b""
+        if not self._chars:
+            return
+        value = self._chars.pop(0)
+        if value is None:
+            raise SessionEnded("会话已结束")
+        if value == b"\x03":
+            raise Interrupted("已中断")
+        # 其余按键属于用户：真实引擎会攒着，等下一次读输入再交出。
+        self.held.append(value)
 
     async def read_key(self):
         await asyncio.sleep(0)
@@ -688,7 +697,7 @@ def test_painter_says_what_it_is_doing_at_each_phase() -> None:
 
 
 def test_painter_shows_a_call_and_how_long_it_took() -> None:
-    """调用期间显示工具名与参数；返回后换成「跑完了、花了多久」。"""
+    """调用期间显示工具名与已用时间；返回后换成「跑完了、花了多久」。"""
     services = FakeServices([])
     painter = agent_cmd._Painter(services)
     call = agent_cmd.AgentEvent(
@@ -704,7 +713,7 @@ def test_painter_shows_a_call_and_how_long_it_took() -> None:
         agent_cmd.AgentEvent(agent_cmd.AgentEventKind.RESULT, step=2, name="read_terminal")
     )
 
-    assert services.painted[1] == '(agent 2) calling read_terminal: {"lines": 3}'
+    assert services.painted[1].startswith('(agent 2) calling read_terminal: {"lines": 3}')
     assert services.painted[-1].startswith("(agent 2) read_terminal done (")
     assert services.painted[-1].endswith("s)")
 
@@ -874,7 +883,7 @@ def test_read_terminal_aborts_on_ctrl_c() -> None:
     services.queue_chars(b"\x03")
     tools, _ = _tools(services)
 
-    with pytest.raises(agent_cmd._Aborted):
+    with pytest.raises(keys.Aborted):
         asyncio.run(tools["read_terminal"].run({"lines": 10, "wait_seconds": 1}))
 
 
@@ -883,21 +892,80 @@ def test_read_terminal_ends_on_child_exit() -> None:
     services.queue_chars(None)
     tools, _ = _tools(services)
 
-    with pytest.raises(agent_cmd._SessionEnded):
+    with pytest.raises(keys.SessionClosed):
         asyncio.run(tools["read_terminal"].run({"lines": 10, "wait_seconds": 1}))
 
 
-def test_read_forwards_terminal_responses_but_drops_user_keys(monkeypatch) -> None:
+def test_keys_typed_while_reading_are_kept_for_the_next_prompt(monkeypatch) -> None:
+    """读终端时敲下的字不算丢：它属于用户，等下一次读输入再交出去。"""
     monkeypatch.setattr(agent_cmd, "READ_POLL", 0.001)
     monkeypatch.setattr(agent_cmd, "READ_QUIET", 0.005)
     services = FakeServices([], screen=FakeScreen(texts=["a", "a", "a", "a"]))
-    # 用户敲的字符属于会话期间的输入，丢弃；终端对查询的应答必须转交。
-    services.queue_chars(b"x", b"\x1b[12;40R")
+    services.queue_chars(b"x")
     tools, _ = _tools(services)
 
     asyncio.run(tools["read_terminal"].run({"lines": 10, "wait_seconds": 1}))
 
-    assert services.written == [(b"\x1b[12;40R", False)]
+    assert services.held == [b"x"]
+
+
+# ---- /compact：先画帧、可中断 ----
+
+
+def _seeded(store, turns: int = 4, filler: str = "细" * 500):
+    session = store.create("stub", "m")
+    for index in range(turns):
+        session.append_user("旧任务 {}".format(index))
+        session.append_assistant(filler)
+        session.append_turn_end("ok")
+    return session
+
+
+def test_slash_compact_paints_before_the_summary_arrives(tmp_path) -> None:
+    """摘要是一次网络请求：先摆出这个相，别让屏幕空着等好几秒。"""
+    store = SessionStore(root=tmp_path)
+    session = _seeded(store)
+    services = FakeServices([])
+    worker = agent_cmd._Session(
+        services,
+        ScriptedProvider([[Chunk(ChunkKind.TEXT, "摘要"), Chunk(ChunkKind.DONE)]]),
+        "m",
+        session,
+        budget=600,
+        keeper=store,
+    )
+
+    asyncio.run(worker._slash_compact(""))
+
+    assert services.painted[0] == "(agent) preparing..."
+    assert "compacting..." in services.painted[1]
+    assert services.messages[-1].startswith("已压缩")
+    session.close()
+
+
+def test_slash_compact_stops_on_ctrl_c(tmp_path) -> None:
+    """压缩期间按 Ctrl-C：请求取消，历史原样保留，并说清楚。"""
+    store = SessionStore(root=tmp_path)
+    session = _seeded(store)
+    services = FakeServices([])
+    services.queue_chars(b"\x03")
+
+    class Hanging(ScriptedProvider):
+        async def chat(self, model, messages, **params):
+            self.requests.append(list(messages))
+            await asyncio.sleep(30)
+            yield Chunk(ChunkKind.DONE)
+
+    worker = agent_cmd._Session(
+        services, Hanging([]), "m", session, budget=600, keeper=store
+    )
+
+    result = asyncio.run(worker._slash_compact(""))
+
+    assert result is agent_cmd._CANCEL
+    assert services.messages[-1].endswith("历史没有改动")
+    assert not [event for event in session.events() if event.type == "compact"]
+    session.close()
 
 
 # ---- 重复调用提醒 ----

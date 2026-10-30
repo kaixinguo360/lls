@@ -8,6 +8,7 @@ import json
 import pytest
 
 from lls.ai import Message, ToolCall
+from lls.commands import keys
 from lls.commands.builtin import generate as gen
 from lls.ui import conservative_char_width
 
@@ -41,8 +42,8 @@ class FakeServices:
         self.lines.append(prompt)
         return self._answers.pop(0) if self._answers else None
 
-    async def read_chars(self, timeout=None):
-        return b""
+    async def wait(self, timeout=None) -> None:
+        await asyncio.sleep(0)
 
     def draw_overlay(self, text, cursor=None):
         self.painted.append(text)
@@ -559,7 +560,7 @@ def test_empty_payload_can_be_discarded(monkeypatch) -> None:
 
 def test_cancelled_generation_is_reported(monkeypatch) -> None:
     async def cancelled(s, request, screen, history=()):
-        raise gen._Cancelled()
+        raise keys.Aborted("已中断")
 
     monkeypatch.setattr(gen, "_stream_payload", cancelled)
     services = FakeServices([])

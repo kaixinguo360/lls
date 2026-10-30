@@ -8,6 +8,7 @@ from lls.ai import Chunk, ChunkKind, ConfigError
 from lls.ai.sessions import SessionBusy, SessionStore
 from lls.ai.sessions.events import INTERRUPT_MARKER
 from lls.commands.builtin import agent as agent_cmd
+from lls.session.errors import Interrupted
 from lls.commands.builtin import sessions as sessions_cmd
 from lls.tty import Key
 
@@ -34,9 +35,8 @@ class FakeServices:
         self.prompts.append(prompt)
         return self._answers.pop(0) if self._answers else None
 
-    async def read_chars(self, timeout=None):
+    async def wait(self, timeout=None) -> None:
         await asyncio.sleep(0)
-        return b""
 
     async def read_key(self):
         await asyncio.sleep(0)
@@ -344,12 +344,13 @@ def test_an_aborted_turn_stays_in_context_marked_as_interrupted(monkeypatch, tmp
     services = FakeServices(["任务一", "任务二", "/exit"])
     services.queue = None
 
-    async def read_chars(timeout=None):
+    async def wait(timeout=None):
         await asyncio.sleep(0)
         # 第一轮读到 Ctrl-C，第二轮正常。
-        return b"\x03" if len(services.prompts) == 1 else b""
+        if len(services.prompts) == 1:
+            raise Interrupted("已中断")
 
-    services.read_chars = read_chars
+    services.wait = wait
     monkeypatch.setattr(agent_cmd, "default_catalog", lambda: FakeCatalog(provider))
     monkeypatch.setattr(agent_cmd, "store", lambda: keeper)
     asyncio.run(agent_cmd.cmd_agent(services, None))
@@ -404,13 +405,13 @@ def test_an_interrupted_reply_keeps_what_was_already_shown(monkeypatch, tmp_path
     provider = SlowProvider()
     services = FakeServices(["任务", "任务二", "/exit"])
 
-    async def read_chars(timeout=None):
+    async def wait(timeout=None):
         await asyncio.sleep(0)
         # 第一轮吐了两段就中断；第二轮（任务二）正常跑完。
-        interrupted = len(services.prompts) == 1 and provider.sent >= 2
-        return b"\x03" if interrupted else b""
+        if len(services.prompts) == 1 and provider.sent >= 2:
+            raise Interrupted("已中断")
 
-    services.read_chars = read_chars
+    services.wait = wait
     monkeypatch.setattr(agent_cmd, "default_catalog", lambda: FakeCatalog(provider))
     monkeypatch.setattr(agent_cmd, "store", lambda: keeper)
     asyncio.run(agent_cmd.cmd_agent(services, None))
@@ -762,7 +763,7 @@ def test_the_watermark_compacts_before_anything_is_dropped(monkeypatch, tmp_path
     # 留下的还是最近几轮旧历史 + 这一轮，不是只留一条摘要。
     assert sum(1 for m in session.history() if m.role == "user") >= 10
     # 这一轮真压过，才在覆盖层留一句话。
-    assert "已压缩到" in session.last_turn_end().note
+    assert "已压缩" in session.last_turn_end().note
     session.close()
 
 

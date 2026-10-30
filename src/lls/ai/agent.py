@@ -40,6 +40,7 @@ __all__ = [
     "AgentResult",
     "AgentTool",
     "STOP_POLL",
+    "stream_reply",
 ]
 
 # 等模型流式输出时，多久检查一次中断回调
@@ -108,6 +109,91 @@ class AgentCancelled(Exception):
     """外部要求中断（Ctrl-C、会话结束等）。"""
 
 
+
+
+async def stream_reply(
+    provider: Provider,
+    model: str,
+    messages: Sequence[Message],
+    *,
+    tools: Sequence[Tool] | None = None,
+    step: int = 0,
+    on_event: Callable[[AgentEvent], None] | None = None,
+    on_text: Callable[[str], None] | None = None,
+    poll: Callable[[float], Awaitable[None]] | None = None,
+) -> tuple[str, list[ToolCall], dict | None]:
+    """做一次流式请求，返回 ``(正文, 工具调用, 用量)``。
+
+    这是**唯一**调用 ``Provider.chat`` 的地方：Agent 循环、历史摘要、输入
+    生成都走它，于是「边收边报进度」「等的时候响应 Ctrl-C」只有一份实现。
+
+    ``poll`` 在等待期间每 ``STOP_POLL`` 秒调用一次，由它负责等键盘，并在
+    需要中断时抛 :class:`AgentCancelled`；中断时请求协程会被取消，连接随之
+    关闭。``on_text`` 收到每一段正文（调用方据此保留中断前的半截答复）。
+    """
+    text_parts: list[str] = []
+    merger = ToolCallMerger()
+    usage: dict | None = None
+
+    def emit(event: AgentEvent) -> None:
+        if on_event is not None:
+            on_event(event)
+
+    async def consume() -> None:
+        nonlocal usage
+        async for chunk in provider.chat(
+            model,
+            messages,
+            tools=tools,
+            parallel_tool_calls=False if tools else None,
+        ):
+            if chunk.kind is ChunkKind.TEXT:
+                text_parts.append(chunk.text)
+                if on_text is not None:
+                    on_text(chunk.text)
+                emit(AgentEvent(AgentEventKind.TEXT, step=step, text=chunk.text))
+            elif chunk.kind is ChunkKind.REASONING:
+                emit(AgentEvent(AgentEventKind.REASONING, step=step, text=chunk.text))
+            elif chunk.kind is ChunkKind.TOOL_CALL_DELTA and chunk.fragment is not None:
+                merger.add(chunk.fragment)
+                # 分片一到位就外传，界面能在流中看到「正在拼哪个调用」。
+                emit(
+                    AgentEvent(
+                        AgentEventKind.CALL_DELTA,
+                        step=step,
+                        name=chunk.fragment.name,
+                        text=chunk.fragment.arguments,
+                    )
+                )
+            elif chunk.kind is ChunkKind.USAGE:
+                usage = dict(chunk.usage or {})
+            elif chunk.kind is ChunkKind.DONE:
+                return
+
+    await _drive(consume(), poll)
+    return "".join(text_parts), merger.calls(), usage
+
+
+async def _drive(
+    work: Awaitable[None], poll: Callable[[float], Awaitable[None]] | None
+) -> None:
+    """等 ``work`` 做完；期间把键盘交给 ``poll``。
+
+    中断（``poll`` 抛异常）时取消 ``work`` 并等它收尾：否则协程悬着，HTTP
+    连接也不会立刻关闭。
+    """
+    task = asyncio.ensure_future(work)
+    try:
+        if poll is None:
+            await task
+        else:
+            while not task.done():
+                await poll(STOP_POLL)
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 class Agent:
     """「调用模型，执行工具，重复」的通用驱动。"""
 
@@ -226,63 +312,24 @@ class Agent:
         messages: Sequence[Message],
         tools: Sequence[Tool] | None,
     ) -> tuple[str, list[ToolCall]]:
-        """做一次流式请求，收集正文、工具调用与用量。"""
+        """做一次流式请求：进度外传，正文留一份给中断时的补写。"""
         self._usage = None
         self._partial = ""
-        text_parts: list[str] = []
-        merger = ToolCallMerger()
+        text, calls, self._usage = await stream_reply(
+            self._provider,
+            self._model,
+            messages,
+            tools=tools,
+            step=step,
+            on_event=self._emit,
+            on_text=self._keep_partial,
+            poll=self._poll,
+        )
+        return text, calls
 
-        async def consume() -> None:
-            async for chunk in self._provider.chat(
-                self._model,
-                messages,
-                tools=tools,
-                parallel_tool_calls=False if tools else None,
-            ):
-                if chunk.kind is ChunkKind.TEXT:
-                    text_parts.append(chunk.text)
-                    self._partial += chunk.text
-                    self._emit(
-                        AgentEvent(AgentEventKind.TEXT, step=step, text=chunk.text)
-                    )
-                elif chunk.kind is ChunkKind.REASONING:
-                    self._emit(
-                        AgentEvent(AgentEventKind.REASONING, step=step, text=chunk.text)
-                    )
-                elif (
-                    chunk.kind is ChunkKind.TOOL_CALL_DELTA
-                    and chunk.fragment is not None
-                ):
-                    merger.add(chunk.fragment)
-                    # 分片一到位就外传，界面能在流中看到「正在拼哪个调用」。
-                    self._emit(
-                        AgentEvent(
-                            AgentEventKind.CALL_DELTA,
-                            step=step,
-                            name=chunk.fragment.name,
-                            text=chunk.fragment.arguments,
-                        )
-                    )
-                elif chunk.kind is ChunkKind.USAGE:
-                    self._usage = dict(chunk.usage or {})
-                elif chunk.kind is ChunkKind.DONE:
-                    return
-
-        task = asyncio.ensure_future(consume())
-        try:
-            if self._poll is None:
-                await task
-            else:
-                while not task.done():
-                    await self._poll(STOP_POLL)
-                await task
-        finally:
-            # 取消后必须收掉：否则协程悬着，HTTP 连接也不会立刻关闭。
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-        return "".join(text_parts), merger.calls()
+    def _keep_partial(self, text: str) -> None:
+        """一收到正文就攥住：中断时还没凑完的答复要补进会话。"""
+        self._partial += text
 
     # ---- 工具执行 ----
 

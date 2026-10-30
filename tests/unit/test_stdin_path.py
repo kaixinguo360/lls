@@ -14,7 +14,10 @@ import asyncio
 import time
 from collections import deque
 
+import pytest
+
 from lls.session.engine import Engine
+from lls.session.errors import Interrupted, SessionEnded
 
 
 def _engine() -> Engine:
@@ -88,3 +91,65 @@ def test_a_lone_escape_ends_up_as_the_escape_key() -> None:
 
     key = asyncio.run(run())
     assert key is not None and key.control == "escape"
+
+
+class _Pty:
+    """记下写进子进程的字节。"""
+
+    def __init__(self) -> None:
+        self.written = []
+
+    def write(self, data: bytes) -> None:
+        self.written.append(data)
+
+
+def test_wait_keys_forwards_terminal_responses_and_holds_typed_keys() -> None:
+    """等网络时：终端应答当场转交，用户敲的字留到下一次读输入。"""
+
+    async def run():
+        engine = _engine()
+        engine._pty = _Pty()
+        engine._push_stdin("ab\x1b[12;40R".encode())
+        await engine.wait_keys(0.05)
+        return engine
+
+    engine = asyncio.run(run())
+    assert engine._pty.written == [b"\x1b[12;40R"]
+    assert [key.raw for key in engine._held_keys] == [b"a", b"b"]
+
+
+def test_wait_keys_stops_on_ctrl_c_but_keeps_what_came_first() -> None:
+    """中断只放弃这一段等待，同批先敲下的字仍然属于用户。"""
+
+    async def run():
+        engine = _engine()
+        engine._push_stdin(b"x\x03")
+        with pytest.raises(Interrupted):
+            await engine.wait_keys(0.05)
+        return engine
+
+    engine = asyncio.run(run())
+    assert [key.raw for key in engine._held_keys] == [b"x"]
+
+
+def test_held_keys_come_back_in_order_at_the_next_read() -> None:
+    """攒下的键在下次读输入时按原顺序出现，且比后来的字节更早。"""
+
+    async def run():
+        engine = _engine()
+        engine._push_stdin(b"ls")
+        await engine.wait_keys(0.05)
+        engine._push_stdin(b"-l")
+        return [await asyncio.wait_for(engine.read_key(), 1) for _ in range(4)]
+
+    assert [key.raw for key in asyncio.run(run())] == [b"l", b"s", b"-", b"l"]
+
+
+def test_wait_keys_ends_when_the_child_is_gone() -> None:
+    async def run():
+        engine = _engine()
+        engine._exit_event.set()
+        with pytest.raises(SessionEnded):
+            await engine.wait_keys(0.05)
+
+    asyncio.run(run())

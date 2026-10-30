@@ -18,6 +18,7 @@ finish 工具。本命令不设步数上限（长任务靠 Ctrl-C 中止）；�
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import difflib
@@ -32,11 +33,11 @@ from lls.ai import (
     AgentEvent,
     AgentEventKind,
     AgentTool,
-    ChunkKind,
     ConfigError,
     Message,
     Tool,
     default_catalog,
+    stream_reply,
 )
 from lls.ai.sessions import (
     COMPACT_TARGET_RATIO,
@@ -52,8 +53,9 @@ from lls.ai.sessions import (
 from lls.ai.sessions.events import SUMMARY_PREFIX
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
+from lls.offload import offload
 from lls.session.services import Services
-from lls.tty import KeyParser, encode_keys
+from lls.tty import encode_keys
 from lls.ui import (
     SGR_RESET,
     clusters,
@@ -63,6 +65,7 @@ from lls.ui import (
     wrap_multi_lines,
 )
 
+from ..keys import Aborted, SessionClosed, poll_keys
 from .agent_pager import page
 from .agent_picker import pick
 
@@ -127,6 +130,10 @@ _SLASH_INDEX = dict(
     [(item[0], item[2]) for item in _SLASH_COMMANDS]
     + [(alias, item[2]) for item in _SLASH_COMMANDS for alias in item[1]]
 )
+
+
+class _CompactFailed(Exception):
+    """摘要请求没成功：这一次没压成，历史原样保留。"""
 
 
 class _Switch(Exception):
@@ -199,14 +206,6 @@ SYSTEM_PROMPT = f"""\
 - 只执行与任务相关的操作；不要做用户没有要求的破坏性操作。
 - 会话历史会跨任务保留；用户的新任务可能引用之前的终端状态。
 """
-
-
-class _Aborted(AgentCancelled):
-    """用户按 Ctrl-C 中止了本次执行。会话继续。"""
-
-
-class _SessionEnded(AgentCancelled):
-    """子进程退出，会话无法继续。"""
 
 
 # ---- 工具协议 ----
@@ -412,12 +411,15 @@ def _reply_rows(text: str, columns: int, bold: bool = False) -> list[str]:
 # ---- 终端观察与等待 ----
 
 class _TerminalView:
-    """屏幕快照 + 有限的等待 + 键盘/子进程状态检查。"""
+    """屏幕快照 + 有限的等待。
+
+    等的时候用 :func:`poll_keys`：它负责把 Ctrl-C 变成中断、把终端应答
+    转给子进程，并把用户敲下的键留到下一次读输入。
+    """
 
     def __init__(self, services: Services) -> None:
         self._s = services
         self._last = ""
-        self._parser = KeyParser()
 
     def snapshot(self, lines: int) -> str:
         self._s.flush_model()
@@ -427,26 +429,6 @@ class _TerminalView:
     def mark(self, text: str) -> None:
         """记下「模型已经看过」的画面，用于省略重复内容。"""
         self._last = text
-
-    async def poll(self, timeout: float) -> None:
-        """等一小段时间；Ctrl-C 中止本次执行，子进程退出结束会话。
-
-        终端对子进程查询（DSR/DA 等）的应答**不是用户输入**，必须转交；
-        其余按键在执行期间丢弃。
-        """
-        data = await self._s.read_chars(timeout)
-        if data is None:
-            raise _SessionEnded("会话已结束")
-        try:
-            keys = self._parser.feed(data)
-        except UnicodeDecodeError:
-            # 无法解码的输入既不能当按键，也不能安全转发；丢弃。
-            return
-        for key in keys:
-            if key.control == "ctrl_c":
-                raise _Aborted("已中断")
-            if key.control == "terminal_response":
-                self._s.write(key.raw)
 
     async def read(self, lines: int, wait_seconds: float) -> tuple[str, str]:
         """读屏幕；``wait_seconds`` 内静默就提前返回，否则到点返回。"""
@@ -459,7 +441,7 @@ class _TerminalView:
         last_change = time.monotonic()
         while True:
             now = time.monotonic()
-            await self.poll(min(READ_POLL, max(0.0, deadline - now)))
+            await poll_keys(self._s, min(READ_POLL, max(0.0, deadline - now)))
             fresh = self.snapshot(lines)
             now = time.monotonic()
             if fresh != text:
@@ -642,6 +624,8 @@ class _Painter:
         self._call_name = ""
         self._started = 0.0
         self._painted = 0.0
+        self._last_line = ""
+        self._calling = False
 
     def begin(self) -> None:
         """立刻画出这一轮的第一帧，不等模型回话。
@@ -652,6 +636,24 @@ class _Painter:
         """
         self._phase = PREPARING
         self._paint(force=True)
+
+    async def drive(self, work: Any) -> Any:
+        """跑这一轮的主体；期间按 PAINT_INTERVAL 复画。
+
+        屏幕上那一行必须自己往前走：工具跑几十秒时没有任何进度事件，停在
+        同一个数字上看着就像卡死。
+        """
+        ticker = asyncio.ensure_future(self._tick())
+        try:
+            return await work
+        finally:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+
+    async def _tick(self) -> None:
+        while True:
+            await asyncio.sleep(PAINT_INTERVAL)
+            self._paint()
 
     def compacting(self) -> None:
         """压缩开始：一次摘要请求，可能要好几秒，得让屏幕说出来。"""
@@ -673,6 +675,7 @@ class _Painter:
             self._call_name = ""
             self._think = ""
             self._phase = AWAITING
+            self._calling = False
             self._paint(force=True)
         elif event.kind is AgentEventKind.TEXT:
             # 正文开始了，推理是过去式：别让它继续占那一行。
@@ -692,14 +695,17 @@ class _Painter:
                 self._call_name = event.name
             self._call = (self._call + event.text)[-400:]
             self._phase = PLANNING
+            self._calling = False
             self._paint()
         elif event.kind is AgentEventKind.CALL:
             self._started = time.monotonic()
+            self._calling = True
             self._action = ("calling " + event.name + ": " + event.text)[-400:]
             self._call = ""
             self._paint(force=True)
         elif event.kind is AgentEventKind.RESULT:
             # 细节在终端画面里，这里只要「跑完了、花了多久」。
+            self._calling = False
             self._action = "{} done ({:.1f}s)".format(
                 event.name, time.monotonic() - self._started
             )
@@ -718,6 +724,9 @@ class _Painter:
         # 还没开始第一步时不写「第 0 步」：那会儿只是把状态占上，
         # 数字要等真正开始算才出现。
         prefix = f"(agent {self._step}) " if self._step else "(agent) "
+        if action and self._calling:
+            # 工具可能跑几十秒，中间没有任何事件：让这一行自己往前走。
+            action = "{} · {:.1f}s".format(action, now - self._started)
         if action:
             line = _line(prefix, action, columns)
         elif self._think:
@@ -726,6 +735,10 @@ class _Painter:
             line = _tail_line(prefix + self._phase + " ", self._think, columns)
         else:
             line = _line(prefix, self._phase, columns)
+        if line == self._last_line and not force:
+            # 定时重画的多数帧一行未变：不重写屏幕，免得终端白刷。
+            return
+        self._last_line = line
         self._s.draw_overlay(line)
 
 
@@ -775,6 +788,7 @@ class _Session:
         self._log = session.log(LOG_ENTRIES) if session is not None else []
         self._window = None
         self._compacted_now = False
+        self._compact_error = ""
 
     async def run(self, first_task: str | None) -> bool:
         """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。
@@ -794,7 +808,7 @@ class _Session:
                     continue
             try:
                 await self._one(task)
-            except _SessionEnded:
+            except SessionClosed:
                 return False
             task = None
 
@@ -822,7 +836,10 @@ class _Session:
         if text.lower() in ("/exit", "/quit", "exit", "quit"):
             return _EXIT
         if text.startswith("/"):
-            return await self._slash(text)
+            try:
+                return await self._slash(text)
+            except SessionClosed:
+                return None
         return text
 
     async def _slash(self, text: str) -> Any:
@@ -866,7 +883,9 @@ class _Session:
 
     async def _slash_status(self, args: str) -> Any:
         """``/status``：整屏翻看全部对话，排版与输入时的提示一致。"""
-        await page(self._s, self._transcript(), self._status_footer())
+        rows = await offload(self._transcript)
+        footer = await offload(self._status_footer)
+        await page(self._s, rows, footer)
         return _CANCEL
 
     def _transcript(self) -> List[str]:
@@ -963,12 +982,26 @@ class _Session:
         return _CANCEL
 
     async def _slash_compact(self, args: str) -> Any:
+        """立刻压一次历史。摘要是一次网络请求：先摆出这一相，且可中断。"""
         if self._session is None:
             await self._s.show_message("本次会话不保存到磁盘，没有可压缩的历史")
             return _CANCEL
+        painter = _Painter(self._s)
+        painter.begin()
+        painter.compacting()
         self._compacted_now = False
-        compressed = await self._compact(self._prepare_window(()), (), force=True)
-        after = self._prepare_window(())
+        try:
+            window = await offload(self._prepare_window, ())
+            compressed = await painter.drive(self._compact(window, (), force=True))
+        except Aborted as e:
+            await self._s.show_message("{}，历史没有改动".format(e))
+            return _CANCEL
+        except _CompactFailed as e:
+            await self._s.show_message(str(e))
+            return _CANCEL
+        finally:
+            self._s.restore_context()
+        after = await offload(self._prepare_window, ())
         if compressed:
             await self._s.show_message("已压缩，当前窗口 {}".format(after.describe()))
         else:
@@ -1158,7 +1191,18 @@ class _Session:
         self._s.requeue_pending_keys()
         self._guard.reset()
         self._compacted_now = False
+        self._compact_error = ""
+        try:
+            await painter.drive(self._turn(task, painter))
+        except Aborted as e:
+            # 中断也可能发生在请求之前（裁历史、压缩）：这一轮同样只是被放弃。
+            self._record("", "", str(e))
+        finally:
+            # 这一轮的覆盖层到此为止：收起它，把子进程画面放回来。
+            self._s.restore_context()
 
+    async def _turn(self, task: Any, painter: "_Painter") -> None:
+        """一轮任务的主体。覆盖层的生死由 :meth:`_one` 负责。"""
         label = "" if task is _CONTINUE else task
         if task is _CONTINUE:
             # 接着往下执行：窗口就是现有会话，什么都不新加。
@@ -1169,10 +1213,16 @@ class _Session:
             self._view.mark(screen)
             message = task_message(task, screen)
             pending = [Message("user", message)]
-        window = self._prepare_window(pending)
+        # 裁历史要把整条会话读出来算 token：几十毫秒到几百毫秒，放线程里，
+        # 免得这段 CPU 把 Ctrl-C 一起堵住。
+        window = await offload(self._prepare_window, pending)
         painter.compacting()
-        if await self._compact(window, pending):
-            window = self._prepare_window(pending)
+        try:
+            if await self._compact(window, pending):
+                window = await offload(self._prepare_window, pending)
+        except _CompactFailed as e:
+            # 压缩没做成不影响这一轮：退回硬截断，照常请求，事后再说明。
+            self._compact_error = str(e)
         if message is not None:
             self._submit(task, screen)
         painter.awaiting()
@@ -1183,16 +1233,16 @@ class _Session:
             system=SYSTEM_PROMPT,
             tools=self._tools,
             on_event=painter.on_event,
-            poll=self._view.poll,
+            poll=lambda timeout: poll_keys(self._s, timeout),
             on_message=self._on_message,
         )
         try:
             result = await agent.run(message, window.messages)
-        except _SessionEnded:
+        except SessionClosed:
             self._keep_partial(agent)
             self._finish_turn("aborted", "子进程退出", window, None)
             raise
-        except _Aborted as e:
+        except Aborted as e:
             self._keep_partial(agent)
             self._finish_turn("aborted", str(e), window, None)
             self._record(label, "", str(e))
@@ -1283,10 +1333,13 @@ class _Session:
         return True
 
     async def _summarize(self, messages: Any, previous: str = "") -> str:
-        """让模型把要丢掉的那段压成要点；失败返回空串（调用方退回截断）。
+        """让模型把要丢掉的那段压成要点。
 
         ``previous`` 是上一版摘要，有它就当底稿合并出新的一版。不合并的话，
         每次都要从原文重摘整段前缀，既贵，早先的结论也会在一次次复述里磨掉。
+
+        失败抛 :class:`_CompactFailed`，不返回空串：那样 /compact 会把一次
+        网络错误说成「无需压缩」，真正的原因就没人知道了。Ctrl-C 照常抛出。
         """
         body = _transcript(messages)
         if not body.strip():
@@ -1294,16 +1347,19 @@ class _Session:
         if previous:
             body = "上一版摘要：\n" + previous + "\n\n新增的对话：\n" + body
         request = [Message("system", COMPACT_PROMPT), Message("user", body)]
-        parts: list = []
         try:
-            async for chunk in self._provider.chat(self._model, request):
-                if chunk.kind is ChunkKind.TEXT:
-                    parts.append(chunk.text)
-                elif chunk.kind is ChunkKind.DONE:
-                    break
-        except Exception:  # noqa: BLE001 - 摘要失败不影响本轮
-            return ""
-        return "".join(parts).strip()
+            text, _calls, _usage = await stream_reply(
+                self._provider,
+                self._model,
+                request,
+                poll=lambda timeout: poll_keys(self._s, timeout),
+            )
+        except AgentCancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 - 网络、配置错误都要说出来
+            raise _CompactFailed("摘要请求失败：{}".format(e)) from e
+        return text.strip()
+
 
     def _on_message(self, message: Any, usage: Any) -> None:
         """Agent 的每条消息 → 一条事件；user 由本命令自己记，跳过。"""
@@ -1338,13 +1394,16 @@ class _Session:
         常规的一轮没什么可说：条数与预算看 ``/status`` 末行，耗时也能由
         前后两条 ``ts`` 相减得到；每轮都写，覆盖层就只剩噪声。
         """
+        if self._compact_error:
+            return self._compact_error
         if window is None:
             return ""
-        if window.dropped or window.note:
-            return window.describe()
+        if not (window.dropped or window.note or self._compacted_now):
+            return ""
+        note = window.describe()
         if self._compacted_now:
-            return "已压缩到 {} tok".format(window.used)
-        return ""
+            note = "已压缩；" + note
+        return note
 
     def _record(self, task: str, reply: str, note: str = "") -> None:
         """覆盖层用的两行；有会话时它就是事件流折出来的最后两条。
@@ -1481,7 +1540,7 @@ async def _choose_session(
     光标停在 ``current`` 上；``busy`` 只加一个 ``!`` 标记 —— 被另一个进程占着
     的会话仍然可以被选中，那是用户自己的决定。
     """
-    metas = keeper.list()
+    metas = await offload(keeper.list)
     if not metas:
         await services.show_message("还没有会话；直接运行 agent 会新开一条")
         return None
