@@ -141,18 +141,21 @@ def test_pick_returns_the_chosen_item() -> None:
     footer = services.frames[-1].split("\n")[-1]
     assert DEFAULT_FOOTER.startswith(footer[:9])
     assert all(frame.isascii() for frame in services.frames)
-    assert services.restored == 1
+    # 这一屏不还给子进程：调用方拿它顶替（见 page / pick 的 finally）。
+    assert services.restored == 0
 
 
 def test_pick_returns_none_when_cancelled_or_empty() -> None:
     services = FakeServices([_key(char="q")])
     assert asyncio.run(pick(services, ["a"], ["a"])) is None
-    assert services.restored == 1
+    # 这一屏不还给子进程：调用方拿它顶替（见 page / pick 的 finally）。
+    assert services.restored == 0
     assert asyncio.run(pick(FakeServices(), [], [])) is None
 
 
-def test_pick_restores_when_the_child_goes_away() -> None:
+def test_pick_leaves_the_screen_when_the_child_goes_away() -> None:
     services = FakeServices([])
     assert asyncio.run(pick(services, ["a"], ["a"])) is None
-    assert services.restored == 1
+    # 这一屏不还给子进程：调用方拿它顶替（见 page / pick 的 finally）。
+    assert services.restored == 0
     assert services.source is None

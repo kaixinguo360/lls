@@ -169,7 +169,7 @@ class FakeServices:
         self.restored += 1
 
 
-def test_page_draws_one_screen_and_restores() -> None:
+def test_page_draws_one_screen_and_leaves_it_to_the_caller() -> None:
     services = FakeServices([_key(control="up", raw=b"\x1b[A"), _key(char="q")])
     asyncio.run(page(services, ["line {}".format(i) for i in range(50)], "底栏"))
 
@@ -178,13 +178,15 @@ def test_page_draws_one_screen_and_restores() -> None:
     # 第一屏停在最后一行，按一次 ↑ 上移一行
     assert services.frames[0].split("\n")[0] == "line 43"
     assert services.frames[-1].split("\n")[0] == "line 42"
-    assert services.restored == 1
+    # 这一屏不还给子进程：调用方拿它顶替（见 page / pick 的 finally）。
+    assert services.restored == 0
 
 
-def test_page_restores_when_the_child_goes_away() -> None:
+def test_page_leaves_the_screen_when_the_child_goes_away() -> None:
     services = FakeServices([_key(control="down")])
     asyncio.run(page(services, ["a", "b"], "底栏"))
-    assert services.restored == 1
+    # 这一屏不还给子进程：调用方拿它顶替（见 page / pick 的 finally）。
+    assert services.restored == 0
 
 
 def test_page_resizes_with_the_window() -> None:

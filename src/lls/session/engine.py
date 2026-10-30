@@ -268,6 +268,10 @@ class Engine:
                 if self._pending_handler is not None:
                     self._current = self._pending_handler
                     self._pending_handler = None
+                    # 兜底：换了处理器，上一个处理器的浮层就不该还留在屏上。
+                    # 正常路径上它自己已经收过（read_line / restore），这里
+                    # 只在漏收时补一刀 —— restore 幂等，没有浮层时是空操作。
+                    self.restore()
         finally:
             await self._cleanup()
 
@@ -1037,10 +1041,11 @@ class Engine:
                 _draw()
         finally:
             # 覆盖层的内容只在这一行输入期间有意义（交接出去时除外）：
-            # 一并忘掉，免得之后改尺寸时又把它当成「当前覆盖层」重排回来。
+            # 这一行走完就按模型还给它占的行。走 _leave 时已经收过一次
+            # （restore 幂等，第二遍是空操作），这里兜的是子进程退出那条
+            # 不走 _leave 的路径 —— 光 clear() 会把占过的行留在屏上。
             if not handed_over:
-                self._overlay_source = None
-                self.overlay.clear()
+                self.restore()
 
     def record_history(
         self, value: str, history_id: str, *, history_scope: str = "global"

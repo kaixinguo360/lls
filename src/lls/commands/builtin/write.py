@@ -36,8 +36,10 @@ async def _write_flow(
         return CommandResult()
 
     s.write(body.encode(), enter=enter)
+    # 覆盖层在离开提示行时就收起了（见 Engine.read_line 的 finally），这里
+    # 不再收：再收一次只会多刷一帧子进程画面。让出一拍只是给子进程的回应
+    # 先上屏的机会，下一帧提示行才贴得到它新的光标上。
     await asyncio.sleep(0.1)
-    s.restore_context()
     return CommandResult()
 
 

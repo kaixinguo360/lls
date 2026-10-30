@@ -511,6 +511,29 @@ def test_no_handoff_gives_the_rows_back_like_before() -> None:
     assert engine.overlay.anchor is None
 
 
+def test_a_prompt_that_ends_with_the_child_gives_its_rows_back() -> None:
+    """子进程退出不走 _leave：占的行也得还回模型，不能留在屏上。
+
+    旧写法在 finally 里只 clear()，不把旧行记成待重铺，于是提示行那几行
+    要等下一次别的重画才会归位 —— 子进程已经走了，那一次可能永远不来。
+    """
+
+    async def run():
+        engine, screen, console = _loop_engine()
+        screen.feed(b"one\r\ntwo\r\nthree")
+        console.snapshot()            # 丢掉喂模型前的那一帧
+        engine._exit_event.set()      # 读键时子进程已不在
+        return engine, console, await engine.read_line("> ")
+
+    engine, console, line = asyncio.run(run())
+
+    assert line is None
+    assert engine.overlay.anchor is None
+    assert engine.overlay.lines == 0
+    rows = _emulate(bytes(console.data))
+    assert rows[2].rstrip() == "three"    # 提示行占的那一行还原成模型内容
+
+
 # ---- 哪些行会换成另一个覆盖层 ----
 
 def test_slash_lines_are_handed_over() -> None:

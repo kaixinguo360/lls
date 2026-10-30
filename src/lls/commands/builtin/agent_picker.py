@@ -263,5 +263,6 @@ async def pick(
                 services.draw_overlay(picker.frame())
     finally:
         reader.cancel()
+        # Same as pager: the caller replaces this screen; do not hand it
+        # back to the child on the way out.
         services.set_overlay_source(None)
-        services.restore_context()

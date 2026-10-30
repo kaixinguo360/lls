@@ -1202,8 +1202,6 @@ class _Session:
             self._finish_turn("error", note, window, None)
             self._record(label, "", note)
             return
-        finally:
-            self._s.restore_context()
 
         summary = result.summary if result.summary.strip() else "（无文本答复）"
         self._finish_turn("ok", "", window, result.usage)

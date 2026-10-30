@@ -254,5 +254,6 @@ async def page(services: Any, lines: Sequence[str], footer: str = "") -> None:
                 services.draw_overlay(pager.frame())
     finally:
         reader.cancel()
+        # 只撤回调：这一屏交给调用方顶替（下一次 read_line / draw_overlay
+        # 原地换掉它）。在这里还回子进程，会先闪一帧子进程画面。
         services.set_overlay_source(None)
-        services.restore_context()

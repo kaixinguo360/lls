@@ -277,7 +277,8 @@ async def _stream_payload(
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        s.restore_context()
+        # 状态行不收：紧接着的确认菜单就是同一层的新一帧（read_line 自己画
+        # 上去顶替），先还原一次只会露出子进程画面。
 
     calls = merger.calls()
     if not calls:
@@ -412,8 +413,8 @@ async def run_generate(s: Services, request: str | None = None) -> bool:
         if payload.isprintable():
             s.record_history(payload, "cmd")
         s.write(payload.encode(), enter=enter)
+        # 同 exec/input：确认菜单离开时覆盖层已收起，这里不再收一次。
         await asyncio.sleep(0.1)
-        s.restore_context()
 
         # 一轮到这里才是完整的：确认过、写过了。协议要求工具调用后必须紧跟
         # 一条 tool 回复，所以整轮一起进历史，中途失败不会留下半条消息。
