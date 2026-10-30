@@ -79,7 +79,13 @@ lls bash        # 指定命令
 - `read_terminal`：读取终端最近若干行，可等待输出静默；
 - `send_text`：写入文字，`enter=true` 时作为命令提交；
 - `send_keys`：具名按键（`enter`/`tab`/`esc`/方向键/`ctrl-c`/`f1`…/`alt-x`）；
-- `send_raw`：以 base64/hex 发送任意字节。
+- `send_raw`：以 base64/hex 发送任意字节；
+- `wait_for`：等到画面出现某段文字（正则，只在之后新出现的行里找）或安静下来，
+  慢命令用它一次等到，不必反复读屏；
+- `bash`：在另一个 shell 里跑一条命令，回退出码与完整输出（`cd` 留到下次
+  调用；它看不见用户终端，也驱动不了 TUI）；
+- `read_file`：按行号读磁盘上的文本文件；
+- `write_file`：直接写文件（`append=false` 整体替换），适合改配置、写脚本。
 
 空行或 `Ctrl-C` 清掉当前输入；`Esc`、`Ctrl-D` 或 `/exit` 退出回到透传。
 执行中按 `Ctrl-C` 只中止当前任务，会话继续。任务没有步数上限，随时可以

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 
 import pytest
 
@@ -1006,6 +1007,208 @@ def test_keys_typed_while_reading_are_kept_for_the_next_prompt(monkeypatch) -> N
     assert services.held == [b"x"]
 
 
+# ---- wait_for：把「等」变成一次调用 ----
+
+
+def test_wait_for_returns_when_a_new_line_matches(monkeypatch) -> None:
+    monkeypatch.setattr(agent_cmd, "READ_POLL", 0.001)
+    screen = FakeScreen(texts=["a\nb", "a\nb", "a\nb\ndone"])
+    tools, _ = _tools(FakeServices([], screen=screen))
+
+    result = asyncio.run(
+        tools["wait_for"].run({"pattern": "done", "timeout": 1, "lines": 10})
+    )
+
+    assert "<status>matched</status>" in result
+    assert "done" in result
+
+
+def test_wait_for_ignores_a_match_that_was_already_on_screen(monkeypatch) -> None:
+    """等「命令跑完」时，上一个提示符本来就在屏幕上，不能一进来就算数。"""
+    monkeypatch.setattr(agent_cmd, "READ_POLL", 0.001)
+    screen = FakeScreen(texts=["done\n$ ", "done\n$ "])
+    tools, _ = _tools(FakeServices([], screen=screen))
+
+    result = asyncio.run(
+        tools["wait_for"].run({"pattern": "done", "timeout": 0.05, "lines": 10})
+    )
+
+    assert "<status>timeout</status>" in result
+
+
+def test_wait_for_quiet_pattern_waits_for_the_screen_to_settle(monkeypatch) -> None:
+    monkeypatch.setattr(agent_cmd, "READ_POLL", 0.001)
+    monkeypatch.setattr(agent_cmd, "READ_QUIET", 0.005)
+    screen = FakeScreen(texts=["x", "x", "x", "x"])
+    tools, _ = _tools(FakeServices([], screen=screen))
+
+    result = asyncio.run(
+        tools["wait_for"].run({"pattern": "", "timeout": 1, "lines": 10})
+    )
+
+    assert "<status>quiet</status>" in result
+
+
+def test_wait_for_rejects_a_bad_pattern() -> None:
+    tools, _ = _tools(FakeServices([]))
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            tools["wait_for"].run({"pattern": "(", "timeout": 1, "lines": 10})
+        )
+
+
+# ---- read_file / write_file：屏幕之外的通道 ----
+
+
+def test_write_file_creates_directories_and_replaces(tmp_path) -> None:
+    tools, _ = _tools(FakeServices([]))
+    target = tmp_path / "a" / "b.txt"
+
+    result = asyncio.run(
+        tools["write_file"].run(
+            {"path": str(target), "content": "一\n二\n", "append": False}
+        )
+    )
+
+    assert target.read_text(encoding="utf-8") == "一\n二\n"
+    assert "已写入" in result
+
+
+def test_write_file_appends(tmp_path) -> None:
+    target = tmp_path / "log.txt"
+    target.write_text("a\n", encoding="utf-8")
+    tools, _ = _tools(FakeServices([]))
+
+    asyncio.run(
+        tools["write_file"].run(
+            {"path": str(target), "content": "b\n", "append": True}
+        )
+    )
+
+    assert target.read_text(encoding="utf-8") == "a\nb\n"
+
+
+def test_read_file_takes_a_line_slice(tmp_path) -> None:
+    target = tmp_path / "x.txt"
+    target.write_text("1\n2\n3\n4\n", encoding="utf-8")
+    tools, _ = _tools(FakeServices([]))
+
+    result = asyncio.run(
+        tools["read_file"].run(
+            {"path": str(target), "start_line": 2, "max_lines": 2}
+        )
+    )
+
+    assert "第 2-3 行，共 4 行" in result
+    assert "2\n3" in result
+
+
+def test_read_file_rejects_binary_and_missing_files(tmp_path) -> None:
+    binary = tmp_path / "b.bin"
+    binary.write_bytes(b"a\x00b")
+    tools, _ = _tools(FakeServices([]))
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            tools["read_file"].run(
+                {"path": str(binary), "start_line": 1, "max_lines": 10}
+            )
+        )
+    with pytest.raises(ValueError):
+        asyncio.run(
+            tools["read_file"].run(
+                {"path": str(tmp_path / "nope"), "start_line": 1, "max_lines": 10}
+            )
+        )
+
+
+# ---- bash：另开一个 shell ----
+
+posix_only = pytest.mark.skipif(os.name != "posix", reason="bash 工具依赖 POSIX")
+
+
+@pytest.fixture()
+def restore_shell_cwd():
+    before = agent_cmd._SHELL.cwd
+    yield
+    agent_cmd._SHELL.cwd = before
+
+
+@posix_only
+def test_bash_returns_exit_code_and_both_streams(tmp_path) -> None:
+    tools, _ = _tools(FakeServices([]))
+
+    result = asyncio.run(
+        tools["bash"].run(
+            {"command": "echo out; echo err >&2; exit 7", "cwd": str(tmp_path), "timeout": 10}
+        )
+    )
+
+    assert "退出码 7" in result
+    assert "out" in result
+    assert "err" in result
+
+
+@posix_only
+def test_bash_keeps_the_cwd_between_calls(tmp_path, restore_shell_cwd) -> None:
+    (tmp_path / "a").mkdir()
+    tools, _ = _tools(FakeServices([]))
+
+    asyncio.run(
+        tools["bash"].run({"command": "cd ..", "cwd": str(tmp_path / "a"), "timeout": 10})
+    )
+    result = asyncio.run(tools["bash"].run({"command": "pwd", "cwd": "", "timeout": 10}))
+
+    assert str(tmp_path) == agent_cmd._SHELL.cwd
+    assert str(tmp_path) in result
+
+
+@posix_only
+def test_bash_rejects_a_missing_cwd(tmp_path) -> None:
+    tools, _ = _tools(FakeServices([]))
+
+    result = asyncio.run(
+        tools["bash"].run(
+            {"command": "pwd", "cwd": str(tmp_path / "nope"), "timeout": 5}
+        )
+    )
+
+    assert "没有这个目录" in result
+
+
+@posix_only
+def test_bash_times_out_and_kills_the_group(tmp_path) -> None:
+    tools, _ = _tools(FakeServices([]))
+
+    result = asyncio.run(
+        tools["bash"].run({"command": "sleep 5", "cwd": str(tmp_path), "timeout": 0.2})
+    )
+
+    assert "已中止" in result
+
+
+@posix_only
+def test_bash_clips_a_huge_output(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(agent_cmd, "MAX_BASH_CHARS", 300)
+    tools, _ = _tools(FakeServices([]))
+
+    result = asyncio.run(
+        tools["bash"].run({"command": "seq 1 5000", "cwd": str(tmp_path), "timeout": 20})
+    )
+
+    assert "中间省略" in result
+    assert len(result) < 3000
+
+
+@posix_only
+def test_bash_rejects_an_empty_command(tmp_path) -> None:
+    tools, _ = _tools(FakeServices([]))
+
+    with pytest.raises(ValueError):
+        asyncio.run(tools["bash"].run({"command": "  ", "cwd": str(tmp_path), "timeout": 5}))
+
+
 # ---- /compact：先画帧、可中断 ----
 
 
@@ -1224,7 +1427,16 @@ def test_agent_tool_schemas_are_strict_and_required() -> None:
         for entry in agent_cmd._build_tools(services, view, agent_cmd._RepeatGuard())
     }
 
-    assert set(definitions) == {"read_terminal", "send_text", "send_keys", "send_raw"}
+    assert set(definitions) == {
+        "bash",
+        "read_terminal",
+        "wait_for",
+        "send_text",
+        "send_keys",
+        "send_raw",
+        "read_file",
+        "write_file",
+    }
     for tool in definitions.values():
         assert tool.strict is True
         assert tool.parameters["required"]
