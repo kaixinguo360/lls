@@ -17,6 +17,7 @@ from .store import (
     store,
 )
 from .window import (
+    CHARS_PER_TOKEN,
     COMPACT_TARGET_RATIO,
     COMPACT_TRIGGER_RATIO,
     Window,
@@ -27,6 +28,7 @@ from .window import (
 )
 
 __all__ = [
+    "CHARS_PER_TOKEN",
     "COMPACT_TARGET_RATIO",
     "COMPACT_TRIGGER_RATIO",
     "Event",

@@ -968,6 +968,109 @@ def test_slash_compact_stops_on_ctrl_c(tmp_path) -> None:
     session.close()
 
 
+# ---- 压缩：显式指令不被「划不划算」否决 ----
+
+
+def _summaries(count: int = 1) -> ScriptedProvider:
+    return ScriptedProvider(
+        [[Chunk(ChunkKind.TEXT, "摘要"), Chunk(ChunkKind.DONE)] for _ in range(count)]
+    )
+
+
+def _worker(services, session, store, rounds=1, budget=600):
+    return agent_cmd._Session(
+        services, _summaries(rounds), "m", session, budget=budget, keeper=store
+    )
+
+
+def test_force_compacts_though_little_would_be_dropped(tmp_path) -> None:
+    """用户按了 /compact 就是要压：不到 1024 tok 的划算判断不该否决这条指令。"""
+    store = SessionStore(root=tmp_path)
+    session = _seeded(store, turns=5, filler="细" * 300)
+    services = FakeServices([])
+    worker = _worker(services, session, store)
+
+    asyncio.run(worker._slash_compact(""))
+
+    assert services.messages[-1].startswith("已压缩")
+    assert [event for event in session.events() if event.type == "compact"]
+    session.close()
+
+
+def test_auto_compaction_still_leaves_a_short_history_alone(tmp_path) -> None:
+    """自动压缩照旧：没到水位就别动历史。"""
+    store = SessionStore(root=tmp_path)
+    session = _seeded(store, turns=5, filler="细" * 300)
+    services = FakeServices([])
+    # 预算给足：这点历史够不着 0.85 的水位，自动压缩不该发生。
+    worker = _worker(services, session, store, budget=4000)
+    window = worker._prepare_window(())
+
+    assert asyncio.run(worker._compact(window)) is False
+    # 不到水位就直说「历史还不够长」，不要拿 1024 tok 这条内部阈值当理由。
+    assert worker._skip_reason() == "无需压缩：历史还不够长"
+    assert not [event for event in session.events() if event.type == "compact"]
+    session.close()
+
+
+def test_a_second_compact_says_it_is_already_small(tmp_path) -> None:
+    """压到最小之后再说「历史还不够长」就是骗人：直说是已经压到最小。"""
+    store = SessionStore(root=tmp_path)
+    session = _seeded(store, turns=3, filler="细" * 200)
+    services = FakeServices([])
+    worker = _worker(services, session, store)
+
+    asyncio.run(worker._slash_compact(""))
+    asyncio.run(worker._slash_compact(""))
+
+    assert "已经压到最小" in services.messages[-1]
+    session.close()
+
+# ---- 压缩：摘要的输入与长度跟着被丢量走 ----
+
+
+def test_a_trimmed_transcript_keeps_the_earliest_words() -> None:
+    """只留尾巴会把最早的任务目标切掉；那段恰恰是路径和约定所在。"""
+    messages = [
+        agent_cmd.Message("user", "最早的任务：改 ~/x 里的解析"),
+        agent_cmd.Message("assistant", "中" * 5000),
+        agent_cmd.Message("user", "最后一句"),
+    ]
+
+    text = agent_cmd._transcript(messages, 600)
+
+    assert "最早的任务" in text
+    assert "最后一句" in text
+    assert "省略" in text
+    assert len(text) < 700
+
+
+def test_a_long_history_is_summarised_in_bounded_rounds(tmp_path) -> None:
+    """一次请求塞不下整段历史：分块滚动，块数有上限，剩下的明说省略。"""
+    store = SessionStore(root=tmp_path)
+    session = _seeded(store, turns=1)
+    services = FakeServices([])
+    worker = _worker(services, session, store, rounds=agent_cmd.COMPACT_MAX_ROUNDS)
+    messages = [agent_cmd.Message("user", "段" * 800) for _ in range(12)]
+
+    summary = asyncio.run(worker._summarize(messages, "", source=1000, chars=120))
+
+    assert len(worker._provider.requests) == agent_cmd.COMPACT_MAX_ROUNDS
+    assert "已省略" in summary
+    session.close()
+
+
+def test_the_summary_budget_follows_what_is_dropped() -> None:
+    """丢得多就该多读、多写；丢得少不必喂一个十万 token 的请求。"""
+    small_source, small_chars = agent_cmd._compact_limits(2_000)
+    big_source, big_chars = agent_cmd._compact_limits(80_000)
+
+    assert small_source == agent_cmd.COMPACT_SOURCE_CHARS_MIN
+    assert big_source > small_source
+    assert big_chars > small_chars
+    assert "1234 字" in agent_cmd.COMPACT_PROMPT.format(chars=1234)
+
+
 # ---- 重复调用提醒 ----
 
 

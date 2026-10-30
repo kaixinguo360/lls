@@ -25,7 +25,7 @@ import difflib
 import json
 import math
 import time
-from typing import Any, List
+from typing import Any, List, Tuple
 
 from lls.ai import (
     Agent,
@@ -40,13 +40,13 @@ from lls.ai import (
     stream_reply,
 )
 from lls.ai.sessions import (
+    CHARS_PER_TOKEN,
     COMPACT_TARGET_RATIO,
     COMPACT_TRIGGER_RATIO,
     SessionBusy,
     SessionError,
     default_budget,
     fit,
-    last_turns,
     store,
     task_message,
 )
@@ -79,8 +79,18 @@ _CANCEL = object()
 _EXIT = object()
 _CONTINUE = object()
 
-HISTORY_TURNS = 0         # 兜底的轮数上限；0 = 只按 token 预算裁
-COMPACT_SOURCE_CHARS = 40000  # 摘要请求里最多带多少字符原文
+# 摘要是一次网络请求：输入按「这次要丢掉多少」伸缩，不再是固定的四万字。
+# 丢掉十万 token 时只喂四万字原文，早期任务目标会悄悄漏掉；丢两千 token 时
+# 喂四十万字又纯属浪费，还容易被摘要请求自己的窗口卡住。
+COMPACT_SOURCE_CHARS_MIN = 40_000   # 输入下限（字符）：短历史够用
+COMPACT_SOURCE_CHARS_MAX = 400_000  # 输入上限（字符）：再长就分块滚动压缩
+COMPACT_INPUT_SLACK = 1.5           # 输入 ≈ 被丢原文的估算字节 × 这个倍数
+COMPACT_SOURCE_HEAD_RATIO = 0.2     # 其中留给最早原文的比例：任务锚点
+SUMMARY_TOKENS_RATIO = 0.15         # 摘要目标 ≈ 被丢 token 的 15%
+SUMMARY_TOKENS_MIN = 600            # ≈ 400 字：与旧的固定额度持平
+SUMMARY_TOKENS_MAX = 4000
+SUMMARY_CHARS_PER_TOKEN = 0.66      # 中文 1 字 ≈ 1.5 tok
+COMPACT_MAX_ROUNDS = 4              # 超长历史分块滚动压缩的轮数上限
 COMPACT_PROMPT = """\
 把下面这段对话压缩成要点，供后续接着做同一件事时使用。
 
@@ -90,7 +100,9 @@ COMPACT_PROMPT = """\
 给了「上一版摘要」时，以它为底稿合并新内容：仍然成立的事实留着，被新对话
 推翻或已经做完的删掉，不要重复叙述，也不要另起一份并列的清单。
 
-用中文、不超过 400 字、不要标题，直接给内容。"""
+用中文、不超过 {chars} 字、不要标题，直接给内容。"""
+#: 分块压缩时补在正文前的一句：否则模型会把这一块当成被压历史的全部。
+COMPACT_PART_NOTE = "下面这段是较长历史里的一块，其余部分会逐块并进来，不是全部。\n\n"
 TASK_LINES = 80           # 每轮任务消息里带多少行终端画面
 DEFAULT_READ_LINES = 120  # read_terminal 未给 lines 时的取值
 MAX_LINES = 2000
@@ -100,8 +112,9 @@ MAX_WAIT = 60.0           # read_terminal 的 wait_seconds 上限
 PAINT_INTERVAL = 0.1      # 状态覆盖层刷新间隔
 LOG_ENTRIES = 2           # 会话提示里显示最近几条
 ALL_TURNS = 10 ** 9       # /status 翻看时取全部轮次
-# 丢掉的上下文少于这个量就不值得压：摘要请求本身也要花 token，压掉的
-# 还没摘要贵，不如直接截断。
+# 自动压缩时，丢掉的上下文少于这个量就不值得压：摘要请求本身也要花 token，
+# 压掉的还没摘要贵，不如直接截断。用户显式 /compact 不受这一条限制 —— 那是
+# 明确的指令，只受「压了必须能前进」这一条实质约束。
 MIN_COMPACT_TOKENS = 1024
 MODEL_ROWS_KEPT = 6       # 会话提示上方至少留几行给子进程画面
 SUGGESTED_REPLY_LINES = 6 # 只用于提示词：建议的答复长度，显示层不再按行截断
@@ -789,6 +802,7 @@ class _Session:
         self._window = None
         self._compacted_now = False
         self._compact_error = ""
+        self._compact_skip = ""  # 上一次没压成的原因，见 _skip_reason
 
     async def run(self, first_task: str | None) -> bool:
         """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。
@@ -1006,9 +1020,7 @@ class _Session:
             await self._s.show_message("已压缩，当前窗口 {}".format(after.describe()))
         else:
             await self._s.show_message(
-                "无需压缩：历史还不够长（不到 {} tok），或已经压到最小；当前窗口 {}".format(
-                    MIN_COMPACT_TOKENS, after.describe()
-                )
+                "{}；当前窗口 {}".format(self._skip_reason(), after.describe())
             )
         return _CANCEL
 
@@ -1192,6 +1204,7 @@ class _Session:
         self._guard.reset()
         self._compacted_now = False
         self._compact_error = ""
+        self._compact_skip = ""
         try:
             await painter.drive(self._turn(task, painter))
         except Aborted as e:
@@ -1288,8 +1301,6 @@ class _Session:
         发出去，不把它算进去就会「裁完仍然超窗」。
         """
         messages = self._session.history() if self._session is not None else []
-        if HISTORY_TURNS > 0:
-            messages = last_turns(messages, HISTORY_TURNS)
         window = fit(messages, self._budget, pending)
         self._window = window
         return window
@@ -1305,12 +1316,26 @@ class _Session:
         ``target.keep_from`` 是消息列表里第一个被保留的下标，据此换算成「裁到
         哪一条事件」。摘要本身顶在头部，不能拿消息条数相减来算，否则每次都少
         裁一条，第二次以后 cutoff 不前进，压缩就只剩第一次生效。
+
+        ``force`` 是用户显式要求的（/compact）：不问水位，也不看
+        :data:`MIN_COMPACT_TOKENS` —— 那是自动触发时的划算判断，不该否决一条
+        明确的指令。留下的只有实质约束：压了必须能前进，顶部摘要不自压。
+
+        没压成时把原因记进 ``self._compact_skip``，由 :meth:`_skip_reason`
+        说成人话：用户按了 /compact，该知道是「已经压到最小」，还是
+        「能压的还不够多」。
         """
-        if self._session is None or window.budget <= 0:
+        self._compact_skip = ""
+        if self._session is None:
+            self._compact_skip = "empty"
+            return False
+        if window.budget <= 0:
+            self._compact_skip = "no-budget"
             return False
         if not force:
             trigger = int(window.budget * COMPACT_TRIGGER_RATIO)
             if not window.dropped and window.used < trigger:
+                self._compact_skip = "not-needed"
                 return False
         messages, marks = self._session.history_marks()
         # 顶部那条摘要不参与压缩：它既不该算进被压掉的区间，也不能被自己覆盖。
@@ -1318,35 +1343,87 @@ class _Session:
         target = fit(messages, int(window.budget * COMPACT_TARGET_RATIO), pending)
         cut = target.keep_from
         if cut <= pinned or cut > len(marks):
+            self._compact_skip = "no-progress"
             return False
-        if target.dropped_tokens < MIN_COMPACT_TOKENS:
+        if not force and target.dropped_tokens < MIN_COMPACT_TOKENS:
+            self._compact_skip = "too-small"
             return False
         cutoff = marks[cut - 1]
         if cutoff <= 0 or cutoff <= self._session.compacted_upto():
+            self._compact_skip = "no-progress"
             return False
         previous = messages[0].content[len(SUMMARY_PREFIX):] if pinned else ""
-        summary = await self._summarize(messages[pinned:cut], previous)
+        source, chars = _compact_limits(target.dropped_tokens)
+        summary = await self._summarize(messages[pinned:cut], previous, source, chars)
         if not summary:
+            self._compact_skip = "empty"
             return False
         self._session.append_compact(summary, cutoff)
         self._compacted_now = True
         return True
 
-    async def _summarize(self, messages: Any, previous: str = "") -> str:
+    def _skip_reason(self) -> str:
+        """这次 /compact 没压成，说清楚是哪一种。"""
+        reason = self._compact_skip
+        if reason == "no-progress":
+            return "无需压缩：已经压到最小，剩下的都是最近的对话"
+        if reason == "no-budget":
+            return "无需压缩：读不到这个模型的窗口预算，不知道该压到多少"
+        if reason == "too-small":
+            return "无需压缩：能压的还不到 {} tok，压了不如直接截断".format(
+                MIN_COMPACT_TOKENS
+            )
+        if reason == "empty":
+            return "无需压缩：没有可压缩的历史"
+        return "无需压缩：历史还不够长"
+
+    async def _summarize(
+        self,
+        messages: Any,
+        previous: str = "",
+        source: int = COMPACT_SOURCE_CHARS_MIN,
+        chars: int = int(SUMMARY_TOKENS_MIN * SUMMARY_CHARS_PER_TOKEN),
+    ) -> str:
         """让模型把要丢掉的那段压成要点。
 
         ``previous`` 是上一版摘要，有它就当底稿合并出新的一版。不合并的话，
         每次都要从原文重摘整段前缀，既贵，早先的结论也会在一次次复述里磨掉。
 
-        失败抛 :class:`_CompactFailed`，不返回空串：那样 /compact 会把一次
-        网络错误说成「无需压缩」，真正的原因就没人知道了。Ctrl-C 照常抛出。
+        ``source`` 是这一批消息最多带多少字原文、``chars`` 是摘要写多长，都由
+        :func:`_compact_limits` 按被丢量算出来。正文超过 ``source`` 就分块，
+        每块压出的摘要当下一块的底稿：只留尾巴的旧做法会切掉最早的任务目标，
+        而十万 token 的原文也塞不进一次请求。
+
+        所有块都成功才返回；任何一块失败都抛 :class:`_CompactFailed` —— 不
+        返回空串，那样 /compact 会把一次网络错误说成「无需压缩」，真正的原因
+        就没人知道了。事件流因此一条也不写，历史不动。Ctrl-C 照常抛出。
         """
-        body = _transcript(messages)
-        if not body.strip():
+        blocks = _blocks(messages, source)
+        if not blocks:
             return ""
-        if previous:
-            body = "上一版摘要：\n" + previous + "\n\n新增的对话：\n" + body
-        request = [Message("system", COMPACT_PROMPT), Message("user", body)]
+        summary = previous
+        for block in blocks[:COMPACT_MAX_ROUNDS]:
+            text = _transcript(block, source)
+            if not text.strip():
+                continue
+            # 分块时要说明「这不是全部」：否则模型会以为被压历史到此为止。
+            body = COMPACT_PART_NOTE if len(blocks) > 1 else ""
+            if summary:
+                body += "上一版摘要：\n" + summary + "\n\n新增的对话：\n" + text
+            else:
+                body += text
+            summary = await self._ask_summary(body, chars)
+        hidden = len(blocks) - COMPACT_MAX_ROUNDS
+        if hidden > 0:
+            summary += "\n（更早的 {} 块未展开，已省略）".format(hidden)
+        return summary.strip()
+
+    async def _ask_summary(self, body: str, chars: int) -> str:
+        """发一次摘要请求。可中断，失败一律算 ``_CompactFailed``。"""
+        request = [
+            Message("system", COMPACT_PROMPT.format(chars=chars)),
+            Message("user", body),
+        ]
         try:
             text, _calls, _usage = await stream_reply(
                 self._provider,
@@ -1441,21 +1518,73 @@ def _is_summary(message: Any) -> bool:
     return (message.content or "").startswith(SUMMARY_PREFIX)
 
 
-def _transcript(messages: Any) -> str:
+def _row(message: Any) -> str:
+    """一条消息摊成纯文本；认不出的角色给空串（不进摘要）。"""
+    if message.role == "user":
+        return "用户：" + (message.content or "")
+    if message.role == "assistant":
+        rows = []
+        if message.content:
+            rows.append("助手：" + message.content)
+        for call in message.tool_calls:
+            rows.append("调用 {} {}".format(call.name, call.arguments))
+        return "\n".join(rows)
+    if message.role == "tool":
+        return "结果：" + (message.content or "")
+    return ""
+
+
+def _clip_keep_ends(text: str, limit: int) -> str:
+    """超过 ``limit`` 就头保尾留地剪，中间那句写明省略了多少字。
+
+    只留尾巴会先切掉最早的原文 —— 那恰好是任务目标、路径、约定所在的位置，
+    而且是模型的稳定前缀；留着它比留着最后一句寒暄值钱。
+    """
+    if len(text) <= limit:
+        return text
+    head = int(limit * COMPACT_SOURCE_HEAD_RATIO)
+    tail = max(0, limit - head)
+    omitted = len(text) - head - tail
+    return "{}……（省略 {} 字）……\n{}".format(text[:head], omitted, text[-tail:])
+
+
+def _transcript(messages: Any, limit: int = COMPACT_SOURCE_CHARS_MIN) -> str:
     """把要被压缩掉的消息摊成纯文本，供摘要请求使用。"""
-    rows: list = []
+    text = "\n".join(row for row in (_row(m) for m in messages) if row)
+    return _clip_keep_ends(text, limit)
+
+
+def _blocks(messages: Any, limit: int) -> List[list]:
+    """按顺序分成若干块，每块摊成文本不超过 ``limit`` 字。
+
+    按消息切，不按字符切：一条 tool 结果被腰斩，摘要就只能读到半句话。
+    """
+    blocks: List[list] = []
+    current: list = []
+    size = 0
     for message in messages:
-        if message.role == "user":
-            rows.append("用户：" + (message.content or ""))
-        elif message.role == "assistant":
-            if message.content:
-                rows.append("助手：" + message.content)
-            for call in message.tool_calls:
-                rows.append("调用 {} {}".format(call.name, call.arguments))
-        elif message.role == "tool":
-            rows.append("结果：" + (message.content or ""))
-    text = "\n".join(rows)
-    return text[-COMPACT_SOURCE_CHARS:]
+        cost = len(_row(message)) + 1
+        if current and size + cost > limit:
+            blocks.append(current)
+            current, size = [], 0
+        current.append(message)
+        size += cost
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _compact_limits(dropped_tokens: int) -> Tuple[int, int]:
+    """这次压缩的输入上限（字符）与摘要目标（字），都按被丢量伸缩。
+
+    丢一千 token 时不必喂一个十万 token 的请求；丢十万 token 时也不该只喂
+    四万字 —— 那样摘出来的要点对最早的任务一无所知。
+    """
+    source = int(dropped_tokens * CHARS_PER_TOKEN * COMPACT_INPUT_SLACK)
+    source = max(COMPACT_SOURCE_CHARS_MIN, min(COMPACT_SOURCE_CHARS_MAX, source))
+    target = int(dropped_tokens * SUMMARY_TOKENS_RATIO)
+    target = max(SUMMARY_TOKENS_MIN, min(SUMMARY_TOKENS_MAX, target))
+    return source, max(120, int(target * SUMMARY_CHARS_PER_TOKEN))
 
 
 # ---- 命令 ----
