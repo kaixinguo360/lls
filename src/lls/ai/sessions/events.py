@@ -28,7 +28,8 @@ __all__ = [
 ]
 
 #: 事件类型。``session_start`` / ``turn_end`` / ``model_switch`` / ``fork``
-#: 是过程记录，不进上下文；``compact`` 替换某段区间。``screen`` 是某一轮
+#: 是过程记录，不进上下文；``compact`` 替换某段区间；``undo`` 把紧挨着的
+#: 前一段从视图里抹掉（原文仍在磁盘上）。``screen`` 是某一轮
 #: 随任务一起发出去的终端画面，由那条 ``user`` 的 ``screen`` 指过来 —— 它自己
 #: 不是消息，只是那条消息的一部分。
 EVENT_TYPES = frozenset(
@@ -40,6 +41,7 @@ EVENT_TYPES = frozenset(
         "tool",
         "turn_end",
         "compact",
+        "undo",
         "model_switch",
         "fork",
     }
@@ -91,6 +93,8 @@ class Event:
     size: int = 0
     # compact：摘要覆盖到哪一条 seq
     upto_seq: int = 0
+    # undo：丢掉 seq 在 (drop_from, 这条 undo 的 seq) 之间的事件
+    drop_from: int = 0
     # fork：来源会话
     parent_id: str = ""
 
@@ -105,7 +109,7 @@ _TEXT_FIELDS = (
     "blob",
     "parent_id",
 )
-_INT_FIELDS = ("screen", "size", "upto_seq")
+_INT_FIELDS = ("screen", "size", "upto_seq", "drop_from")
 
 
 def encode(event: Event) -> str:

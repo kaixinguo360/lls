@@ -861,3 +861,105 @@ def test_a_failed_summary_falls_back_to_a_hard_cut(monkeypatch, tmp_path) -> Non
     assert session.log()[-1][:2] == ("新任务", "新答复")
     assert session.last_turn_end().status == "ok"
     session.close()
+
+# ---- 撤销 ----
+
+
+def _plain_turns(keeper, turns: int = 3):
+    """几轮干净的历史：任务短，断言看得清是哪一轮。"""
+    session = keeper.create("stub", "m")
+    for index in range(turns):
+        session.append_user("旧任务 {}".format(index))
+        session.append_assistant("旧答复 {}".format(index))
+        session.append_turn_end("ok")
+    return session
+
+
+def test_undo_takes_back_the_last_turn_and_the_compaction_after_it(tmp_path) -> None:
+    """撤销锚在最后一条 user 上：这一轮之后写的压缩跟着一起失效。"""
+    keeper = SessionStore(root=tmp_path)
+    session = _plain_turns(keeper)
+    session.append_compact("摘要：之前在做旧任务", session.meta.last_seq)
+    assert session.compacted_upto() > 0
+
+    start, task = session.undo_point()
+    assert task == "旧任务 2"
+    session.append_undo(start - 1)
+
+    # 压缩写在被撤销的那一段里，历史回到压缩之前的样子。
+    assert session.compacted_upto() == 0
+    assert [entry[0] for entry in session.log()] == ["旧任务 0", "旧任务 1"]
+    assert all("旧任务 2" not in (m.content or "") for m in session.history())
+    # 原文还在磁盘上：撤销只改视图，事件一条不少。
+    assert any(
+        event.type == "user" and event.content == "旧任务 2"
+        for event in session.events()
+    )
+    assert session.meta.turns == 2
+    session.close()
+
+
+def test_undo_again_walks_one_more_turn_back(tmp_path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = _plain_turns(keeper)
+
+    for _ in range(2):
+        start, _ = session.undo_point()
+        session.append_undo(start - 1)
+
+    assert [entry[0] for entry in session.log()] == ["旧任务 0"]
+    assert session.meta.turns == 1
+    assert session.undo_point()[1] == "旧任务 0"
+    session.close()
+
+
+def test_a_turn_written_after_the_undo_is_visible(tmp_path) -> None:
+    """撤销之后的轮次在它后面：上界是那条 undo 的 seq，新事件照常算数。"""
+    keeper = SessionStore(root=tmp_path)
+    session = _plain_turns(keeper)
+    start, _ = session.undo_point()
+    session.append_undo(start - 1)
+
+    session.append_user("重打的任务")
+    session.append_assistant("新答复")
+    session.append_turn_end("ok")
+
+    assert [entry[0] for entry in session.log()] == ["旧任务 1", "重打的任务"]
+    assert session.meta.turns == 3
+    session.close()
+
+
+def test_undo_point_carries_the_screen_written_just_before_the_task(tmp_path) -> None:
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    screen = session.append_screen("面板")
+    session.append_user("任务", screen=screen.seq)
+
+    start, task = session.undo_point()
+
+    assert task == "任务"
+    assert start == screen.seq < session.meta.last_seq
+    session.close()
+
+
+def test_undo_takes_back_the_compaction_written_before_the_turn(tmp_path) -> None:
+    """自动压缩发生在提交任务之前：撤这一轮，摘要也得跟着退。"""
+    keeper = SessionStore(root=tmp_path)
+    session = _plain_turns(keeper)
+    session.append_compact("摘要：之前在做旧任务", session.meta.last_seq)
+    screen = session.append_screen("面板")
+    session.append_user("新任务", screen=screen.seq)
+    session.append_assistant("新答复")
+    session.append_turn_end("ok")
+    assert session.compacted_upto() > 0
+
+    start, task = session.undo_point()
+    assert task == "新任务"
+    session.append_undo(start - 1)
+
+    # 摘要和被它抹掉的两轮一起回来。
+    assert session.compacted_upto() == 0
+    assert [entry[0] for entry in session.log()] == ["旧任务 1", "旧任务 2"]
+    assert all("新任务" not in (message.content or "") for message in session.history())
+    assert session.meta.turns == 3
+    session.close()

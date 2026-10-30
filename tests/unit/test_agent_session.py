@@ -54,6 +54,7 @@ class FakeServices:
         self.written = []
         self.painted = []
         self.messages = []
+        self.values = []  # 每次读输入时输入区里预填着什么（/undo 回填原文）
         self._chars = []
         self.held = []
 
@@ -62,6 +63,7 @@ class FakeServices:
 
     async def read_line(self, prompt, **kwargs):
         self.prompts.append(prompt)
+        self.values.append(kwargs.get("value"))
         return self._answers.pop(0) if self._answers else None
 
     async def wait(self, timeout=None) -> None:
@@ -1198,3 +1200,81 @@ def test_progress_replaces_the_partial_call_with_the_finished_one() -> None:
     )
 
     assert 'send_text: {"text": "ls"}' in services.screen.painted[-1]
+
+
+# ---- /undo：撤销上一轮，把原文放回输入行 ----
+
+
+def test_slash_undo_takes_back_the_last_turn_and_retypes_it(
+    monkeypatch, tmp_path
+) -> None:
+    keeper = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复一")])
+
+    services, result = _session(
+        monkeypatch, provider, ["任务一", "/undo", "/exit"], keeper=keeper
+    )
+
+    session = keeper.current()
+    assert session is not None
+    # 那一轮从视图里没了：覆盖层、历史、轮次都不算它。
+    assert session.log() == []
+    assert session.history() == []
+    assert session.meta.turns == 0
+    # 原文还在事件流里，只是被抹掉了。
+    assert any(
+        event.type == "user" and event.content == "任务一"
+        for event in session.events()
+    )
+    assert "已撤销上一轮" in services.messages[-1]
+    # 原文放回输入行，且只回填一次：紧接着的下一次提示是空的。
+    assert services.values == ["", "", "任务一"]
+    assert result.handler == "default"
+    session.close()
+
+
+def test_slash_undo_says_so_when_there_is_nothing_to_take_back(monkeypatch) -> None:
+    _fresh_store(monkeypatch)
+
+    services, _ = _session(monkeypatch, ScriptedProvider([]), ["/undo", "/exit"])
+
+    assert "没有可以撤销的轮次" in services.messages[-1]
+    assert services.values == ["", ""]
+
+
+def test_undo_folds_a_multi_line_task_into_one_input_line(monkeypatch, tmp_path) -> None:
+    """输入行只有一行：多行原文折成一行放回，并说明折过。"""
+    keeper = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复")])
+
+    services, _ = _session(
+        monkeypatch, provider, ["任务一\n第二步", "/undo", "/exit"], keeper=keeper
+    )
+
+    assert services.values[-1] == "任务一 第二步"
+    assert "已折成一行" in services.messages[-1]
+
+
+def test_slash_undo_falls_back_to_the_memory_log() -> None:
+    """不存盘的模式没有事件流可撤：从内存那两行里取回原文。"""
+    services = FakeServices([])
+    worker = agent_cmd._Session(services, ScriptedProvider([]), "m", None)
+    worker._log = [("任务一", "答复一", "")]
+
+    result = asyncio.run(worker._slash_undo(""))
+
+    assert result is agent_cmd._CANCEL
+    assert worker._log == []
+    assert worker._retype == "任务一"
+    assert "已撤销上一轮" in services.messages[-1]
+
+
+def test_slash_undo_takes_no_arguments() -> None:
+    services = FakeServices([])
+    worker = agent_cmd._Session(services, ScriptedProvider([]), "m", None)
+    worker._log = [("任务一", "答复一", "")]
+
+    asyncio.run(worker._slash_undo("2"))
+
+    assert "用法：/undo" in services.messages[-1]
+    assert worker._log == [("任务一", "答复一", "")]

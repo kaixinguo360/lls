@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from ...edit import forget_session
 from ..types import Message, ToolCall
@@ -190,6 +190,17 @@ def _title_of(text: str) -> str:
     return flat[:TITLE_CHARS]
 
 
+def _dropped(seq: int, ranges: List[Tuple[int, int]]) -> bool:
+    """``seq`` 落在某次撤销抹掉的区间里吗：``drop_from < seq < undo.seq``。
+
+    undo 自己那条不在区间内（上界是开区间），所以它照样可读、可继续叠加。
+    """
+    for low, high in ranges:
+        if low < seq < high:
+            return True
+    return False
+
+
 class Session:
     """一条已打开的会话：持有事件文件的写句柄与排他锁。"""
 
@@ -207,6 +218,9 @@ class Session:
         self._events_fd = _open_append(path / EVENTS_NAME)
         self.last_error: Optional[str] = None
         self.bad_lines = 0
+        # 撤销抹掉的区间 ``(drop_from, undo 的 seq)``。懒加载：打开会话不必
+        # 扫全量，真要过滤时才读一次；写一条 undo 就地补上。
+        self._undos: Optional[List[Tuple[int, int]]] = None
         self._closed = False
 
     # ---- 元信息 ----
@@ -298,6 +312,34 @@ class Session:
     def append_compact(self, summary: str, upto_seq: int) -> None:
         self.append("compact", content=summary, upto_seq=upto_seq)
 
+    def append_undo(self, drop_from: int) -> Optional[Event]:
+        """抹掉 ``seq > drop_from`` 的那一段：撤销上一轮。
+
+        区间上界是这条 undo 自己的 seq，所以撤销之后重打一句再发出去的
+        轮次照常可见。落盘的原文一个字不删 —— 撤销只改视图（见
+        :meth:`visible_events`），将来要做 /redo 也还有数据。
+
+        一起减掉 ``meta.turns``：那一段里的 ``turn_end`` 已经不算数了，
+        ``/sessions`` 与 ``/status`` 上的轮次才和看到的历史对得上。
+        """
+        tail = (
+            self._from_end(lambda event: event.seq <= drop_from)
+            if drop_from > 0
+            else self.visible_events()
+        )
+        turns = sum(
+            1 for event in tail if event.seq > drop_from and event.type == "turn_end"
+        )
+        event = self.append("undo", drop_from=drop_from)
+        if event is None:
+            return None
+        if self._undos is not None:
+            self._undos.append((drop_from, event.seq))
+        if turns:
+            self.meta.turns = max(0, self.meta.turns - turns)
+            self._store.write_meta(self.meta)
+        return event
+
     def append_model_switch(self, model: str) -> None:
         self.append("model_switch", model=model)
 
@@ -322,11 +364,12 @@ class Session:
         上下文只由这一段派生，代价不随会话变长。摘要也可能写在它覆盖的位置
         之后（分叉就是这样），所以边界取 ``upto_seq`` 而不是摘要自己的 seq。
         """
+        ranges = self._undo_ranges()
         events: List[Event] = []
         compact: Optional[Event] = None
         for raw in reversed(self._lines()):
             event = self._decode(raw)
-            if event is None:
+            if event is None or _dropped(event.seq, ranges):
                 continue
             if compact is not None and event.seq <= compact.upto_seq:
                 break
@@ -335,6 +378,49 @@ class Session:
                 compact = event
         events.reverse()
         return events
+
+    def visible_events(self) -> List[Event]:
+        """除去被撤销的那几段之后的事件流（原文仍在磁盘上）。"""
+        ranges = self._undo_ranges()
+        if not ranges:
+            return self.events()
+        return [event for event in self.events() if not _dropped(event.seq, ranges)]
+
+    def undo_point(self) -> Optional[Tuple[int, str]]:
+        """上一轮从哪一条起、它说的什么；没有可撤销的轮次返回 ``None``。
+
+        锚在 ``user`` 上：它每轮必写（``/retry`` 续跑的那一段没有它，本来
+        就属于上一轮），要放回输入区的原文也只在它身上。``screen`` 由
+        ``_submit`` 紧随其前写下，正常就一起带走；号对不上（没留、是 0、
+        或比 user 还大）就只从 user 那一条起算，不跟着坏指针走。紧挨着它
+        之前写的 ``compact`` 也算这一轮的：自动压缩在提交任务之前发生，它
+        只覆盖更早的历史，撤了这一轮却留着摘要，旧轮次就再也回不来了。
+        """
+        tail = self._from_end(lambda event: event.type == "user")
+        if not tail or tail[0].type != "user":
+            return None
+        event = tail[0]
+        start = event.screen if 0 < event.screen < event.seq else event.seq
+        # 紧挨在这一轮之前的压缩也算它的：自动压缩发生在提交任务之前
+        # （见 ``_turn``），它覆盖的只是更早的历史，撤销就该一起退掉，
+        # 否则摘要还顶着，被它抹掉的旧轮次回不来。
+        while start > 1:
+            before = self._from_end(lambda item: item.seq < start)
+            # _from_end 交回来的是正序：命中的那条在最前面。
+            if not before or before[0].type != "compact":
+                break
+            start = before[0].seq
+        return start, event.content
+
+    def _undo_ranges(self) -> List[Tuple[int, int]]:
+        """撤销抹掉的区间 ``(drop_from, undo 的 seq)``，按写入顺序。"""
+        if self._undos is None:
+            self._undos = [
+                (event.drop_from, event.seq)
+                for event in self.events()
+                if event.type == "undo"
+            ]
+        return self._undos
 
     def _lines(self) -> List[bytes]:
         path = self.path / EVENTS_NAME
@@ -360,10 +446,11 @@ class Session:
         覆盖层要的那两行、上一次用量、最近一轮的收尾，都只在尾部：从后往前
         读，代价与真正要用的部分相当。
         """
+        ranges = self._undo_ranges()
         events: List[Event] = []
         for raw in reversed(self._lines()):
             event = self._decode(raw)
-            if event is None:
+            if event is None or _dropped(event.seq, ranges):
                 continue
             events.append(event)
             if stop(event):
@@ -687,9 +774,10 @@ class SessionStore:
         if source is None:
             raise SessionError("没有匹配 {!r} 的会话".format(spec))
         cutoff = at_seq if at_seq > 0 else source.meta.last_seq
+        # 分叉抄的是看得见的那一段：被 /undo 抹掉的轮次不该跟着走。
         keep = [
             event
-            for event in source.events()
+            for event in source.visible_events()
             if event.seq <= cutoff
             and event.type
             in ("user", "screen", "assistant", "tool", "turn_end", "compact")

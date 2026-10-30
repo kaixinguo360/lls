@@ -136,6 +136,7 @@ _SLASH_COMMANDS = (
     ("rm", (), "_slash_rm", "删除本会话（要确认），随后挑一条接着用"),
     ("archive", (), "_slash_archive", "归档本会话（要确认），随后挑一条接着用"),
     ("retry", (), "_slash_retry", "接着本轮继续执行：/retry"),
+    ("undo", (), "_slash_undo", "撤销上一轮，并把那句话放回输入行"),
     ("exit", ("quit", "q"), "_slash_exit", "退出 agent 模式"),
 )
 
@@ -792,6 +793,7 @@ class _Session:
         self._guard = _RepeatGuard()
         self._tools = _build_tools(services, self._view, self._guard)
         self._log = session.log(LOG_ENTRIES) if session is not None else []
+        self._retype = ""  # /undo 放回输入行的原文，读过一次就清空
         self._window = None
         self._compacted_now = False
         self._compact_error = ""
@@ -824,6 +826,7 @@ class _Session:
         line = await self._s.read_line(
             self._prompt_text(),
             include_last=False,
+            value=self._retype,
             cancel=_CANCEL,
             exit=_EXIT,
             history_id="agent_task",
@@ -831,6 +834,8 @@ class _Session:
             escape=_ESCAPE,
             handoff=_hands_over,
         )
+        # /undo 放回来的原文只回填这一次：读过就清空，下一行提示不再带着它。
+        self._retype = ""
         if line is None:
             return None
         if line is _CANCEL:
@@ -1178,6 +1183,39 @@ class _Session:
             await self._s.show_message("这一轮已经结束，没有可以接着执行的内容")
             return _CANCEL
         return _CONTINUE
+
+    async def _slash_undo(self, args: str) -> Any:
+        """``/undo``：抹掉上一轮，连同这一轮期间写下的压缩。
+
+        只动视图：事件文件里的原文一个字不删，所以连按几次就一直往前退。
+        撤掉的那句话放回输入行（``read_line`` 的 ``value``），改一改回车即可
+        重发。折成一行是输入行的限制 —— 它只有一行，硬塞换行会把覆盖层的高度
+        算错，反而摆不下。
+        """
+        if args.strip():
+            await self._s.show_message("用法：/undo（撤销上一轮，不需要参数）")
+            return _CANCEL
+        if self._session is None:
+            if not self._log:
+                await self._s.show_message("没有可以撤销的轮次")
+                return _CANCEL
+            task = self._log.pop()[0]
+        else:
+            point = self._session.undo_point()
+            if point is None:
+                await self._s.show_message("没有可以撤销的轮次")
+                return _CANCEL
+            start, task = point
+            self._session.append_undo(start - 1)
+            self._log = self._session.log(LOG_ENTRIES)
+        self._window = None
+        rows = [row.strip() for row in task.splitlines() if row.strip()]
+        self._retype = " ".join(rows)
+        note = "已撤销上一轮，那句话放回输入行（改完回车就重发）"
+        if len(rows) > 1:
+            note += "\n原来是 {} 行，已折成一行".format(len(rows))
+        await self._s.show_message(note)
+        return _CANCEL
 
     async def _one(self, task: Any) -> None:
         """执行一轮任务。异常路径只影响本轮，不影响已经写下的事件。
