@@ -31,9 +31,20 @@ from typing import Any
 
 import pyte
 
+from lls.ui.width import conservative_char_width
+
 from .model import BLANK, Cell, Cursor
 
 __all__ = ["PyteScreenModel"]
+
+# pyte 的宽度不是写死在 ``draw()`` 里，而是模块级全局 ``wcwidth``
+# （``screens.py`` 里 ``wcwidth = lru_cache(...)(_wcwidth)``，``draw`` 与
+# ``display`` 都是调用时按名字查）。改这个全局即可让它与排版共用一张表，
+# 不必改 vendor 里的第三方代码。
+#
+# 注入保守宽度而不是基础宽度：模型比物理终端宽，最坏是行尾空出一格；模型比
+# 终端窄，物理终端就会自己折行，后续的按行绝对定位整体错位。
+pyte.screens.wcwidth = conservative_char_width
 
 # 触发备用缓冲区切换的序列（进入 / 退出）。
 _SWITCH_ON = (b"\x1b[?1049h", b"\x1b[?1047h", b"\x1b[?47h")
