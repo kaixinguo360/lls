@@ -7,10 +7,12 @@ pyte 对 ``ESC [ ? … <final>`` 一律以 ``private=True`` 派发，而 ``Strea
 
 from __future__ import annotations
 
+import pyte.screens
 import pytest
 from pyte.streams import Stream
 
 from lls.term import PyteScreenModel
+from lls.ui.width import conservative_char_width
 
 # 实测会崩的私有序列，按 final 逐个覆盖
 PRIVATE_SEQUENCES = [
@@ -74,3 +76,17 @@ def test_ordinary_sequences_are_unaffected() -> None:
     model.feed(b"\x1b[2J\x1b[Hhello\x1b[1;31mred")
 
     assert model.row_text(0) == "hellored"
+
+
+def test_the_model_measures_with_the_same_table_as_the_layout() -> None:
+    """模型与排版共用一张宽度表：模糊宽度按两列算。
+
+    两边不一致时（模型按 wcwidth 算一列、排版按两列），覆盖层折出的行数与
+    模型里的对不上，按行绝对定位随即整体错位。
+    """
+    assert pyte.screens.wcwidth is conservative_char_width
+
+    model = PyteScreenModel(rows=10, columns=40)
+    model.feed("·中a".encode())
+
+    assert model.cursor.x == 5  # 2 + 2 + 1
