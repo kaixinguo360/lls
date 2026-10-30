@@ -7,7 +7,7 @@
 本文件守住新通路的三个不变量：
 
 1. 子进程字节与覆盖层补画落在**同一次** console.write 里（有覆盖层时）；
-2. 补画只认覆盖层自己的锚点，不看底部模型是不是已经追上；
+2. 补画前先让模型追上，覆盖层贴着子进程光标走，让出来的旧行还给模型；
 3. 洪流下积压**有界**，且任何一次喂模型都不再把整份积压一次塞进去。
 """
 
@@ -106,19 +106,21 @@ def test_passthrough_bytes_and_overlay_share_one_frame() -> None:
     assert b":abc" in console.writes[0], "输出到达后没有把覆盖层补回去"
 
 
-def test_overlay_repaints_at_its_own_anchor_not_the_lagging_model() -> None:
-    """补画只认覆盖层自己记的锚点：模型还落在后面也不影响。"""
+def test_repaint_follows_the_child_cursor_and_gives_the_old_row_back() -> None:
+    """补画不是原地再画一遍：子进程挪到哪，覆盖层跟到哪，旧行还给模型。"""
     engine, screen, console = _engine()
     engine.draw_overlay(":abc", 4)
     assert engine.overlay.anchor == 3
 
-    screen.cursor = SimpleNamespace(y=20, x=5)  # 模型已被后来的输出带走
+    screen.cursor = SimpleNamespace(y=20, x=5)  # 子进程写到了下面
     console.writes.clear()
 
     engine._repaint_overlay()
 
-    assert b"\x1b[4;1H" in console.writes[0]
-    assert b"\x1b[21;1H" not in console.writes[0]
+    out = console.writes[0]
+    assert engine.overlay.anchor == 20
+    assert b"\x1b[21;1H" in out   # 覆盖层画在新位置
+    assert b"\x1b[4;1H" in out    # 让出来的那一行按模型重铺
 
 
 def test_flush_backlog_bounds_what_it_feeds() -> None:

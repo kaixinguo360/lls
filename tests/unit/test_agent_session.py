@@ -18,6 +18,8 @@ from lls.commands import get_command, keys
 from lls.commands.builtin import agent as agent_cmd
 from lls.ui import strip_sgr
 from lls.ai.sessions import SessionStore
+from lls.ai.tools import RepeatReminder, ScreenView, builtin_tools
+from lls.ai.tools import shell as shell_mod
 from lls.ai.sessions.events import INTERRUPT_MARKER
 from lls.session.errors import Interrupted, SessionEnded
 from lls.tty import KeyNameError
@@ -848,9 +850,11 @@ def test_system_prompt_matches_the_display_budget() -> None:
 
 
 def _tools(services):
-    view = agent_cmd._TerminalView(services)
-    guard = agent_cmd._RepeatGuard()
-    tools = {entry.tool.name: entry for entry in agent_cmd._build_tools(services, view, guard)}
+    """装配好的工具箱：与 ``_Session`` 里那一份同一条装配路径。"""
+    view = ScreenView(services, services.wait)
+    box = builtin_tools(services, services.wait, view=view)
+    box.add_middleware(RepeatReminder())
+    tools = {entry.tool.name: entry for entry in box}
     return tools, view
 
 
@@ -1130,9 +1134,11 @@ posix_only = pytest.mark.skipif(os.name != "posix", reason="bash 工具依赖 PO
 
 @pytest.fixture()
 def restore_shell_cwd():
-    before = agent_cmd._SHELL.cwd
-    yield
-    agent_cmd._SHELL.cwd = before
+    """进程共用的那个 shell：`cd` 的位置会留到下一次调用，测完要还原。"""
+    shell = shell_mod.shared()
+    before = shell.cwd
+    yield shell
+    shell.cwd = before
 
 
 @posix_only
@@ -1160,7 +1166,7 @@ def test_bash_keeps_the_cwd_between_calls(tmp_path, restore_shell_cwd) -> None:
     )
     result = asyncio.run(tools["bash"].run({"command": "pwd", "cwd": "", "timeout": 10}))
 
-    assert str(tmp_path) == agent_cmd._SHELL.cwd
+    assert str(tmp_path) == restore_shell_cwd.cwd
     assert str(tmp_path) in result
 
 
@@ -1373,13 +1379,22 @@ def test_the_summary_budget_follows_what_is_dropped() -> None:
 # ---- 重复调用提醒 ----
 
 
+def _call(guard, name, args, result):
+    """把一次工具调用送进中间件，拿回它给出的观察文本。"""
+
+    async def inner():
+        return result
+
+    return asyncio.run(guard(name, args, inner))
+
+
 def test_repeat_guard_reminds_on_the_third_identical_call() -> None:
-    guard = agent_cmd._RepeatGuard()
+    guard = RepeatReminder()
     args = {"text": "ls", "enter": True}
 
-    first = guard.after("send_text", args, "r1")
-    second = guard.after("send_text", args, "r2")
-    third = guard.after("send_text", args, "r3")
+    first = _call(guard, "send_text", args, "r1")
+    second = _call(guard, "send_text", args, "r2")
+    third = _call(guard, "send_text", args, "r3")
 
     assert "提醒" not in first
     assert "提醒" not in second
@@ -1387,24 +1402,24 @@ def test_repeat_guard_reminds_on_the_third_identical_call() -> None:
 
 
 def test_repeat_guard_resets_for_a_new_task() -> None:
-    guard = agent_cmd._RepeatGuard()
+    guard = RepeatReminder()
     args = {"text": "ls"}
 
-    guard.after("send_text", args, "r")
-    guard.after("send_text", args, "r")
+    _call(guard, "send_text", args, "r")
+    _call(guard, "send_text", args, "r")
     guard.reset()
 
-    assert "提醒" not in guard.after("send_text", args, "r")
+    assert "提醒" not in _call(guard, "send_text", args, "r")
 
 
 def test_repeat_guard_resets_on_a_different_call() -> None:
-    guard = agent_cmd._RepeatGuard()
+    guard = RepeatReminder()
 
-    guard.after("send_text", {"text": "a"}, "r")
-    guard.after("send_text", {"text": "a"}, "r")
-    guard.after("send_text", {"text": "b"}, "r")
+    _call(guard, "send_text", {"text": "a"}, "r")
+    _call(guard, "send_text", {"text": "a"}, "r")
+    _call(guard, "send_text", {"text": "b"}, "r")
 
-    assert "提醒" not in guard.after("send_text", {"text": "b"}, "r")
+    assert "提醒" not in _call(guard, "send_text", {"text": "b"}, "r")
 
 
 # ---- 注册 ----
@@ -1421,11 +1436,8 @@ def test_agent_command_is_registered() -> None:
 
 def test_agent_tool_schemas_are_strict_and_required() -> None:
     services = FakeServices([])
-    view = agent_cmd._TerminalView(services)
-    definitions = {
-        entry.tool.name: entry.tool
-        for entry in agent_cmd._build_tools(services, view, agent_cmd._RepeatGuard())
-    }
+    box = builtin_tools(services, services.wait)
+    definitions = {entry.tool.name: entry.tool for entry in box}
 
     assert set(definitions) == {
         "bash",
