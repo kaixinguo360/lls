@@ -5,6 +5,7 @@
 * 光标左右移动、Home/End；
 * 退格（删光标前）、删除（删光标处）；
 * 历史上下翻：翻页前保存草稿，翻回末尾恢复草稿；
+* 历史可以分类：给了 ``history_kind`` 就只翻与当前这行同类的那几条；
 * 历史去重：连续相同的内容只留一份；
 * 光标按**簇**移动：退格、左右、删除都不切开一个 emoji 或组合字符。
 
@@ -15,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from lls.ui import cluster_end
 
 __all__ = ["LineEditor"]
@@ -23,11 +26,20 @@ __all__ = ["LineEditor"]
 class LineEditor:
     """单行编辑器，带历史。"""
 
-    def __init__(self, history: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        history: list[str] | None = None,
+        *,
+        history_kind: Callable[[str], object] | None = None,
+    ) -> None:
         self._history: list[str] = list(history or [])
+        # ↑ 只走同一类的旧行：分类由调用方给（任务与 /命令各走各的，见
+        # agent 的 _history_kind）。没给就是只有一类，行为和以前一样。
+        self.history_kind = history_kind
         self._text = ""
         self._cursor = 0
         self._hist_idx: int | None = None  # None = 正在编辑新行
+        self._hist_kind: object = ""        # 正在翻的那一类
         self._draft = ""                   # 浏览历史前保存的草稿
 
     # ---- 只读 ----
@@ -89,26 +101,40 @@ class LineEditor:
     def history_up(self) -> None:
         if not self._history:
             return
-        if self._hist_idx is None:
-            self._draft = self._text
-            self._hist_idx = len(self._history)
-        if self._hist_idx > 0:
-            self._hist_idx -= 1
-            self._text = self._history[self._hist_idx]
+        # 翻哪一类，看这一趟是从哪儿出发的：从草稿出发就按草稿分类（敲了
+        # ``/`` 才翻命令），已经在历史里就一路翻同一类，不会中途跳到另一类。
+        kind = self._hist_kind if self._hist_idx is not None else self._kind(self._text)
+        start = len(self._history) if self._hist_idx is None else self._hist_idx
+        for index in range(start - 1, -1, -1):
+            if self._kind(self._history[index]) != kind:
+                continue  # 另一类的旧行：跳过，↑ 不该把 /help 翻进任务里
+            if self._hist_idx is None:
+                self._draft = self._text
+            self._hist_kind = kind
+            self._hist_idx = index
+            self._text = self._history[index]
             self._cursor = len(self._text)
+            return
+        # 没有更早的同类：原地不动，草稿也不动。
 
     def history_down(self) -> None:
         if self._hist_idx is None:
             return
-        if self._hist_idx < len(self._history) - 1:
-            self._hist_idx += 1
-            self._text = self._history[self._hist_idx]
+        for index in range(self._hist_idx + 1, len(self._history)):
+            if self._kind(self._history[index]) != self._hist_kind:
+                continue
+            self._hist_idx = index
+            self._text = self._history[index]
             self._cursor = len(self._text)
-        else:
-            # 翻回末尾：恢复草稿
-            self._hist_idx = None
-            self._text = self._draft
-            self._cursor = len(self._text)
+            return
+        # 没有更晚的同类：翻回末尾，恢复草稿
+        self._hist_idx = None
+        self._text = self._draft
+        self._cursor = len(self._text)
+
+    def _kind(self, value: str) -> object:
+        """这一行属于哪一类历史：没给分类函数时只有一类。"""
+        return self.history_kind(value) if self.history_kind is not None else ""
 
     def _cluster_start(self, index: int) -> int:
         """``index`` 所在簇的起点：光标停在这里，不会落进一个字符的中间。"""

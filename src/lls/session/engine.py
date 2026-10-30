@@ -958,6 +958,7 @@ class Engine:
         exit: str | None = None,
         history_id: str = "_default",
         history_scope: str = "global",
+        history_kind: Callable[[str], object] | None = None,
         escape: Any = None,
         keep_history: bool = True,
         handoff: Callable[[Any], bool] | None = None,
@@ -983,6 +984,10 @@ class Engine:
         （换会话就换一份，会话删掉一起删）；``"global"`` 是本机共用的一份。
         ``keep_history`` 为 False 时，这一行不进入该 ``history_id`` 的历史。
 
+        ``history_kind`` 给这一行的历史分类：↑/↓ 只翻与当前这行同类的那几条
+        （任务是任务、命令是命令，见 agent 的 ``_history_kind``）。不给就是
+        只有一类，行为和以前一样。
+
         ``handoff(line)`` 为真表示返回值马上会换成另一个覆盖层（分页器、
         消息框等）。默认返回前按模型还原覆盖层占的行 —— 调用方可能接着
         跑子进程或透传，这是对的；但换覆盖层时那一次还原只会闪出一帧
@@ -991,6 +996,7 @@ class Engine:
         """
         session = history_scope == "session"
         editor = self._editor_for(history_id, session=session)
+        editor.history_kind = history_kind
         editor.reset(value)
 
         def _head() -> str:

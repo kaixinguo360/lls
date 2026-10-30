@@ -125,6 +125,7 @@ class Services:
         exit: str | None = None,
         history_id: str = "_default",
         history_scope: str = "global",
+        history_kind: Any = None,
         escape: Any = None,
         keep_history: bool = True,
         handoff: Any = None,
@@ -138,6 +139,8 @@ class Services:
         Esc 且 ``escape`` 非 None → ``escape``；子进程退出 → None。
 
         ``history_scope="session"`` 表示这份 ↑ 历史跟着当前 AI 会话走。
+        ``history_kind`` 给这一行的历史分类（任务与 /命令各翻各的）：
+        这只是个窄口子，引擎收什么这里就得列什么，漏一个就是运行时 TypeError。
         ``keep_history`` 为 False 时该行不进入此 ``history_id`` 的历史。
         ``handoff(line)`` 为真表示返回值马上会换成另一个覆盖层（翻看、
         消息框），此时不再还原屏幕，免得中间闪出子进程画面。
@@ -155,6 +158,7 @@ class Services:
             exit=exit,
             history_id=history_id,
             history_scope=history_scope,
+            history_kind=history_kind,
             escape=escape,
             keep_history=keep_history,
             handoff=handoff,

@@ -75,6 +75,63 @@ def test_history_up_down() -> None:
     assert e.text == "t"  # 恢复草稿
 
 
+def _kind(value: str) -> str:
+    """和 agent 一样的分法：行首一个斜杠是命令，其余是任务。"""
+    return "cmd" if value.startswith("/") else "task"
+
+
+def test_history_up_stays_in_its_own_kind() -> None:
+    """↑ 只翻同一类：命令史里翻不出任务，任务史里也翻不出 /help。"""
+    e = LineEditor(["/help", "任务一", "/compact", "任务二"], history_kind=_kind)
+    e.reset("")
+    e.history_up()
+    assert e.text == "任务二"
+    e.history_up()
+    assert e.text == "任务一"      # 中间的 /compact 被跳过
+    e.history_up()
+    assert e.text == "任务一"      # 没有更早的任务：停在这儿，不跳到命令
+    e.history_down()
+    assert e.text == "任务二"
+    e.history_down()
+    assert e.text == ""            # 翻回末尾：草稿还在
+
+    e.reset("/")
+    e.history_up()
+    assert e.text == "/compact"
+    e.history_up()
+    assert e.text == "/help"
+    e.history_up()
+    assert e.text == "/help"
+    e.history_down()
+    assert e.text == "/compact"
+    e.history_down()
+    assert e.text == "/"
+    assert e.history == ["/help", "任务一", "/compact", "任务二"]
+
+
+def test_history_kind_is_fixed_once_it_starts_scrolling() -> None:
+    """进了历史就一路翻同一类：中途改字也不再切到另一类去。"""
+    e = LineEditor(["/help", "任务一"], history_kind=_kind)
+    e.reset("")
+    e.history_up()
+    assert e.text == "任务一"
+    e.insert("改")
+    assert e.text == "任务一改"
+    e.history_up()
+    # 仍是任务那一趟：前面没有更早的任务，就停在改过的这一行，不跑去翻 /help。
+    assert e.text == "任务一改"
+
+
+def test_history_without_a_kind_scrolls_everything() -> None:
+    """不给分类函数：行为和以前一样，全部照翻。"""
+    e = LineEditor(["/help", "任务一"])
+    e.reset("")
+    e.history_up()
+    assert e.text == "任务一"
+    e.history_up()
+    assert e.text == "/help"
+
+
 def test_history_dedup() -> None:
     e = _ed()
     e.reset("")

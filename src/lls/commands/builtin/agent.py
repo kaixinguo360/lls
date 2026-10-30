@@ -854,6 +854,21 @@ def _parse(line: Any) -> "_Parsed":
     return _Parsed("command", text, name=method, args=rest.strip())
 
 
+def _is_command_line(text: str) -> bool:
+    """这一行回车是执行命令，而不是发给模型？
+
+    提示符换不换、↑ 翻哪一类历史，用的都是这一条：``//转义`` 与
+    ``/usr/bin/env`` 这类路径仍算任务，敲错的命令归命令 —— 改一个字母再
+    回车，本来就是翻命令的用处。
+    """
+    return _parse(text).kind in ("command", "unknown")
+
+
+def _history_kind(text: str) -> str:
+    """这一行属于哪一类历史：``/命令`` 与任务各存一份，↑ 各翻各的。"""
+    return "cmd" if _is_command_line(text) else "task"
+
+
 class _Session:
     """一个持续的 Agent 会话：多轮任务共享历史，每轮内部自动多步执行。
 
@@ -941,6 +956,7 @@ class _Session:
             exit=_EXIT,
             history_id="agent_task",
             history_scope="session",
+            history_kind=_history_kind,
             escape=_ESCAPE,
             handoff=_hands_over,
             on_edit=self._remember_draft,
@@ -1457,6 +1473,7 @@ class _Session:
                 exit=_EXIT,
                 history_id="agent_task",
                 history_scope="session",
+                history_kind=_history_kind,
                 escape=_ESCAPE,
                 handoff=keep,
                 tick=tick,
@@ -1848,8 +1865,7 @@ class _Session:
         提示符跟着换，敲下第一个字符就看出回车会执行命令、不会发给模型。
         执行中也不换：命令就是命令，不因这一轮还在跑就另起一个提示符。
         """
-        text = self._draft.lstrip()
-        if text.startswith("/") and not text.startswith("//"):
+        if _is_command_line(self._draft):
             return cmd_prompt
         return task_prompt
 

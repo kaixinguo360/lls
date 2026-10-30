@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 
 import pytest
@@ -1535,6 +1536,49 @@ def test_a_command_line_says_so_in_the_prompt() -> None:
     assert "(agent-cmd): " not in session._prompt_text()
 
 
+def test_history_up_tells_commands_from_tasks() -> None:
+    """↑ 的历史分两类：命令归命令，任务归任务；路径和 // 仍旧算任务。"""
+    session = agent_cmd._Session(FakeServices(), None, "model")
+    cases = {
+        "/s": ("cmd", agent_cmd.CMD_PROMPT),
+        "/status 现在": ("cmd", agent_cmd.CMD_PROMPT),
+        "/statsu": ("cmd", agent_cmd.CMD_PROMPT),  # 敲错的命令也归命令
+        "修一下 agent": ("task", agent_cmd.INPUT_PROMPT),
+        "//s": ("task", agent_cmd.INPUT_PROMPT),
+        "/usr/bin/env python3": ("task", agent_cmd.INPUT_PROMPT),
+    }
+    for text, (kind, prompt) in cases.items():
+        assert agent_cmd._history_kind(text) == kind, text
+        # 分类和提示符是同一套判据：提示符说这是命令，↑ 就翻命令。
+        session._draft = text
+        assert session._prompt_text().endswith(prompt), text
+
+
+def test_the_two_histories_never_mix() -> None:
+    """同一个输入行里，↑ 只翻自己那一类：命令不混进任务，反之亦然。"""
+    from lls.edit import LineEditor
+
+    editor = LineEditor(
+        ["/help", "任务一", "/compact", "任务二"],
+        history_kind=agent_cmd._history_kind,
+    )
+    editor.reset("")
+    editor.history_up()
+    assert editor.text == "任务二"
+    editor.history_up()
+    assert editor.text == "任务一"
+
+    editor.reset("/")
+    editor.history_up()
+    assert editor.text == "/compact"
+    editor.history_up()
+    assert editor.text == "/help"
+    editor.history_down()
+    assert editor.text == "/compact"
+    editor.history_down()
+    assert editor.text == "/"
+
+
 def test_a_command_typed_while_running_runs_at_once(monkeypatch) -> None:
     """执行中敲 /help：当场执行，不排到这一轮后面，也不会变成任务。"""
     provider = ScriptedProvider([_text("答复一")])
@@ -1583,3 +1627,17 @@ def test_the_child_going_away_during_a_turn_ends_the_turn_cleanly(
     statuses = [event.status for event in session.events() if event.type == "turn_end"]
     assert statuses == ["aborted"]
     session.close()
+
+
+def test_the_thin_service_lists_every_keyword_the_engine_takes() -> None:
+    """服务层是引擎的窄口子：引擎收的关键字这里得一个不少。
+
+    测试里的假服务用 ``**kwargs`` 照单全收，所以少列一个只在真终端里炸
+    （agent 传 ``history_kind``，服务层没这一项 → 一按回车就 TypeError）。
+    """
+    from lls.session.engine import Engine
+    from lls.session.services import Services
+
+    engine = set(inspect.signature(Engine.read_line).parameters) - {"self"}
+    thin = set(inspect.signature(Services.read_line).parameters) - {"self"}
+    assert engine == thin
