@@ -167,6 +167,10 @@ class Services:
         """把字节回填到输入队列（切换处理器时避免丢键）。"""
         self._engine.push_keys(data)
 
+    def keys_pending(self) -> bool:
+        """键盘上有没有已经到达、还没被取走的输入（不消费）。"""
+        return self._engine.keys_pending()
+
     def requeue_pending_keys(self) -> None:
         """把已解析但尚未消费的按键回填到输入队列。
 

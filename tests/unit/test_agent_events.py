@@ -35,7 +35,8 @@ class FakeServices:
         tick = kwargs.get("tick")
         if tick is not None:
             return await self._running_input(kwargs)
-        self.prompts.append(prompt)
+        # 提示串可以是函数（空闲提示也要跟着草稿换 (agent-cmd)）：记下现算的那一帧。
+        self.prompts.append(prompt() if callable(prompt) else prompt)
         return self._answers.pop(0) if self._answers else None
 
     async def _running_input(self, kwargs):
@@ -61,6 +62,10 @@ class FakeServices:
     async def read_key(self):
         await asyncio.sleep(0)
         return self._key or Key(control="escape", raw=b"\x1b")
+
+    def keys_pending(self) -> bool:
+        """这个假的键盘上什么都不敲：一直停在「等第一下按键」那一段。"""
+        return False
 
     def draw_overlay(self, text, cursor=None):
         self.painted.append(text)

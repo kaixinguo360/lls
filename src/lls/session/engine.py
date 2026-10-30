@@ -1126,6 +1126,14 @@ class Engine:
         if self._history is not None and value:
             self._history.append(history_id, value, session=session)
 
+    def keys_pending(self) -> bool:
+        """键盘上有没有已经到达、还没人取走的输入？不消费任何东西。
+
+        给「先按老样子、有人动手才换成输入行」那类界面用：它只想知道用户
+        动没动手，是哪个键、敲的是什么，都留给接手的那一屏按原顺序处理。
+        """
+        return bool(self._key_buf or self._held_keys or self._stdin_buf)
+
     def requeue_pending_keys(self) -> None:
         """把尚在键缓冲里的按键回填到输入队列。
 

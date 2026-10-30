@@ -65,7 +65,8 @@ class FakeServices:
         tick = kwargs.get("tick")
         if tick is not None:
             return await self._running_input(prompt, kwargs)
-        self.prompts.append(prompt)
+        # 提示串可以是函数（空闲提示也要跟着草稿换 (agent-cmd)）：记下现算的那一帧。
+        self.prompts.append(prompt() if callable(prompt) else prompt)
         self.values.append(kwargs.get("value"))
         return self._answers.pop(0) if self._answers else None
 
@@ -80,6 +81,11 @@ class FakeServices:
         on_edit = kwargs.get("on_edit")
         for _ in range(200000):
             frame = prompt() if callable(prompt) else prompt
+            if self.held:
+                # 等第一下按键时 ``wait`` 已经顺手指到的那几个：按到达的
+                # 顺序交给这个输入行，不能因为换了读法就丢掉。
+                self._chars[0:0] = self.held
+                self.held.clear()
             if not self.painted or self.painted[-1] != frame:
                 self.painted.append(frame)
             if self._chars:
@@ -102,6 +108,10 @@ class FakeServices:
             if control is not None:
                 return control
         raise AssertionError("执行中的输入行一直等不到这一轮结束")
+
+    def keys_pending(self) -> bool:
+        """键盘上有没有还没人接手的输入：等第一下按键的那一段靠它决定交棒。"""
+        return bool(self._chars or self.held)
 
     async def wait(self, timeout=None) -> None:
         """等一小段键盘：排在队里的那一段就是这时到达的输入。"""
@@ -139,6 +149,40 @@ class FakeServices:
 
     async def show_message(self, text) -> None:
         self.messages.append(text)
+
+
+class QuietFakeServices(FakeServices):
+    """键盘先静几格：那几格正是「用户还没按键」的默认长相。"""
+
+    def __init__(self, answers, *, quiet_ticks: int) -> None:
+        super().__init__(answers)
+        self._quiet = quiet_ticks
+
+    def keys_pending(self) -> bool:
+        return self._quiet == 0 and super().keys_pending()
+
+    async def wait(self, timeout=None) -> None:
+        if self._quiet:
+            self._quiet -= 1
+            await asyncio.sleep(0)
+            return
+        await super().wait(timeout)
+
+
+class SlowProvider:
+    """每片都真等一会儿：给「还没人按键」那几格留出时间。"""
+
+    id = "slow"
+
+    def __init__(self, rounds) -> None:
+        self.rounds = list(rounds)
+        self.requests = []
+
+    async def chat(self, model, messages, **kwargs):
+        self.requests.append({"messages": list(messages)})
+        for chunk in self.rounds.pop(0):
+            await asyncio.sleep(0.05)
+            yield chunk
 
 
 class FakeCatalog:
@@ -679,7 +723,7 @@ def test_painter_hangs_reasoning_after_the_phase() -> None:
 
     shown = painter.line
     assert "\n" not in shown
-    assert shown.startswith("({} 1) ".format(agent_cmd.RUNNING) + agent_cmd.REASONING)
+    assert shown.startswith("({} 1) ".format(agent_cmd.NAME) + agent_cmd.REASONING)
     assert shown.endswith("先看看目录")
 
 
@@ -701,7 +745,7 @@ def test_painter_drops_reasoning_when_an_action_takes_the_line() -> None:
     shown = painter.line
     assert "\n" not in shown
     assert "想一想" not in shown
-    assert shown.startswith("({} 1) calling bash".format(agent_cmd.RUNNING))
+    assert shown.startswith("({} 1) calling bash".format(agent_cmd.NAME))
 
 
 def test_painter_paints_a_phase_before_the_model_answers() -> None:
@@ -711,7 +755,7 @@ def test_painter_paints_a_phase_before_the_model_answers() -> None:
 
     painter.begin()
 
-    assert painter.line == "({}) preparing...".format(agent_cmd.RUNNING)
+    assert painter.line == "({}) preparing...".format(agent_cmd.NAME)
 
 
 def test_painter_says_what_it_is_doing_at_each_phase() -> None:
@@ -734,11 +778,11 @@ def test_painter_says_what_it_is_doing_at_each_phase() -> None:
     shown.append(painter.line)
 
     assert shown == [
-        "(agent running) preparing...",
-        "(agent running) compacting...",
-        "(agent running) awaiting reply...",
-        "(agent running) replying...",
-        "(agent running) replying...",      # 再来一段正文不再换相
+        "(agent) preparing...",
+        "(agent) compacting...",
+        "(agent) awaiting reply...",
+        "(agent) replying...",
+        "(agent) replying...",      # 再来一段正文不再换相
     ]
 
 
@@ -764,9 +808,9 @@ def test_painter_shows_a_call_and_how_long_it_took() -> None:
     shown.append(painter.line)
 
     assert shown[1].startswith(
-        '({} 2) calling read_terminal: {{"lines": 3}}'.format(agent_cmd.RUNNING)
+        '({} 2) calling read_terminal: {{"lines": 3}}'.format(agent_cmd.NAME)
     )
-    assert shown[2].startswith("({} 2) read_terminal done (".format(agent_cmd.RUNNING))
+    assert shown[2].startswith("({} 2) read_terminal done (".format(agent_cmd.NAME))
     assert shown[2].endswith("s)")
 
 
@@ -783,7 +827,7 @@ def test_painter_forgets_the_previous_step() -> None:
 
     painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=2))
 
-    assert painter.line == "({} 2) awaiting reply...".format(agent_cmd.RUNNING)
+    assert painter.line == "({} 2) awaiting reply...".format(agent_cmd.NAME)
 
 
 # ---- 提示词与显示预算一致 ----
@@ -989,7 +1033,7 @@ def test_slash_compact_paints_before_the_summary_arrives(tmp_path) -> None:
 
     asyncio.run(worker._slash_compact(""))
 
-    assert services.painted[0] == "({}) compacting...".format(agent_cmd.RUNNING)
+    assert services.painted[0] == "({}) compacting...".format(agent_cmd.NAME)
     assert services.messages[-1].startswith("已压缩")
     session.close()
 
@@ -1336,7 +1380,7 @@ def test_running_prompt_shows_the_task_status_and_the_queue() -> None:
     services = FakeServices([])
     session = agent_cmd._Session(services, ScriptedProvider([]), "m")
     session._log = [("上一轮", "旧答复", "")]
-    session._queue = ["/status", "下一句"]
+    session._queue = [agent_cmd._parse("/status"), agent_cmd._parse("下一句")]
     session._notice = "已排队，本轮结束后执行：/status"
     painter = agent_cmd._Painter(services)
     painter.begin()
@@ -1344,18 +1388,23 @@ def test_running_prompt_shows_the_task_status_and_the_queue() -> None:
     rows = session._running_text(painter, "正在跑的任务").split("\n")
 
     # 输入行的提示与初始态同族，只是说清楚这一轮还在跑。
-    assert rows[-1] == agent_cmd.RUNNING_PROMPT
+    assert rows[-1] == agent_cmd.QUEUE_PROMPT
     # 上方的历史行还在：和空闲提示长得一样，不用重新认屏幕。
     assert any("旧答复" in row for row in rows)
     # 在跑的那一行与落盘、与 /status 里的一字不差。
     assert agent_cmd.TASK_PREFIX + "正在跑的任务" in rows
-    assert any(row.startswith("({}) ".format(agent_cmd.RUNNING)) for row in rows)
+    assert any(row.startswith("({}) ".format(agent_cmd.NAME)) for row in rows)
     assert any("preparing..." in row for row in rows)
     # 排队的一行一条，编号看得见；斜杠命令要说明它不会发给模型。
     notes = [row for row in rows if row.startswith(agent_cmd.NOTE_PREFIX)]
     assert any("排队 1/2: /status" in row for row in notes)
     assert any("排队 2/2: 下一句" in row for row in notes)
     assert any("已排队" in row for row in notes)
+    # 命令不因忙碌换脸：执行中行首一个斜杠仍是 (agent-cmd)。
+    session._draft = "/s"
+    assert session._running_text(painter, "正在跑的任务").split("\n")[-1] == agent_cmd.CMD_PROMPT
+    session._draft = "s"
+    assert session._running_text(painter, "正在跑的任务").split("\n")[-1] == agent_cmd.QUEUE_PROMPT
 
 
 def test_a_line_typed_while_running_is_queued_for_the_next_turn(monkeypatch) -> None:
@@ -1371,7 +1420,34 @@ def test_a_line_typed_while_running_is_queued_for_the_next_turn(monkeypatch) -> 
     assert any("任务二" in (message.content or "") for message in sent)
     # 执行中画出去的那一屏：在跑的一行 + 运行态提示，都是输入行自己的。
     assert any("(agent) 任务一" in frame for frame in services.painted)
-    assert any(agent_cmd.RUNNING_PROMPT in frame for frame in services.painted)
+    assert any(agent_cmd.QUEUE_PROMPT in frame for frame in services.painted)
+    # 交上去输入行就空了：收起回单行，后面画的帧又只剩那一行状态。
+    frames = services.painted
+    last = max(i for i, frame in enumerate(frames) if agent_cmd.QUEUE_PROMPT in frame)
+    assert any(agent_cmd.QUEUE_PROMPT not in frame for frame in frames[last + 1:])
+
+
+def test_the_running_screen_stays_plain_until_the_first_key(monkeypatch) -> None:
+    """执行中先只有那一行状态；第一下按键之后才换成运行态输入行。"""
+    provider = SlowProvider([_text("答复一"), _text("答复二")])
+    services = QuietFakeServices(["任务一", "/exit"], quiet_ticks=3)
+    services.queue_chars("任务二".encode())
+    monkeypatch.setattr(agent_cmd, "default_catalog", lambda: FakeCatalog(provider))
+    _fresh_store(monkeypatch)
+
+    asyncio.run(agent_cmd.cmd_agent(services, None))
+
+    frames = services.painted
+    switched = next(
+        index for index, frame in enumerate(frames)
+        if agent_cmd.QUEUE_PROMPT in frame
+    )
+    # 按键之前画的是老样子：只有那一行状态，没有输入行。
+    assert switched >= 1
+    assert all(agent_cmd.QUEUE_PROMPT not in frame for frame in frames[:switched])
+    assert any(agent_cmd.NAME in frame for frame in frames[:switched])
+    # 按键才是交接点：它自己也不丢，照样排进队跑了一轮。
+    assert len(provider.requests) == 2
 
 
 def test_ctrl_c_while_running_keeps_the_draft_for_the_next_prompt(monkeypatch) -> None:
@@ -1402,11 +1478,88 @@ def test_a_slash_command_typed_while_running_is_queued_not_sent(
 
     assert len(provider.requests) == 1
     assert keeper.current().meta.title == "新标题"
-    assert any("已排队" in frame for frame in services.painted)
+    # 执行中那一行输入框出现过（提示语说明回车是排队）；交上去就收起。
+    assert any(agent_cmd.QUEUE_PROMPT in frame for frame in services.painted)
+
+
+def test_a_line_is_parsed_before_it_is_queued() -> None:
+    """排队放的是解释好的那一条：命令、别名、路径、// 当场就分好类。"""
+    parsed = agent_cmd._parse("/s")
+    assert parsed.kind == "command"
+    assert parsed.name == "_slash_status"
+    assert parsed.shown == "/s"
+    assert agent_cmd._parse("/help").name == "_slash_help"
+    assert agent_cmd._parse("/usr/bin/env").kind == "task"
+    assert agent_cmd._parse("//ls -l").text == "/ls -l"
+    assert agent_cmd._parse("/nope").kind == "unknown"
+    assert agent_cmd._parse("/exit").kind == "exit"
+    assert agent_cmd._parse("   ").kind == "skip"
+    assert agent_cmd._parse("跑个任务").text == "跑个任务"
+
+
+def test_the_expanded_screen_shows_what_is_queued(monkeypatch) -> None:
+    """排完队输入行空了会收起；再敲一个字，摊开的那一屏把队里的写出来。"""
+    provider = ScriptedProvider([_text("答复一")])
+
+    services, result = _session(
+        monkeypatch, provider, ["任务一", "/exit"], chars=["下一".encode(), "再"]
+    )
+
+    frames = services.painted
+    assert any("排队 1/1: 下一" in frame for frame in frames)
+
+
+def test_every_command_declares_what_it_does_while_a_turn_runs() -> None:
+    """执行中的处置必须一条不漏地写在 _SLASH_POLICY 里。
+
+    漏了也不报错，只是那条命令在忙时悄悄按「排到后面」处理 —— 加一条命令
+    就得想清楚它属于哪一档，所以拿测试把它钉住。
+    """
+    methods = set(item[2] for item in agent_cmd._SLASH_COMMANDS)
+    assert methods == set(agent_cmd._SLASH_POLICY)
+    assert set(agent_cmd._SLASH_POLICY.values()) <= {"now", "after", "idle", "abort"}
+
+
+def test_a_command_line_says_so_in_the_prompt() -> None:
+    """行首一个斜杠：提示符当场换成 (agent-cmd)，回车是执行命令。"""
+    session = agent_cmd._Session(FakeServices(), None, "model")
+
+    session._draft = ""
+    assert agent_cmd.INPUT_PROMPT in session._prompt_text()
+    session._draft = "/s"
+    assert "(agent-cmd): " in session._prompt_text()
+    # // 是转义：那一行仍旧交给模型，提示符不该换成命令的。
+    session._draft = "//s"
+    assert "(agent-cmd): " not in session._prompt_text()
+    session._draft = "s"
+    assert "(agent-cmd): " not in session._prompt_text()
+
+
+def test_a_command_typed_while_running_runs_at_once(monkeypatch) -> None:
+    """执行中敲 /help：当场执行，不排到这一轮后面，也不会变成任务。"""
+    provider = ScriptedProvider([_text("答复一")])
+
+    services, result = _session(
+        monkeypatch, provider, ["任务一", "/exit"], chars=[b"/help"]
+    )
+
+    assert any("会话内命令" in text for text in services.messages)
+    assert not any("排队" in frame for frame in services.painted)
+    assert len(provider.requests) == 1
+
+
+def test_a_command_that_would_step_on_the_turn_is_refused(monkeypatch) -> None:
+    """执行中 /undo：拒绝，并说清下一步是 Ctrl-C，不是默默排队。"""
+    provider = ScriptedProvider([_text("答复一")])
+
+    services, result = _session(monkeypatch, provider, ["任务一"], chars=[b"/undo"])
+
+    assert any("先 Ctrl-C" in text for text in services.messages)
+    assert len(provider.requests) == 1
 
 
 def test_exit_typed_while_running_leaves_after_this_turn(monkeypatch) -> None:
-    """执行中打 /exit：这一轮照常跑完，然后退出，不会中途把请求撕掉。"""
+    """执行中打 /exit：先让这一轮收尾（中断也只是放弃本轮），再退出。"""
     provider = ScriptedProvider([_text("答复一")])
 
     services, result = _session(monkeypatch, provider, ["任务一"], chars=[b"/exit"])
