@@ -594,12 +594,13 @@ def test_bold_reply_survives_line_width_limit() -> None:
 # ---- 思考预览：始终显示最新一段 ----
 
 
-def test_tail_line_keeps_the_end_of_a_long_text() -> None:
+def test_tail_line_hard_cuts_the_front_and_keeps_the_end() -> None:
     line = agent_cmd._tail_line("(t) ", "0123456789", 10)
 
-    assert line.startswith("(t) …")
+    assert line.startswith("(t) 6")
     assert line.endswith("6789")
-    assert agent_cmd._width(line) <= 10
+    assert "…" not in line
+    assert agent_cmd._width(line) <= 10 - agent_cmd.WIDTH_SLACK
 
 
 def test_tail_line_keeps_short_text_untouched() -> None:

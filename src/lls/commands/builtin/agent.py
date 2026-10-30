@@ -342,50 +342,40 @@ def _flat(text: str) -> str:
 
 
 def _clip(text: str, columns: int) -> str:
-    """按保守宽度截断到 ``columns`` 列，超出部分用省略号收尾。"""
+    """按保守宽度硬截断到 ``columns`` 列，不补省略号。"""
     if columns <= 0:
         return ""
     flat = _flat(text)
     if _width(flat) <= columns:
         return flat
 
-    marker = "…"
-    room = columns - conservative_char_width(marker)
-    if room <= 0:
-        return marker if _width(marker) <= columns else ""
-
     kept: list[str] = []
     used = 0
     for cluster in clusters(flat):
         width = conservative_char_width(cluster)
-        if used + width > room:
+        if used + width > columns:
             break
         kept.append(cluster)
         used += width
-    return "".join(kept) + marker
+    return "".join(kept)
 
 
 def _line(prefix: str, text: str, columns: int) -> str:
     """拼一条带前缀的单行，保证整行不超过终端宽度（超出截断末尾保留开头）。"""
-    room = max(1, columns - _width(prefix))
+    room = max(1, columns - _width(prefix) - WIDTH_SLACK)
     return prefix + _clip(text, room)
 
 
 def _tail_line(prefix: str, text: str, columns: int) -> str:
     """拼一条带前缀的单行，超宽时保留**末尾**。
 
-    思考流是持续追加的：读的人关心最新一段。按结尾截断（前面加省略号），
+    思考流是持续追加的：读的人关心最新一段。按结尾硬截断（不补省略号），
     预览才会随流式输出往前滚动，而不是停在最早那一段。
     """
-    room = max(1, columns - _width(prefix))
+    room = max(1, columns - _width(prefix) - WIDTH_SLACK)
     flat = _flat(text)
     if _width(flat) <= room:
         return prefix + flat
-
-    marker = "…"
-    room -= conservative_char_width(marker)
-    if room <= 0:
-        return prefix + marker
 
     kept: list[str] = []
     used = 0
@@ -395,7 +385,7 @@ def _tail_line(prefix: str, text: str, columns: int) -> str:
             break
         kept.append(cluster)
         used += width
-    return prefix + marker + "".join(reversed(kept))
+    return prefix + "".join(reversed(kept))
 
 
 def _reply_rows(text: str, columns: int, bold: bool = False) -> list[str]:
@@ -621,6 +611,9 @@ AWAITING = "awaiting reply..."  # 请求已发出，模型第一个字节还没�
 REPLYING = "replying..."        # 正文在流里
 REASONING = "reasoning..."      # 只有推理在流里，正文还没开始
 PLANNING = "planning a call..." # 工具调用的参数在流里，还没拼完
+
+# 单行留两列余量：比终端窄一点也不会折行。
+WIDTH_SLACK = 2
 
 # ---- 状态覆盖层 ----
 
