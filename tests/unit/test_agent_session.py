@@ -1007,14 +1007,14 @@ def test_auto_compaction_still_leaves_a_short_history_alone(tmp_path) -> None:
     window = worker._prepare_window(())
 
     assert asyncio.run(worker._compact(window)) is False
-    # 不到水位就直说「历史还不够长」，不要拿 1024 tok 这条内部阈值当理由。
-    assert worker._skip_reason() == "无需压缩：历史还不够长"
+    # 自动压缩的跳过是静默的：没人在这一刻问「为什么没压」，也就不必记原因。
+    assert worker._compact_skip == ""
     assert not [event for event in session.events() if event.type == "compact"]
     session.close()
 
 
 def test_a_second_compact_says_it_is_already_small(tmp_path) -> None:
-    """压到最小之后再说「历史还不够长」就是骗人：直说是已经压到最小。"""
+    """第二次 /compact：说清是上次压缩点之后没有新的历史，别拿阈值当理由。"""
     store = SessionStore(root=tmp_path)
     session = _seeded(store, turns=3, filler="细" * 200)
     services = FakeServices([])
@@ -1023,7 +1023,7 @@ def test_a_second_compact_says_it_is_already_small(tmp_path) -> None:
     asyncio.run(worker._slash_compact(""))
     asyncio.run(worker._slash_compact(""))
 
-    assert "已经压到最小" in services.messages[-1]
+    assert "上次压缩点之后没有新的历史" in services.messages[-1]
     session.close()
 
 # ---- 压缩：摘要的输入与长度跟着被丢量走 ----

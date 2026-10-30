@@ -102,7 +102,7 @@ COMPACT_PROMPT = """\
 
 用中文、不超过 {chars} 字、不要标题，直接给内容。"""
 #: 分块压缩时补在正文前的一句：否则模型会把这一块当成被压历史的全部。
-COMPACT_PART_NOTE = "下面这段是较长历史里的一块，其余部分会逐块并进来，不是全部。\n\n"
+COMPACT_PART_NOTE = "这是较长历史中的一段，其余部分会逐块并入，不是完整历史。\n\n"
 TASK_LINES = 80           # 每轮任务消息里带多少行终端画面
 DEFAULT_READ_LINES = 120  # read_terminal 未给 lines 时的取值
 MAX_LINES = 2000
@@ -1007,11 +1007,8 @@ class _Session:
         try:
             window = await offload(self._prepare_window, ())
             compressed = await painter.drive(self._compact(window, (), force=True))
-        except Aborted as e:
+        except (Aborted, _CompactFailed) as e:
             await self._s.show_message("{}，历史没有改动".format(e))
-            return _CANCEL
-        except _CompactFailed as e:
-            await self._s.show_message(str(e))
             return _CANCEL
         finally:
             self._s.restore_context()
@@ -1321,13 +1318,12 @@ class _Session:
         :data:`MIN_COMPACT_TOKENS` —— 那是自动触发时的划算判断，不该否决一条
         明确的指令。留下的只有实质约束：压了必须能前进，顶部摘要不自压。
 
-        没压成时把原因记进 ``self._compact_skip``，由 :meth:`_skip_reason`
-        说成人话：用户按了 /compact，该知道是「已经压到最小」，还是
-        「能压的还不够多」。
+        只有 ``force`` 才会向用户交代结果，所以也只有这条路径记原因
+        （``self._compact_skip``）：自动压缩的每次跳过都只是一次静默的否决，
+        没人会问「为什么没压」。
         """
         self._compact_skip = ""
         if self._session is None:
-            self._compact_skip = "empty"
             return False
         if window.budget <= 0:
             self._compact_skip = "no-budget"
@@ -1335,7 +1331,6 @@ class _Session:
         if not force:
             trigger = int(window.budget * COMPACT_TRIGGER_RATIO)
             if not window.dropped and window.used < trigger:
-                self._compact_skip = "not-needed"
                 return False
         messages, marks = self._session.history_marks()
         # 顶部那条摘要不参与压缩：它既不该算进被压掉的区间，也不能被自己覆盖。
@@ -1346,7 +1341,6 @@ class _Session:
             self._compact_skip = "no-progress"
             return False
         if not force and target.dropped_tokens < MIN_COMPACT_TOKENS:
-            self._compact_skip = "too-small"
             return False
         cutoff = marks[cut - 1]
         if cutoff <= 0 or cutoff <= self._session.compacted_upto():
@@ -1355,27 +1349,17 @@ class _Session:
         previous = messages[0].content[len(SUMMARY_PREFIX):] if pinned else ""
         source, chars = _compact_limits(target.dropped_tokens)
         summary = await self._summarize(messages[pinned:cut], previous, source, chars)
-        if not summary:
-            self._compact_skip = "empty"
-            return False
         self._session.append_compact(summary, cutoff)
         self._compacted_now = True
         return True
 
     def _skip_reason(self) -> str:
-        """这次 /compact 没压成，说清楚是哪一种。"""
-        reason = self._compact_skip
-        if reason == "no-progress":
-            return "无需压缩：已经压到最小，剩下的都是最近的对话"
-        if reason == "no-budget":
-            return "无需压缩：读不到这个模型的窗口预算，不知道该压到多少"
-        if reason == "too-small":
-            return "无需压缩：能压的还不到 {} tok，压了不如直接截断".format(
-                MIN_COMPACT_TOKENS
-            )
-        if reason == "empty":
-            return "无需压缩：没有可压缩的历史"
-        return "无需压缩：历史还不够长"
+        """这次 /compact 没压成，给一句实话：是没得可压，还是不知道压到哪。"""
+        if self._compact_skip == "no-budget":
+            return "无需压缩：未知该模型的上下文窗口大小"
+        if self._compact_skip == "no-progress":
+            return "无需压缩：上次压缩点之后没有新的历史"
+        return "无需压缩：没有可压缩的历史"
 
     async def _summarize(
         self,
@@ -1400,7 +1384,7 @@ class _Session:
         """
         blocks = _blocks(messages, source)
         if not blocks:
-            return ""
+            raise _CompactFailed("没有可摘要的内容")
         summary = previous
         for block in blocks[:COMPACT_MAX_ROUNDS]:
             text = _transcript(block, source)
@@ -1416,6 +1400,9 @@ class _Session:
         hidden = len(blocks) - COMPACT_MAX_ROUNDS
         if hidden > 0:
             summary += "\n（更早的 {} 块未展开，已省略）".format(hidden)
+        # 空摘要写进事件流，重放时就只剩一个光秃秃的前缀：宁可报失败。
+        if not summary.strip():
+            raise _CompactFailed("摘要请求没有返回内容")
         return summary.strip()
 
     async def _ask_summary(self, body: str, chars: int) -> str:
@@ -1434,7 +1421,7 @@ class _Session:
         except AgentCancelled:
             raise
         except Exception as e:  # noqa: BLE001 - 网络、配置错误都要说出来
-            raise _CompactFailed("摘要请求失败：{}".format(e)) from e
+            raise _CompactFailed("摘要请求失败（{}）".format(e)) from e
         return text.strip()
 
 
