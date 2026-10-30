@@ -11,6 +11,7 @@ from .width import (
     cluster_end,
     clusters,
     conservative_char_width,
+    fit_width,
     strip_sgr,
     text_width,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "cluster_end",
     "clusters",
     "conservative_char_width",
+    "fit_width",
     "overlay_anchor",
     "render_row_cells",
     "strip_sgr",

@@ -348,13 +348,24 @@ def test_a_tall_message_stops_at_the_bottom_of_the_screen() -> None:
 
 
 def test_message_overlay_owns_the_physical_cursor() -> None:
-    """消息框不指光标位置，物理光标仍归它：落在框内写完的地方。"""
+    """消息框不指光标位置，物理光标仍归它：落在框内写完的地方。
+
+    定位方式不是「CUP 到一个算出来的列号」（``CUP 2;4`` 那一列是猜的，模糊
+    宽度、字体一变就偏），而是回到该行行首把内容重写一遍，让终端把光标推到
+    位置上。所以输出里是 ``CUP 2;1`` 加 ``err``。
+    """
     engine, screen, console = _overlay_engine(rows=8, columns=20)
     screen.feed(b"one\r\ntwo")
     console.snapshot()
     engine.draw_overlay("err")
 
-    assert b"\x1b[2;4H" in console.snapshot()
+    out = console.snapshot()
+    assert b"\x1b[2;1Herr" in out
+    assert b"\x1b[2;4H" not in out
+
+    painted = pyte.Screen(20, 8)
+    pyte.ByteStream(painted).feed(out)
+    assert (painted.cursor.y, painted.cursor.x) == (1, 3)
 
 
 # ---- 全屏程序（备用屏）：与主屏同一套行为 ----
@@ -647,3 +658,67 @@ def test_a_frame_is_written_between_sync_markers() -> None:
         out.write(b"b")
 
     assert console.snapshot() == b"\x1b[?2026hab\x1b[?2026l"
+
+
+# ---- 宽度只用来防溢出，光标定位不用列号 ----
+
+def test_the_width_table_follows_east_asian_width() -> None:
+    """宽度直接来自 ``unicodedata``：W/F 两列、N/Na/H 一列、模糊按两列。
+
+    旧表抄的是 pyte 的粗区间，把两千多个码点算成两列（``10FC-10FF``、
+    ``2B0E-2E4F``、``A4D0-A62B``…），又把 ``231A``/``26A1`` 这类 emoji 漏成
+    一列 —— 提示行里只要出现一个这样的字符，模型的列号就和真实列差一列。
+    """
+    for code in (0x10FC, 0x2B0E, 0x2C60, 0xA4D0, 0x4E00):
+        expected = 2 if code == 0x4E00 else 1
+        assert char_width(chr(code)) == expected, hex(code)
+    for code in (0x231A, 0x26A1, 0x4E2D, 0x1F600):
+        assert char_width(chr(code)) == 2, hex(code)
+
+
+def test_ambiguous_width_is_the_fitting_side() -> None:
+    """模糊宽度按两列：宁可少放一个字，也不让一行越过列宽。"""
+    assert text_width("…") == 2
+    assert text_width("①“”±") == 8
+
+
+def test_overlay_cursor_position_is_the_rows_prefix() -> None:
+    """插入点用「行号 + 这一行插入点之前的格」表示，不给列号。"""
+    ov = Overlay(rows=6, columns=20)
+    ov.set("err\nboom", cursor=6)
+
+    spot = ov.cursor_position()
+    assert spot is not None
+    row, prefix = spot
+    assert row == ov.anchor + 1
+    assert "".join(c.data for c in prefix) == "bo"
+
+
+def test_cursor_lands_where_the_terminal_draws_it() -> None:
+    """终端把「…」画一列、模型当两列：光标仍落在终端自己的插入点上。"""
+    engine, _screen, console = _overlay_engine(rows=4, columns=20)
+    engine.draw_overlay("…ab", cursor=2)
+    out = console.snapshot()
+
+    # 回到行首重写前缀，而不是 CUP 到一个算出来的列（那列是 4）
+    replay = b"\x1b[1;1H" + "…a".encode() + b"\x1b[?2026l"
+    assert replay in out
+    assert b"\x1b[1;4H" not in out
+
+    painted = pyte.Screen(20, 4)
+    wide = pyte.screens.wcwidth
+    pyte.screens.wcwidth = lambda char: 1      # 这个终端把模糊宽度画成一列
+    try:
+        pyte.ByteStream(painted).feed(out)
+    finally:
+        pyte.screens.wcwidth = wide
+    assert (painted.cursor.y, painted.cursor.x) == (0, 2)
+
+
+def test_prefix_replay_keeps_trailing_blanks() -> None:
+    """插入点前面是空格：那些空格必须写出去，它们是光标推进量的一部分。"""
+    engine, _screen, console = _overlay_engine(rows=4, columns=20)
+    engine.draw_overlay("> a  ", cursor=5)
+
+    replay = b"\x1b[1;1H" + "> a  ".encode() + b"\x1b[?2026l"
+    assert replay in console.snapshot()

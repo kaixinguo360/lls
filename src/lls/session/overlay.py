@@ -63,10 +63,29 @@ class Overlay:
         return tuple(self._model.row_cells(row))
 
     def cursor(self) -> Cursor | None:
-        """把物理光标放到哪。浮层是画面最上面的一层，光标归它。"""
+        """插入点在模型里的位置。浮层是画面最上面的一层，光标归它。
+
+        这里的 ``x`` 是按我们的宽度表算出来的列号，**只表示模型内部的位置**，
+        不能拿去定位物理光标：模糊宽度、字体、终端设置都会让真实列数与之不
+        同（见 :mod:`lls.ui.width`）。定位请用 :meth:`cursor_position`。
+        """
         if not self.visible or self._cursor is None:
             return None
         return Cursor(x=self._cursor.x, y=min(self.anchor + self._cursor.y, self._rows - 1))
+
+    def cursor_position(self) -> tuple[int, tuple[Cell, ...]] | None:
+        """插入点所在的行，以及那一行**插入点之前**的格。
+
+        给物理光标的定位用：先 ``CUP`` 到该行第 1 列，再把这些格原样重写一
+        遍，光标就被终端推到了插入点。不返回列号是故意的 —— 一个字占几列终
+        端说了算，算出来的列号在某些终端上必然偏一两列，越是模糊宽度的字符
+        偏得越多。重写同一串字节，终端画到哪里、光标就落在哪里。
+        """
+        if not self.visible or self._cursor is None:
+            return None
+        row = min(self.anchor + self._cursor.y, self._rows - 1)
+        prefix = tuple(self._model.row_cells(self._cursor.y))[: self._cursor.x]
+        return row, prefix
 
     # ---- 变更 ----
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lls.edit import LineEditor, render_prompt_line
+from lls.edit import LineEditor
 from lls.ui import text_width
 
 
@@ -92,23 +92,44 @@ def test_wide_char_cursor_width() -> None:
     assert text_width("中") == 2
     assert text_width("ab中") == 4
 
+# ---- 光标以簇为单位：不切开一个 emoji 或组合字符 ----
+#
+# 光标落进簇中间时，模型按半截文本量列、终端按完整字形画，两边对不上 ——
 
-def test_render_prompt_line_highlight() -> None:
+
+def test_backspace_removes_a_whole_cluster() -> None:
     e = _ed()
-    for c in "ab":
+    for c in "a\u2764\ufe0f":
         e.insert(c)
-    display, col = render_prompt_line("> ", e)
-    # 光标在行尾（x=2），高亮一个空格
-    assert "\x1b[7m \x1b[0m" in display
-    # 列号 = prompt(2) + line(2) = 4
-    assert col == 4
+
+    e.backspace()
+
+    assert e.text == "a"     # 「心 + VS16」整簇删掉，不留孤零零的 VS16
+    assert e.cursor == 1
+    e.backspace()
+    assert e.text == ""
 
 
-def test_render_prompt_line_mid_cursor() -> None:
+def test_delete_removes_a_whole_cluster() -> None:
     e = _ed()
-    for c in "abc":
+    for c in "\U0001f468\u200d\U0001f469\u200d\U0001f467!":
         e.insert(c)
-    e.left()  # 光标在 b 处（x=2）
-    display, col = render_prompt_line("> ", e)
-    assert "\x1b[7mc\x1b[0m" in display  # 高亮 c（光标处字符）
-    assert col == 4  # prompt(2) + "ab"(2)
+    e.home()
+
+    e.delete()
+
+    assert e.text == "!"     # 一家三口整簇删掉，不散架
+    assert e.cursor == 0
+
+
+def test_left_and_right_step_over_whole_clusters() -> None:
+    e = _ed()
+    for c in "e\u0301x":
+        e.insert(c)          # e + 组合符、x
+
+    e.left()
+    assert e.cursor == 2     # 跳过 x，落到「é」之后
+    e.left()
+    assert e.cursor == 0     # 「é」是一簇，一步跨过去
+    e.right()
+    assert e.cursor == 2

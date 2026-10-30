@@ -895,13 +895,25 @@ class Engine:
     def _place_physical_cursor(self) -> None:
         """把物理光标放到该显示的位置。
 
-        浮层在，光标就归它：提示行落在插入点，消息框、翻看器落在内容
-        末尾；浮层收起之后，才回到子进程的光标。
+        浮层在，光标就归它：提示行落在插入点，消息框、翻看器落在内容末尾。
+        定位不靠算出来的列号，而是 **CUP 到那一行的行首，把插入点之前的格重
+        写一遍** —— 终端把光标推到插入点，一个字占几列由它和字体决定，我们
+        不猜，也就不可能猜错。代价是每帧多写不到一行字节。
+
+        浮层收起之后，才回到子进程的光标：那是子进程自己维护的位置，只能按
+        模型定位。
         """
         if self._console is None:
             return
-        c = self.overlay.cursor() or self.screen.cursor
-        self._out.write("\x1b[{};{}H".format(c.y + 1, c.x + 1).encode())
+        spot = self.overlay.cursor_position()
+        if spot is None:
+            c = self.screen.cursor
+            self._out.write("\x1b[{};{}H".format(c.y + 1, c.x + 1).encode())
+            return
+        row, prefix = spot
+        line = "\x1b[{};1H".format(row + 1)
+        line += render_row_cells(prefix, keep_trailing_blank=True)
+        self._out.write(line.encode())
 
     # ---- 行读取 ----
 

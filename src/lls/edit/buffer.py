@@ -6,16 +6,18 @@
 * 退格（删光标前）、删除（删光标处）；
 * 历史上下翻：翻页前保存草稿，翻回末尾恢复草稿；
 * 历史去重：连续相同的内容只留一份；
-* 宽字符按显示列宽推进光标。
+* 光标按**簇**移动：退格、左右、删除都不切开一个 emoji 或组合字符。
 
-本模块只维护文本状态，不画终端；渲染由 :func:`render_prompt_line` 负责。
+本模块只维护文本状态，不画终端，也**不量宽度**：一个字占几列由终端决定，
+光标该在哪一列不由这里算（见 :mod:`lls.ui.width` 与
+:meth:`lls.session.overlay.Overlay.cursor_position`）。
 """
 
 from __future__ import annotations
 
-from lls.ui import text_width
+from lls.ui import cluster_end
 
-__all__ = ["LineEditor", "render_prompt_line"]
+__all__ = ["LineEditor"]
 
 
 class LineEditor:
@@ -57,22 +59,24 @@ class LineEditor:
 
     def backspace(self) -> None:
         if self._cursor > 0:
-            self._text = self._text[: self._cursor - 1] + self._text[self._cursor :]
-            self._cursor -= 1
+            start = self._cluster_start(self._cursor)
+            self._text = self._text[:start] + self._text[self._cursor :]
+            self._cursor = start
 
     def delete(self) -> None:
         if self._cursor < len(self._text):
-            self._text = self._text[: self._cursor] + self._text[self._cursor + 1 :]
+            stop = cluster_end(self._text, self._cursor)
+            self._text = self._text[: self._cursor] + self._text[stop:]
 
     # ---- 光标移动 ----
 
     def left(self) -> None:
         if self._cursor > 0:
-            self._cursor -= 1
+            self._cursor = self._cluster_start(self._cursor)
 
     def right(self) -> None:
         if self._cursor < len(self._text):
-            self._cursor += 1
+            self._cursor = cluster_end(self._text, self._cursor)
 
     def home(self) -> None:
         self._cursor = 0
@@ -106,6 +110,16 @@ class LineEditor:
             self._text = self._draft
             self._cursor = len(self._text)
 
+    def _cluster_start(self, index: int) -> int:
+        """``index`` 所在簇的起点：光标停在这里，不会落进一个字符的中间。"""
+        start = 0
+        while start < index:
+            stop = cluster_end(self._text, start)
+            if index <= stop:
+                return start
+            start = stop
+        return start
+
     # ---- 提交 ----
 
     def submit(self, *, keep: bool = True) -> str:
@@ -123,19 +137,3 @@ class LineEditor:
         """把一条内容记入历史（不改变当前编辑状态），连续相同去重。"""
         if value and (not self._history or self._history[-1] != value):
             self._history.append(value)
-
-
-def render_prompt_line(prompt: str, editor: LineEditor) -> tuple[str, int]:
-    """生成带光标反色高亮的显示行，返回 (显示字符串, 光标列号)。
-
-    光标位置按显示列宽计算（宽字符占两列），高亮用 SGR 7（反色）。
-    光标在行尾时高亮一个空格，表示下一个字符将落在这里。
-    """
-    line = editor.text
-    cursor = editor.cursor
-    column = text_width(prompt) + text_width(line[:cursor])
-
-    highlight = line[cursor] if cursor < len(line) else " "
-    before = prompt + line[:cursor]
-    after = line[cursor + 1 :]
-    return before + "\x1b[7m" + highlight + "\x1b[0m" + after, column

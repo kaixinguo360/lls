@@ -188,8 +188,13 @@ def _style_sgr(style: tuple) -> str:
     return "\x1b[" + ";".join(codes) + "m" if codes else ""
 
 
-def render_row_cells(cells) -> str:
-    """把一行 Cell 渲染成带颜色的字符串（跳过宽字符右半格占位，去尾部空白）。"""
+def render_row_cells(cells, keep_trailing_blank: bool = False) -> str:
+    """把一行 Cell 渲染成带颜色的字符串（跳过宽字符右半格占位，去尾部空白）。
+
+    ``keep_trailing_blank`` 为真时尾部空白照写：光标定位要把「插入点之前这一
+    行」重写一遍，靠终端自己把光标推到插入点，行尾的空格也是推进量的一部分。
+    整行重画时用不上它 —— 那里空白由 ``EL`` 擦掉更省字节。
+    """
     runs: list[tuple[tuple, list[str]]] = []
     prev: tuple | None = None
     buf: list[str] = []
@@ -206,8 +211,9 @@ def render_row_cells(cells) -> str:
         runs.append((prev, buf))
 
     # 去掉尾部空白（视觉等价，避免输出大量空格）
-    while runs and not "".join(runs[-1][1]).strip():
-        runs.pop()
+    if not keep_trailing_blank:
+        while runs and not "".join(runs[-1][1]).strip():
+            runs.pop()
 
     parts: list[str] = []
     for st, tx in runs:

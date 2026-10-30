@@ -79,10 +79,11 @@ def test_ordinary_sequences_are_unaffected() -> None:
 
 
 def test_the_model_measures_with_the_same_table_as_the_layout() -> None:
-    """模型与排版共用一张宽度表：模糊宽度按两列算。
+    """模型与排版共用同一套宽度。
 
-    两边不一致时（模型按 wcwidth 算一列、排版按两列），覆盖层折出的行数与
-    模型里的对不上，按行绝对定位随即整体错位。
+    它只决定模型怎么折行（折早了行尾空一格，折晚了物理终端会再折一次、按行
+    绝对定位随即错位）。光标不在这一层算 —— 物理光标由「重写插入点那一段」
+    推出来，模型与真实列数不同也不影响它落在哪。
     """
     assert pyte.screens.wcwidth is conservative_char_width
 
