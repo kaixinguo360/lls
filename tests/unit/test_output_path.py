@@ -75,6 +75,23 @@ def _engine():
     return engine, screen, console
 
 
+def test_a_row_is_cleared_before_it_is_painted() -> None:
+    """整行写满时必须先清行，再写内容。
+
+    写完一行最后一列，终端把光标停在那个格子并进入「待折行」状态；此时再发
+    ``EL``（``ESC [ 0K``）是「擦掉光标所在格及其右侧」—— 刚写上去的最后一个
+    字符被自己的清行擦掉。用户看到的就是「最右边那个字有时候不显示」，而
+    「刚好写满」取决于当时的列宽，所以只是有时候。
+    """
+    from lls.term.model import Cell
+
+    row = [Cell("A") for _ in range(80)]
+    painted = engine_mod._row_paint(row)
+    assert painted.startswith("\x1b[0K"), "清行必须在内容之前"
+    assert painted.endswith("A"), "内容整段跟在清行之后"
+    assert "\x1b[0K" not in painted[1:], "一行只清一次，且不落在内容后面"
+
+
 def test_passthrough_bytes_and_overlay_share_one_frame() -> None:
     """输出到达时，子进程字节与覆盖层补画写在同一笔里。"""
     engine, _screen, console = _engine()

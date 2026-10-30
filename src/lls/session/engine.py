@@ -73,6 +73,20 @@ _READ_COALESCE_MIN = 16     # 首笔至少这么大才值得等待合并（按�
 # 同步输出：``ESC [ ? 2026 h`` 开始攒、``ESC [ ? 2026 l`` 收尾。由 iTerm2
 # 提出，kitty / WezTerm / foot / Alacritty / Windows Terminal / xterm 379+
 # 支持；不支持的终端按私有模式的惯例忽略。
+def _row_paint(cells: Any) -> str:
+    """一行的字节：**先清行、再写内容**。
+
+    顺序不能反。一行正好写满时，终端把光标停在最后一列、进入「待折行」状态，
+    此时发 ``EL``（``ESC [ 0K``）是「擦掉光标所在格及其右侧」—— 刚写上去的
+    最后一个字符就被自己擦掉了。看着就是「最右边那个字有时候不显示」，而一行
+    是否恰好写满取决于当时的列宽和内容，所以只是「有时候」。
+
+    先清行也顺带解决残留：整行擦干净再写，宽字符的右半格、被截短的旧内容都
+    不会留在右边。
+    """
+    return "\x1b[0K" + render_row_cells(cells)
+
+
 _BEGIN_SYNC = b"\x1b[?2026h"
 _END_SYNC = b"\x1b[?2026l"
 
@@ -579,10 +593,9 @@ class Engine:
                         continue
                     out.append("\x1b[{};1H".format(row + 1))
                     if ov.visible and top <= row < top + ov.lines:
-                        out.append(render_row_cells(ov.row_cells(row - top)))
+                        out.append(_row_paint(ov.row_cells(row - top)))
                     else:
-                        out.append(render_row_cells(self.screen.row_cells(row)))
-                    out.append("\x1b[0K")
+                        out.append(_row_paint(self.screen.row_cells(row)))
                 if out:
                     self._out.write("".join(out).encode())
             self._place_physical_cursor()
@@ -609,15 +622,13 @@ class Engine:
             if row in covered:
                 continue
             out.append("\x1b[{};1H".format(row + 1))
-            out.append(render_row_cells(self.screen.row_cells(row)))
-            out.append("\x1b[0K")
+            out.append(_row_paint(self.screen.row_cells(row)))
         for offset in range(ov.lines):
             row = top + offset
             if not 0 <= row < rows:
                 continue
             out.append("\x1b[{};1H".format(row + 1))
-            out.append(render_row_cells(ov.row_cells(offset)))
-            out.append("\x1b[0K")
+            out.append(_row_paint(ov.row_cells(offset)))
         if out:
             self._out.write("".join(out).encode())
         self._place_physical_cursor()
