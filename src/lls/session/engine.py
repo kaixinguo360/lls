@@ -33,7 +33,15 @@ from .errors import Interrupted, SessionEnded
 from .overlay import Overlay
 from .services import Handler, Services
 
-__all__ = ["Engine"]
+__all__ = ["Engine", "IDLE"]
+
+#: 带超时读键时「这一段等完了、没有键」的返回值。调用方据此去做别的事
+#: （重画状态行、看轮次结束没有），键一个都不丢。
+IDLE = object()
+
+#: read_line 空转一格的默认间隔：既让状态行里的计时往前走，又不至于把整屏
+#: 覆盖层刷得太勤（一帧几行，10Hz 已经够用）。
+TICK_INTERVAL = 0.1
 
 # 收到 ESC 后等后续字节的时间：readline 的 ESCDELAY，tmux 取同值。
 # 方向键这类序列几乎立刻到达，超过这个时间仍未收全就判为独立 Esc 键。
@@ -942,7 +950,7 @@ class Engine:
 
     async def read_line(
         self,
-        prompt: str = ":",
+        prompt: str | Callable[[], str] = ":",
         *,
         include_last: bool = False,
         value: str = "",
@@ -953,11 +961,23 @@ class Engine:
         escape: Any = None,
         keep_history: bool = True,
         handoff: Callable[[Any], bool] | None = None,
+        tick: Callable[[], Any] | None = None,
+        tick_interval: float = TICK_INTERVAL,
+        on_edit: Callable[[str, int], None] | None = None,
     ) -> Any:
         """读一行输入，完整行编辑。
 
         返回：输入内容；Ctrl-C → ``cancel``；Ctrl-D → ``exit``；
         Esc 且 ``escape`` 非 None → ``escape``；子进程退出 → None。
+
+        ``prompt`` 可以是函数：每次重画都问它要最新的提示串。运行中的提示
+        上方有会变的状态行、排队行，只能是现算的。
+
+        ``tick`` 是空转时的回调：每隔 ``tick_interval`` 秒（这一格没等到键）
+        调一次；它返回非 None 时带着这个值离开本函数 —— 调用方据此把「轮次
+        结束了」这类外部事件变成一次返回。它同时是重画的时机：状态行里的
+        计时、排队的条数都靠这一格更新。``on_edit(text, cursor)`` 在每处理
+        完一个按键后调用一次，调用方可存下草稿（下一次用 ``value`` 原样恢复）。
 
         ``history_scope`` 为 ``"session"`` 时这份 ↑ 历史跟着当前 AI 会话走
         （换会话就换一份，会话删掉一起删）；``"global"`` 是本机共用的一份。
@@ -973,18 +993,26 @@ class Engine:
         editor = self._editor_for(history_id, session=session)
         editor.reset(value)
 
-        shown: tuple[str, int] = ("", 0)
+        def _head() -> str:
+            """这一帧的提示串：函数形式每次现算，运行态的状态行才会动。"""
+            return prompt() if callable(prompt) else prompt
+
+        shown: tuple[str, int] | None = None
         handed_over = False
 
         def _draw() -> None:
             """按当前编辑状态重画提示行。
 
-            ``shown`` 记住画出去的是哪一版：缓冲里还有键时会跳过重画，
-            交接前要据此补最后一帧。
+            ``shown`` 记住画出去的是哪一帧（整段提示 + 光标下标）：空转的
+            时候提示串多半没变，跳过重写，免得终端白刷。
             """
             nonlocal shown
-            self.draw_overlay(prompt + editor.text, len(prompt) + editor.cursor)
-            shown = (editor.text, editor.cursor)
+            head = _head()
+            frame = (head + editor.text, len(head) + editor.cursor)
+            if frame == shown:
+                return
+            self.draw_overlay(frame[0], frame[1])
+            shown = frame
 
         def _leave(result: Any) -> Any:
             """离开输入循环：收起覆盖层，或把它原地交给调用方。
@@ -997,19 +1025,22 @@ class Engine:
                 self.restore()
                 return result
             handed_over = True
-            if (editor.text, editor.cursor) != shown:
-                # 缓冲里还有键时省下的重画要在这里补上：交出去的是这一帧
-                # 的样子，别停在按键之前。
-                _draw()
+            _draw()
             return result
 
         _draw()
-
         try:
             while True:
-                key = await self.read_key()
+                key = await self.read_key(tick_interval if tick is not None else None)
                 if key is None:
                     return None
+                if key is IDLE:
+                    # 空转一格：把时间交给调用方（重画状态行、看轮次结束没有）。
+                    control = tick()
+                    if control is not None:
+                        return _leave(control)
+                    _draw()
+                    continue
                 if key.control == "terminal_response":
                     # 终端对查询（DSR/DA）的应答，不是用户输入：
                     # 转发给子进程 —— 它在等这个结果；绝不当按键编辑或显示。
@@ -1059,6 +1090,10 @@ class Engine:
                     pass
                 elif key.char:
                     editor.insert(key.char)
+                if on_edit is not None:
+                    # 每处理完一个键就把草稿交出去：下一次进来（Ctrl-C 之后）
+                    # 靠它原样恢复，不会白丢已经敲下的字。
+                    on_edit(editor.text, editor.cursor)
                 # 同一批到达的键先全部应用，只重画最后那一帧。每处理一个键
                 # 就画一次时，这些帧会逐个上屏：连按方向键，中间帧里的光标
                 # 还没跟到后面几个键该在的位置，看起来就是光标在错处一闪。
@@ -1106,8 +1141,12 @@ class Engine:
 
     # ---- 键读取 ----
 
-    async def read_key(self) -> Key | None:
-        """取一个键；子进程退出时返回 None。不丢键。"""
+    async def read_key(self, timeout: float | None = None) -> Key | None:
+        """取一个键；子进程退出时返回 None。不丢键。
+
+        ``timeout`` 给了就最多等这么久：等的这段时间没有键，返回
+        :data:`IDLE`，调用方可以先去办别的事再来读。不给就一直等。
+        """
         while True:
             if not self._key_buf and self._held_keys:
                 # 这些键比缓冲里的任何字节都老：先按原顺序交出。
@@ -1117,11 +1156,13 @@ class Engine:
                 return self._key_buf.pop(0)
             if self._exit_event.is_set():
                 return None
-            got = await self._wait_stdin()
+            got = await self._wait_stdin(timeout)
             if got is None:
                 return None
             ts, data = got
             if not data:
+                if timeout is not None:
+                    return IDLE
                 continue
             self._key_buf.extend(self._key_parser.feed(data, ts))
             # 收到 ESC 但还没决定它是独立按键还是序列前缀：等到 ESCDELAY。

@@ -76,6 +76,7 @@ __all__ = ["cmd_agent"]
 # 命令模式读行时的返回哨兵：Esc 退出、Ctrl-C 清行、Ctrl-D 退出
 _ESCAPE = object()
 _CANCEL = object()
+_FINISHED = object()  # 这一轮跑完了：执行中的输入行该收了
 _EXIT = object()
 _CONTINUE = object()
 
@@ -185,6 +186,11 @@ def _unknown_command(name):
 
 
 INPUT_PROMPT = "(agent): "
+TASK_PREFIX = "(agent) "     # 任务行：与 /status 里的一字不差
+# 执行中这一族的名字：状态行、输入行都用它，(agent) 与 (agent-note) 之外
+# 只说这一件事 —— 这一轮还在跑，你敲的字进队列。
+RUNNING = "agent running"
+RUNNING_PROMPT = "(" + RUNNING + "): "
 REPLY_PREFIX = "(agent-reply) "
 REPLY_BOLD = "\x1b[1m"      # 最近一条答复加粗显示
 NOTE_PREFIX = "(agent-note) "
@@ -417,12 +423,13 @@ def _reply_rows(text: str, columns: int, bold: bool = False) -> list[str]:
 class _TerminalView:
     """屏幕快照 + 有限的等待。
 
-    等的时候用 :func:`poll_keys`：它负责把 Ctrl-C 变成中断、把终端应答
-    转给子进程，并把用户敲下的键留到下一次读输入。
+    等的时候不自己读键盘，交给会话的 ``poll``：执行中键盘归输入行（这里
+    只等一个中断信号），空闲时那一个仍旧等键盘。
     """
 
-    def __init__(self, services: Services) -> None:
+    def __init__(self, services: Services, poll: Any = None) -> None:
         self._s = services
+        self._poll = poll or (lambda timeout: poll_keys(services, timeout))
         self._last = ""
 
     def snapshot(self, lines: int) -> str:
@@ -445,7 +452,7 @@ class _TerminalView:
         last_change = time.monotonic()
         while True:
             now = time.monotonic()
-            await poll_keys(self._s, min(READ_POLL, max(0.0, deadline - now)))
+            await self._poll(min(READ_POLL, max(0.0, deadline - now)))
             fresh = self.snapshot(lines)
             now = time.monotonic()
             if fresh != text:
@@ -619,7 +626,12 @@ WIDTH_SLACK = 2
 # ---- 状态覆盖层 ----
 
 class _Painter:
-    """把循环进度画成一行覆盖层；全屏程序下不画。"""
+    """把循环进度折成一行状态文本。
+
+    它**不再往屏幕上写**：执行中那一屏是输入行自己的提示（见
+    :meth:`_Session._running_text`），状态行只是其中一行。两个写者会互相
+    踩 —— 覆盖层只有一个主人，就是输入行。
+    """
 
     def __init__(self, services: Services) -> None:
         self._s = services
@@ -631,46 +643,33 @@ class _Painter:
         self._call_name = ""
         self._started = 0.0
         self._painted = 0.0
-        self._last_line = ""
+        self._line = ""
         self._calling = False
 
+    @property
+    def line(self) -> str:
+        """当前的状态行；第一帧还没算出来时是空串。"""
+        return self._line
+
     def begin(self) -> None:
-        """立刻画出这一轮的第一帧，不等模型回话。
+        """立刻摆上这一轮的第一帧，不等模型回话。
 
         提示行在回车时已经收起，第一次 STEP 事件却要等首字节回来（前头还有
-        压缩、拼上下文这些要联网的步骤）。中间那一大段屏幕上什么都没有，
+        压缩、拼上下文这些要联网的步骤）。中间那一段状态行不能空着 ——
         看着就像程序卡住了。
         """
         self._phase = PREPARING
-        self._paint(force=True)
-
-    async def drive(self, work: Any) -> Any:
-        """跑这一轮的主体；期间按 PAINT_INTERVAL 复画。
-
-        屏幕上那一行必须自己往前走：工具跑几十秒时没有任何进度事件，停在
-        同一个数字上看着就像卡死。
-        """
-        ticker = asyncio.ensure_future(self._tick())
-        try:
-            return await work
-        finally:
-            ticker.cancel()
-            await asyncio.gather(ticker, return_exceptions=True)
-
-    async def _tick(self) -> None:
-        while True:
-            await asyncio.sleep(PAINT_INTERVAL)
-            self._paint()
+        self.refresh(force=True)
 
     def compacting(self) -> None:
         """压缩开始：一次摘要请求，可能要好几秒，得让屏幕说出来。"""
         self._phase = COMPACTING
-        self._paint(force=True)
+        self.refresh(force=True)
 
     def awaiting(self) -> None:
         """请求马上发出：先摆上这一相，别停在上一相上冒充当前状态。"""
         self._phase = AWAITING
-        self._paint(force=True)
+        self.refresh(force=True)
 
     def on_event(self, event: AgentEvent) -> None:
         if event.kind is AgentEventKind.STEP:
@@ -683,42 +682,43 @@ class _Painter:
             self._think = ""
             self._phase = AWAITING
             self._calling = False
-            self._paint(force=True)
+            self.refresh(force=True)
         elif event.kind is AgentEventKind.TEXT:
             # 正文开始了，推理是过去式：别让它继续占那一行。
             self._think = ""
             if self._phase != REPLYING:
                 self._phase = REPLYING
-                self._paint(force=True)
+                self.refresh(force=True)
         elif event.kind is AgentEventKind.REASONING:
             self._think = (self._think + event.text)[-400:]
             if self._phase == AWAITING:
                 self._phase = REASONING
-                self._paint(force=True)
+                self.refresh(force=True)
             else:
-                self._paint()
+                self.refresh()
         elif event.kind is AgentEventKind.CALL_DELTA:
             if event.name:
                 self._call_name = event.name
             self._call = (self._call + event.text)[-400:]
             self._phase = PLANNING
             self._calling = False
-            self._paint()
+            self.refresh()
         elif event.kind is AgentEventKind.CALL:
             self._started = time.monotonic()
             self._calling = True
             self._action = ("calling " + event.name + ": " + event.text)[-400:]
             self._call = ""
-            self._paint(force=True)
+            self.refresh(force=True)
         elif event.kind is AgentEventKind.RESULT:
             # 细节在终端画面里，这里只要「跑完了、花了多久」。
             self._calling = False
             self._action = "{} done ({:.1f}s)".format(
                 event.name, time.monotonic() - self._started
             )
-            self._paint(force=True)
+            self.refresh(force=True)
 
-    def _paint(self, force: bool = False) -> None:
+    def refresh(self, force: bool = False) -> None:
+        """重算状态行。``force`` 时不看节流，状态换了就一定跟手。"""
         now = time.monotonic()
         if not force and now - self._painted < PAINT_INTERVAL:
             return
@@ -730,7 +730,9 @@ class _Painter:
             action = (self._call_name + " " + self._call).strip()
         # 还没开始第一步时不写「第 0 步」：那会儿只是把状态占上，
         # 数字要等真正开始算才出现。
-        prefix = f"(agent {self._step}) " if self._step else "(agent) "
+        prefix = "({}) ".format(RUNNING)
+        if self._step:
+            prefix = "({} {}) ".format(RUNNING, self._step)
         if action and self._calling:
             # 工具可能跑几十秒，中间没有任何事件：让这一行自己往前走。
             action = "{} · {:.1f}s".format(action, now - self._started)
@@ -742,11 +744,7 @@ class _Painter:
             line = _tail_line(prefix + self._phase + " ", self._think, columns)
         else:
             line = _line(prefix, self._phase, columns)
-        if line == self._last_line and not force:
-            # 定时重画的多数帧一行未变：不重写屏幕，免得终端白刷。
-            return
-        self._last_line = line
-        self._s.draw_overlay(line)
+        self._line = line
 
 
 # ---- 会话 ----
@@ -789,11 +787,17 @@ class _Session:
         self._keeper = keeper    # 会话类命令借用命令层手里的仓库
         self._session = session
         self._budget = max(0, int(budget))
-        self._view = _TerminalView(services)
+        self._view = _TerminalView(services, self._poll)
         self._guard = _RepeatGuard()
         self._tools = _build_tools(services, self._view, self._guard)
         self._log = session.log(LOG_ENTRIES) if session is not None else []
         self._retype = ""  # /undo 放回输入行的原文，读过一次就清空
+        self._draft = ""   # 执行中敲下的草稿：回到提示时原样还给你
+        self._queue: List[str] = []   # 执行中回车排下的队，按顺序兑现
+        self._notice = ""             # 执行中「已排队」那一句，画在队伍上方
+        self._abort: Any = None  # 执行中的中断信号，见 _poll（每轮新建）
+        self._typing_active = False    # 是否正停在执行中的输入行上
+        self._end = False              # 这一轮里子进程没了，见 _poll
         self._window = None
         self._compacted_now = False
         self._compact_error = ""
@@ -807,7 +811,13 @@ class _Session:
         task: Any = first_task.strip() if first_task else None
         while True:
             if task is None:
-                task = await self._ask()
+                # 执行中排下的队先兑现：一轮结束后直接接着跑队首，
+                # 队空了才回到提示。排队的内容仍按一行的规矩解释 ——
+                # 斜杠命令照样是命令，不是任务。
+                if self._queue:
+                    task = await self._interpret(self._queue.pop(0))
+                else:
+                    task = await self._ask()
                 if task is _EXIT:
                     return True
                 if task is None:
@@ -826,7 +836,7 @@ class _Session:
         line = await self._s.read_line(
             self._prompt_text(),
             include_last=False,
-            value=self._retype,
+            value=self._retype or self._draft,
             cancel=_CANCEL,
             exit=_EXIT,
             history_id="agent_task",
@@ -834,8 +844,18 @@ class _Session:
             escape=_ESCAPE,
             handoff=_hands_over,
         )
-        # /undo 放回来的原文只回填这一次：读过就清空，下一行提示不再带着它。
+        # /undo 放回来的原文、执行中没发出去的草稿都只回填这一次：
+        # 读过就清空，下一行提示不再带着它们。
         self._retype = ""
+        self._draft = ""
+        return await self._interpret(line)
+
+    async def _interpret(self, line: Any) -> Any:
+        """一行输入 → 任务 / ``_CANCEL`` / ``_EXIT`` / None（会话结束）。
+
+        空闲的提示与执行中的队列共用这一套解释：从队里拿出来的一条，到了
+        该跑的时候也要先看是不是斜杠命令、是不是 /exit。
+        """
         if line is None:
             return None
         if line is _CANCEL:
@@ -916,7 +936,7 @@ class _Session:
                 latest = index
         rows: List[str] = []
         for index, (task, reply, note) in enumerate(entries):
-            rows.append(_line("(agent) ", task, columns))
+            rows.append(_line(TASK_PREFIX, task, columns))
             if reply:
                 rows.extend(_reply_rows(reply, columns, bold=index == latest))
             if note:
@@ -999,12 +1019,13 @@ class _Session:
             await self._s.show_message("本次会话不保存到磁盘，没有可压缩的历史")
             return _CANCEL
         painter = _Painter(self._s)
-        painter.begin()
         painter.compacting()
+        # 空闲态没有输入行在读，这一行状态自己画上去；压完由 finally 收尾。
+        self._s.draw_overlay(painter.line)
         self._compacted_now = False
         try:
             window = await offload(self._prepare_window, ())
-            compressed = await painter.drive(self._compact(window, (), force=True))
+            compressed = await self._compact(window, (), force=True)
         except (Aborted, _CompactFailed) as e:
             await self._s.show_message("{}，历史没有改动".format(e))
             return _CANCEL
@@ -1221,26 +1242,127 @@ class _Session:
         """执行一轮任务。异常路径只影响本轮，不影响已经写下的事件。
 
         ``task`` 是 ``_CONTINUE`` 时接着现有会话往下执行，不新增消息。
+
+        这一轮从开始到结束，屏幕上那一片都是**输入行**：一边看它跑一边把
+        下一句敲完回车就排进队（见 :meth:`_typing`），进度只占其中一行。
         """
-        # 先画状态，再去忙那些要等的事（快照、压缩、拼上下文）：提示行已经
-        # 收起，等下去的那几秒屏幕上不能是空的。
         painter = _Painter(self._s)
+        # 先摆上状态，再去忙那些要等的事（快照、压缩、拼上下文）：等下去的
+        # 那几秒屏幕上不能是空的。
         painter.begin()
-        # 提交任务时同批到达的按键还留在键盘缓冲里；转回原始队列，
-        # 否则本轮的中断检测看不到它们（两个队列不互通）。
-        self._s.requeue_pending_keys()
         self._guard.reset()
         self._compacted_now = False
         self._compact_error = ""
         self._compact_skip = ""
+        self._notice = ""
+        self._end = False
+        # 事件在协程里建：模块级构造时还没有事件循环（会拿到旧的那个）。
+        self._abort = asyncio.Event()
+        work = asyncio.ensure_future(self._turn(task, painter))
+        typed = asyncio.ensure_future(self._typing(painter, task, work))
         try:
-            await painter.drive(self._turn(task, painter))
-        except Aborted as e:
-            # 中断也可能发生在请求之前（裁历史、压缩）：这一轮同样只是被放弃。
-            self._record("", "", str(e))
+            await typed
         finally:
+            if not work.done():
+                work.cancel()
+            outcome = await asyncio.gather(work, return_exceptions=True)
             # 这一轮的覆盖层到此为止：收起它，把子进程画面放回来。
             self._s.restore_context()
+        error = outcome[0]
+        if isinstance(error, Aborted):
+            # 中断也可能发生在请求之前（裁历史、压缩）：这一轮同样只是被放弃。
+            self._record("", "", str(error))
+        elif isinstance(error, BaseException) and not isinstance(
+            error, asyncio.CancelledError
+        ):
+            raise error
+
+    async def _typing(self, painter: "_Painter", task: Any, work: Any) -> None:
+        """执行中的输入行：边跑边收，回车进排队，Esc/Ctrl-C 只弃这一轮。
+
+        与空闲提示用的是同一个编辑器、同一个 ``history_id``：↑ 召回、多行
+        粘贴、emoji 退格全都一样。草稿一敲下就交给 :meth:`_remember_draft`
+        存着，所以中断之后回到提示，那句话还在原处，不会白打一遍。
+        """
+
+        def tick() -> Any:
+            """空转一格：刷新状态行，顺带看看这一轮跑完没有。"""
+            painter.refresh()
+            return _FINISHED if work.done() else None
+
+        def keep(line: Any) -> bool:
+            # 只有「轮次结束」才离开这一屏；其余结局下一格立刻又画回来，
+            # 那一帧还原只会闪一下空白。
+            return line is not _FINISHED
+
+        self._typing_active = True
+        try:
+            while True:
+                result = await self._s.read_line(
+                    lambda: self._running_text(painter, task),
+                    include_last=False,
+                    value=self._draft,
+                    cancel=_CANCEL,
+                    exit=_EXIT,
+                    history_id="agent_task",
+                    history_scope="session",
+                    escape=_ESCAPE,
+                    handoff=keep,
+                    tick=tick,
+                    tick_interval=PAINT_INTERVAL,
+                    on_edit=self._remember_draft,
+                )
+                if result is _FINISHED:
+                    return
+                if result is None:
+                    # 子进程没了：这一轮按「会话结束」收尾（_turn 会记下来），
+                    # 这里只等它跑完，不再读输入 —— 读也是立刻返回，空转。
+                    self._end = True
+                    while not work.done():
+                        await asyncio.sleep(0)
+                    return
+                if result is _CANCEL or result is _ESCAPE or result is _EXIT:
+                    # Ctrl-C / Esc / Ctrl-D：只放弃这一轮。草稿留在编辑器里，
+                    # 回到提示时还在原处，改完回车就是新的一轮。
+                    self._abort.set()
+                    continue
+                text = str(result).strip()
+                self._draft = ""
+                if not text:
+                    continue
+                # 一律排进队：普通任务、斜杠命令、// 转义都按一行的规矩在
+                # 空闲时解释（见 _interpret）。斜杠命令要多说一句 —— 它不会
+                # 发给模型，只是排在这一轮后面。
+                self._queue.append(text)
+                if text.startswith("/") and not text.startswith("//"):
+                    self._notice = "已排队，本轮结束后执行：{}".format(text)
+                else:
+                    self._notice = ""
+        finally:
+            self._typing_active = False
+
+    def _remember_draft(self, text: str, cursor: int) -> None:
+        """执行中敲下的草稿：中断之后回到提示时原样还给你。"""
+        self._draft = text
+
+    async def _poll(self, timeout: float) -> None:
+        """等网络时不再读键盘：输入归执行中的输入行，这里只等中断信号。
+
+        空闲路径（``/compact``、``/retry``）没有输入行在读，仍按老办法等
+        键盘：那时 Ctrl-C 必须当场生效。
+        """
+        if not self._typing_active:
+            await poll_keys(self._s, timeout)
+            return
+        if self._end:
+            raise SessionClosed("会话已结束")
+        if self._abort.is_set():
+            raise Aborted("已中断")
+        try:
+            await asyncio.wait_for(self._abort.wait(), timeout)
+        except asyncio.TimeoutError:
+            return
+        raise Aborted("已中断")
 
     async def _turn(self, task: Any, painter: "_Painter") -> None:
         """一轮任务的主体。覆盖层的生死由 :meth:`_one` 负责。"""
@@ -1274,7 +1396,7 @@ class _Session:
             system=SYSTEM_PROMPT,
             tools=self._tools,
             on_event=painter.on_event,
-            poll=lambda timeout: poll_keys(self._s, timeout),
+            poll=self._poll,
             on_message=self._on_message,
         )
         try:
@@ -1447,7 +1569,7 @@ class _Session:
                 self._provider,
                 self._model,
                 request,
-                poll=lambda timeout: poll_keys(self._s, timeout),
+                poll=self._poll,
             )
         except AgentCancelled:
             raise
@@ -1516,19 +1638,50 @@ class _Session:
             self._log.append((self._log[-1][0] if self._log else "", reply, note))
         self._log = self._log[-max(1, LOG_ENTRIES):]
 
-    def _prompt_text(self) -> str:
-        # 高度只由屏幕实际行数决定，不再有固定上限：覆盖层比屏幕高就会贴
-        # 顶，多出来的行被挤到屏幕外，终端随之滚动 —— 物理行与模型行错位。
-        # 所以约束只有两条：上面留几行给子进程画面，以及（连同行尾的提示
-        # 符）整体不越过屏幕。矮终端上这两条自然把预算收紧。
+    def _overlay_text(self, rows: List[str], prompt: str) -> str:
+        """把上方那几行与输入行拼成这一屏的提示串。
+
+        高度只由屏幕实际行数决定，不再有固定上限：覆盖层比屏幕高就会贴
+        顶，多出来的行被挤到屏幕外，终端随之滚动 —— 物理行与模型行错位。
+        所以约束只有两条：上面留几行给子进程画面，以及（连同行尾的提示
+        符）整体不越过屏幕。矮终端上这两条自然把预算收紧。
+
+        放不下时丢**最早**的那几行：离输入行最近的先留着，最新的话都在
+        眼前。
+        """
         limit = max(3, self._s.screen.rows - MODEL_ROWS_KEPT)
         limit = min(limit, max(1, self._s.screen.rows - 1))
-        rows = self._entry_rows(self._log)
         if len(rows) > limit:
             rows = rows[-limit:]
         if not rows:
-            return INPUT_PROMPT
-        return "\n".join(rows) + "\n" + INPUT_PROMPT
+            return prompt
+        return "\n".join(rows) + "\n" + prompt
+
+    def _prompt_text(self) -> str:
+        """空闲态的提示：最近几轮对话 + 输入行。"""
+        return self._overlay_text(self._entry_rows(self._log), INPUT_PROMPT)
+
+    def _running_text(self, painter: "_Painter", task: Any) -> str:
+        """执行中的提示：对话 + **在跑的那一行** + 状态 + 排队 + 输入行。
+
+        在跑的那一行写成 ``(agent) <任务>``，与这一轮落盘、进 /status 的那一
+        行一字不差：轮次结束时屏幕不会跳一下，只是它下面那两行收了。
+        """
+        columns = max(1, self._s.screen.columns)
+        rows = self._entry_rows(self._log)
+        label = "" if task is _CONTINUE else str(task)
+        if label:
+            rows.append(_line(TASK_PREFIX, label, columns))
+        if painter.line:
+            rows.append(painter.line)
+        if self._notice:
+            rows.append(_line(NOTE_PREFIX, self._notice, columns))
+        total = len(self._queue)
+        for index, item in enumerate(self._queue, 1):
+            rows.append(
+                _line(NOTE_PREFIX, "排队 {}/{}: {}".format(index, total, item), columns)
+            )
+        return self._overlay_text(rows, RUNNING_PROMPT)
 
 
 def _is_summary(message: Any) -> bool:

@@ -722,3 +722,69 @@ def test_prefix_replay_keeps_trailing_blanks() -> None:
 
     replay = b"\x1b[1;1H" + "> a  ".encode() + b"\x1b[?2026l"
     assert replay in console.snapshot()
+
+
+# ---- 执行中的输入行：空转的一格 ----
+
+def test_a_tick_leaves_the_prompt_with_its_value() -> None:
+    """空转的一格：tick 说「这一轮结束了」，就带着这个值离开读输入。"""
+
+    async def run():
+        engine, screen, console = _loop_engine()
+        screen.feed(b"one\r\ntwo\r\nthree")
+        ticks = []
+
+        def tick():
+            ticks.append(1)
+            return "DONE" if len(ticks) >= 3 else None
+
+        result = await engine.read_line("> ", tick=tick, tick_interval=0.001)
+        return engine, result, len(ticks)
+
+    engine, result, count = asyncio.run(run())
+
+    assert result == "DONE"
+    assert count >= 3
+    assert engine.overlay.anchor is None      # 离开时把占的行还给了模型
+
+
+def test_the_prompt_is_asked_again_for_every_frame() -> None:
+    """提示串可以是函数：状态行的计时、排队条数每次重画都得现算。"""
+
+    async def run():
+        engine, screen, console = _loop_engine()
+        screen.feed(b"one\r\ntwo\r\nthree")
+        asked = []
+
+        def prompt():
+            asked.append(1)
+            return "(agent running {}): ".format(len(asked))
+
+        def tick():
+            return "DONE" if len(asked) >= 3 else None
+
+        result = await engine.read_line(prompt, tick=tick, tick_interval=0.001)
+        return engine, result, len(asked)
+
+    engine, result, count = asyncio.run(run())
+
+    assert result == "DONE"
+    assert count >= 3
+
+
+def test_edit_reports_the_buffer_after_every_key() -> None:
+    """每处理完一个键就交一次草稿：中断之后能原样放回输入行。"""
+
+    async def run():
+        engine, screen, console = _loop_engine()
+        seen = []
+        engine.push_keys(b"ab\x7fc\r")
+        line = await engine.read_line(
+            "> ", on_edit=lambda text, cursor: seen.append((text, cursor))
+        )
+        return line, seen
+
+    line, seen = asyncio.run(run())
+
+    assert line == "ac"
+    assert seen == [("a", 1), ("ab", 2), ("a", 1), ("ac", 2)]

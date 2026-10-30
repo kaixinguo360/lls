@@ -32,8 +32,28 @@ class FakeServices:
         self._key = None
 
     async def read_line(self, prompt, **kwargs):
+        tick = kwargs.get("tick")
+        if tick is not None:
+            return await self._running_input(kwargs)
         self.prompts.append(prompt)
         return self._answers.pop(0) if self._answers else None
+
+    async def _running_input(self, kwargs):
+        """执行中的输入行：键盘上什么都没敲，空转到这一轮结束。
+
+        中断仍旧走 ``wait`` —— 测试里替换它来模拟按 Ctrl-C，这里每一格问
+        它一次；它说中断，就当作在读输入时按下 Ctrl-C 交回给会话。
+        """
+        for _ in range(100000):
+            await asyncio.sleep(0)
+            control = kwargs["tick"]()
+            if control is not None:
+                return control
+            try:
+                await self.wait(0.1)
+            except Interrupted:
+                return kwargs.get("cancel")
+        raise AssertionError("执行中的输入行等不到这一轮结束")
 
     async def wait(self, timeout=None) -> None:
         await asyncio.sleep(0)

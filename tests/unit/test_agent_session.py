@@ -62,9 +62,46 @@ class FakeServices:
         self._chars.extend(values)
 
     async def read_line(self, prompt, **kwargs):
+        tick = kwargs.get("tick")
+        if tick is not None:
+            return await self._running_input(prompt, kwargs)
         self.prompts.append(prompt)
         self.values.append(kwargs.get("value"))
         return self._answers.pop(0) if self._answers else None
+
+    async def _running_input(self, prompt, kwargs):
+        """执行中的输入行：空转到这一轮结束，或交出一段中途敲下的东西。
+
+        真实引擎在这里等键、按帧重画。测试里没敲键就是不敲：于是它只剩
+        「每一格看一下轮次结束没有」。queue_chars 排进来的才是中途敲的：
+        b"\x03" 是 Ctrl-C，其余当成敲完回车的一行。
+        """
+        cancel = kwargs.get("cancel")
+        on_edit = kwargs.get("on_edit")
+        for _ in range(200000):
+            frame = prompt() if callable(prompt) else prompt
+            if not self.painted or self.painted[-1] != frame:
+                self.painted.append(frame)
+            if self._chars:
+                value = self._chars.pop(0)
+                if value is None:
+                    return None          # 子进程没了：读输入当场返回 None
+                if value == b"\x03":
+                    return cancel
+                if isinstance(value, str):
+                    # 只敲了一半、还没回车：草稿留在输入行里，继续等。
+                    if on_edit is not None:
+                        on_edit(value, len(value))
+                    continue
+                text = value.decode()
+                if on_edit is not None:
+                    on_edit(text, len(text))
+                return text
+            await asyncio.sleep(0)
+            control = kwargs["tick"]()
+            if control is not None:
+                return control
+        raise AssertionError("执行中的输入行一直等不到这一轮结束")
 
     async def wait(self, timeout=None) -> None:
         """等一小段键盘：排在队里的那一段就是这时到达的输入。"""
@@ -620,9 +657,9 @@ def test_painter_previews_the_latest_reasoning() -> None:
             text="START" + "x" * 200 + "END",
         )
     )
-    painter._paint(force=True)
+    painter.refresh(force=True)
 
-    shown = services.painted[-1]
+    shown = painter.line
     assert "END" in shown
     assert "START" not in shown
     assert "\n" not in shown
@@ -640,9 +677,9 @@ def test_painter_hangs_reasoning_after_the_phase() -> None:
         )
     )
 
-    shown = services.painted[-1]
+    shown = painter.line
     assert "\n" not in shown
-    assert shown.startswith("(agent 1) " + agent_cmd.REASONING)
+    assert shown.startswith("({} 1) ".format(agent_cmd.RUNNING) + agent_cmd.REASONING)
     assert shown.endswith("先看看目录")
 
 
@@ -661,10 +698,10 @@ def test_painter_drops_reasoning_when_an_action_takes_the_line() -> None:
         )
     )
 
-    shown = services.painted[-1]
+    shown = painter.line
     assert "\n" not in shown
     assert "想一想" not in shown
-    assert shown.startswith("(agent 1) calling bash")
+    assert shown.startswith("({} 1) calling bash".format(agent_cmd.RUNNING))
 
 
 def test_painter_paints_a_phase_before_the_model_answers() -> None:
@@ -674,7 +711,7 @@ def test_painter_paints_a_phase_before_the_model_answers() -> None:
 
     painter.begin()
 
-    assert services.painted == ["(agent) preparing..."]
+    assert painter.line == "({}) preparing...".format(agent_cmd.RUNNING)
 
 
 def test_painter_says_what_it_is_doing_at_each_phase() -> None:
@@ -682,20 +719,26 @@ def test_painter_says_what_it_is_doing_at_each_phase() -> None:
     services = FakeServices([])
     painter = agent_cmd._Painter(services)
 
+    shown = []
     painter.begin()
+    shown.append(painter.line)
     painter.compacting()
+    shown.append(painter.line)
     painter.awaiting()
+    shown.append(painter.line)
     text = agent_cmd.AgentEvent(agent_cmd.AgentEventKind.TEXT, step=1, text="好")
     painter.on_event(text)
+    shown.append(painter.line)
     painter.on_event(text)
-    painter._paint(force=True)
+    painter.refresh(force=True)
+    shown.append(painter.line)
 
-    assert services.painted == [
-        "(agent) preparing...",
-        "(agent) compacting...",
-        "(agent) awaiting reply...",
-        "(agent) replying...",
-        "(agent) replying...",      # 再来一段正文不再换相
+    assert shown == [
+        "(agent running) preparing...",
+        "(agent running) compacting...",
+        "(agent running) awaiting reply...",
+        "(agent running) replying...",
+        "(agent running) replying...",      # 再来一段正文不再换相
     ]
 
 
@@ -710,15 +753,21 @@ def test_painter_shows_a_call_and_how_long_it_took() -> None:
         text='{"lines": 3}',
     )
 
+    shown = []
     painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=2))
+    shown.append(painter.line)
     painter.on_event(call)
+    shown.append(painter.line)
     painter.on_event(
         agent_cmd.AgentEvent(agent_cmd.AgentEventKind.RESULT, step=2, name="read_terminal")
     )
+    shown.append(painter.line)
 
-    assert services.painted[1].startswith('(agent 2) calling read_terminal: {"lines": 3}')
-    assert services.painted[-1].startswith("(agent 2) read_terminal done (")
-    assert services.painted[-1].endswith("s)")
+    assert shown[1].startswith(
+        '({} 2) calling read_terminal: {{"lines": 3}}'.format(agent_cmd.RUNNING)
+    )
+    assert shown[2].startswith("({} 2) read_terminal done (".format(agent_cmd.RUNNING))
+    assert shown[2].endswith("s)")
 
 
 def test_painter_forgets_the_previous_step() -> None:
@@ -734,7 +783,7 @@ def test_painter_forgets_the_previous_step() -> None:
 
     painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=2))
 
-    assert services.painted[-1] == "(agent 2) awaiting reply..."
+    assert painter.line == "({} 2) awaiting reply...".format(agent_cmd.RUNNING)
 
 
 # ---- 提示词与显示预算一致 ----
@@ -940,8 +989,7 @@ def test_slash_compact_paints_before_the_summary_arrives(tmp_path) -> None:
 
     asyncio.run(worker._slash_compact(""))
 
-    assert services.painted[0] == "(agent) preparing..."
-    assert "compacting..." in services.painted[1]
+    assert services.painted[0] == "({}) compacting...".format(agent_cmd.RUNNING)
     assert services.messages[-1].startswith("已压缩")
     session.close()
 
@@ -1176,7 +1224,7 @@ def test_progress_shows_the_call_being_built() -> None:
         )
     )
 
-    first = services.screen.painted[0]
+    first = progress.line
     assert "send_text" in first
     assert '{"text"' in first
 
@@ -1199,7 +1247,7 @@ def test_progress_replaces_the_partial_call_with_the_finished_one() -> None:
         )
     )
 
-    assert 'send_text: {"text": "ls"}' in services.screen.painted[-1]
+    assert 'send_text: {"text": "ls"}' in progress.line
 
 
 # ---- /undo：撤销上一轮，把原文放回输入行 ----
@@ -1278,3 +1326,107 @@ def test_slash_undo_takes_no_arguments() -> None:
 
     assert "用法：/undo" in services.messages[-1]
     assert worker._log == [("任务一", "答复一", "")]
+
+
+# ---- 执行中可输入：运行态输入行 + 排队 ----
+
+
+def test_running_prompt_shows_the_task_status_and_the_queue() -> None:
+    """执行中那一屏：历史行、在跑的一行、状态行、排队行、输入行。"""
+    services = FakeServices([])
+    session = agent_cmd._Session(services, ScriptedProvider([]), "m")
+    session._log = [("上一轮", "旧答复", "")]
+    session._queue = ["/status", "下一句"]
+    session._notice = "已排队，本轮结束后执行：/status"
+    painter = agent_cmd._Painter(services)
+    painter.begin()
+
+    rows = session._running_text(painter, "正在跑的任务").split("\n")
+
+    # 输入行的提示与初始态同族，只是说清楚这一轮还在跑。
+    assert rows[-1] == agent_cmd.RUNNING_PROMPT
+    # 上方的历史行还在：和空闲提示长得一样，不用重新认屏幕。
+    assert any("旧答复" in row for row in rows)
+    # 在跑的那一行与落盘、与 /status 里的一字不差。
+    assert agent_cmd.TASK_PREFIX + "正在跑的任务" in rows
+    assert any(row.startswith("({}) ".format(agent_cmd.RUNNING)) for row in rows)
+    assert any("preparing..." in row for row in rows)
+    # 排队的一行一条，编号看得见；斜杠命令要说明它不会发给模型。
+    notes = [row for row in rows if row.startswith(agent_cmd.NOTE_PREFIX)]
+    assert any("排队 1/2: /status" in row for row in notes)
+    assert any("排队 2/2: 下一句" in row for row in notes)
+    assert any("已排队" in row for row in notes)
+
+
+def test_a_line_typed_while_running_is_queued_for_the_next_turn(monkeypatch) -> None:
+    """执行中敲下并回车：进队，这一轮落盘后直接接着跑它，不丢也不抢跑。"""
+    provider = ScriptedProvider([_text("答复一"), _text("答复二")])
+
+    services, result = _session(
+        monkeypatch, provider, ["任务一", "/exit"], chars=["任务二".encode()]
+    )
+
+    assert len(provider.requests) == 2
+    sent = provider.requests[-1]["messages"]
+    assert any("任务二" in (message.content or "") for message in sent)
+    # 执行中画出去的那一屏：在跑的一行 + 运行态提示，都是输入行自己的。
+    assert any("(agent) 任务一" in frame for frame in services.painted)
+    assert any(agent_cmd.RUNNING_PROMPT in frame for frame in services.painted)
+
+
+def test_ctrl_c_while_running_keeps_the_draft_for_the_next_prompt(monkeypatch) -> None:
+    """中断这一轮不吞草稿：回到提示时那句还在输入行里，改完就能发。"""
+    provider = ScriptedProvider([_text("答复一")])
+
+    services, result = _session(
+        monkeypatch, provider, ["任务一", "/exit"], chars=["半句话", b"\x03"]
+    )
+
+    assert "半句话" in services.values
+
+
+def test_a_slash_command_typed_while_running_is_queued_not_sent(
+    monkeypatch, tmp_path
+) -> None:
+    """执行中也能打命令：排到这一轮后面执行，绝不混成任务发给模型。"""
+    keeper = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复一")])
+
+    services, result = _session(
+        monkeypatch,
+        provider,
+        ["任务一", "/exit"],
+        chars=["/title 新标题".encode()],
+        keeper=keeper,
+    )
+
+    assert len(provider.requests) == 1
+    assert keeper.current().meta.title == "新标题"
+    assert any("已排队" in frame for frame in services.painted)
+
+
+def test_exit_typed_while_running_leaves_after_this_turn(monkeypatch) -> None:
+    """执行中打 /exit：这一轮照常跑完，然后退出，不会中途把请求撕掉。"""
+    provider = ScriptedProvider([_text("答复一")])
+
+    services, result = _session(monkeypatch, provider, ["任务一"], chars=[b"/exit"])
+
+    assert result.handler == "default"
+    assert len(provider.requests) == 1
+
+
+def test_the_child_going_away_during_a_turn_ends_the_turn_cleanly(
+    monkeypatch, tmp_path
+) -> None:
+    """执行中子进程没了：这一轮照样写 turn_end，不是被我们撕掉的。"""
+    keeper = SessionStore(root=tmp_path)
+    provider = ScriptedProvider([_text("答复一")])
+
+    services, result = _session(
+        monkeypatch, provider, ["任务一"], chars=[None], keeper=keeper
+    )
+
+    session = keeper.current()
+    statuses = [event.status for event in session.events() if event.type == "turn_end"]
+    assert statuses == ["aborted"]
+    session.close()

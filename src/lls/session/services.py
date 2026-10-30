@@ -128,6 +128,9 @@ class Services:
         escape: Any = None,
         keep_history: bool = True,
         handoff: Any = None,
+        tick: Any = None,
+        tick_interval: float = 0.1,
+        on_edit: Any = None,
     ) -> Any:
         """读一行（完整行编辑）。
 
@@ -138,6 +141,11 @@ class Services:
         ``keep_history`` 为 False 时该行不进入此 ``history_id`` 的历史。
         ``handoff(line)`` 为真表示返回值马上会换成另一个覆盖层（翻看、
         消息框），此时不再还原屏幕，免得中间闪出子进程画面。
+
+        ``prompt`` 可以是函数（每次重画现算提示串）。``tick()`` 在空转的
+        每一格被调用，返回非 None 就带着它离开 —— 调用方据此把「轮次结束」
+        这类外部事件变成一次返回，也顺手把状态行的时间刷新了。
+        ``on_edit(text, cursor)`` 每处理一个键调一次，供调用方存草稿。
         """
         return await self._engine.read_line(
             prompt,
@@ -150,6 +158,9 @@ class Services:
             escape=escape,
             keep_history=keep_history,
             handoff=handoff,
+            tick=tick,
+            tick_interval=tick_interval,
+            on_edit=on_edit,
         )
 
     def push_keys(self, data: bytes) -> None:
