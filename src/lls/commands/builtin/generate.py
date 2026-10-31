@@ -249,12 +249,12 @@ async def _stream_payload(
         nonlocal tail
         if event.kind is AgentEventKind.CALL_DELTA:
             tail = (tail + event.text)[-200:]
-            _paint(s, "gen-cmd", (event.name + " " + tail).strip() or "awaiting reply...")
+            _paint(s, "gen-cmd", (event.name + " " + tail).strip() or "等待回复…")
         elif event.kind is AgentEventKind.REASONING:
             think.append(event.text)
             _paint_thinking(s, "".join(think))
 
-    _paint(s, "gen-cmd", "awaiting reply...")
+    _paint(s, "gen-cmd", "等待回复…")
     try:
         _text, calls, _usage = await stream_reply(
             provider,
@@ -300,7 +300,7 @@ class _Outcome(NamedTuple):
     """一次生成的结果。
 
     ``payload is None`` 表示**放弃**（用户按 n、编辑后清空、会话结束、中断）；
-    空字符串是**正常结果**（模型判断该发空内容），照样走确认与写入。
+    空字符串是**正常结果**（模型判断该发空内容），仍然走确认与写入。
 
     ``call`` 是这一轮模型给出的工具调用，记录会话时需要它；``请求#内容``
     这种没经过模型的轮次为 None。
@@ -326,7 +326,7 @@ async def _produce(
         if not payload:
             return _Outcome(note="`#` 后面没有内容")
 
-    hint = ", confirm?"
+    hint = "，确认？"
     while True:
         if payload is None:
             try:
@@ -348,7 +348,7 @@ async def _produce(
             return _Outcome(note="会话已结束")
 
         key = answer.strip().lower()
-        hint = ", confirm?"
+        hint = "，确认？"
 
         if key == "" or key in ("y", "yes", "u", "use"):
             return _Outcome(payload, True, None, call)
@@ -367,7 +367,7 @@ async def _produce(
             payload = None
             continue
 
-        hint = ", please input 'y' or 'n':"
+        hint = "，请输入 y 或 n："
 
 
 async def run_generate(s: Services, request: str | None = None) -> bool:
@@ -416,7 +416,7 @@ async def run_generate(s: Services, request: str | None = None) -> bool:
         )
         return True
     except Exception as e:  # noqa: BLE001
-        await s.show_message(f"error: {e}")
+        await s.show_message(f"错误：{e}")
         return False
 
 

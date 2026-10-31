@@ -51,19 +51,19 @@ def doctor() -> int:
 
         print("pyte:     OK")
     except ImportError:
-        print("pyte:     缺失 (pip install pyte)")
+        print("pyte:     缺失（pip install pyte）")
     if supports_posix_terminal():
-        print("posix tty: OK (pty/termios/fcntl)")
+        print("posix tty: OK（pty/termios/fcntl）")
     else:
-        print("posix tty: 缺失 (需要 pty/termios/fcntl；Windows 请用 WSL)")
+        print("posix tty: 缺失（需要 pty/termios/fcntl；Windows 请使用 WSL）")
     print(f"shell:    {_default_shell()}")
-    suffix = "" if config.exists else " (missing, using defaults)"
+    suffix = "" if config.exists else "（缺失，使用默认值）"
     print(f"config:   {config.path}{suffix}")
     print(f"paths.root:         {config.paths.root}")
     print(f"paths.sessions_dir: {config.paths.sessions_dir}")
     history_dir = config.paths.history_dir
     if not config.input_history.enabled:
-        history_dir = f"{history_dir} (disabled)"
+        history_dir = f"{history_dir}（已禁用）"
     print(f"paths.history_dir:  {history_dir}")
     hist = config.input_history
     print(
@@ -99,7 +99,7 @@ def _run(argv: list[str] | None = None) -> int:
         try:
             return subprocess.call(command)
         except FileNotFoundError:
-            print(f"lls: command not found: {command[0]}", file=sys.stderr)
+            print(f"lls: 未找到命令：{command[0]}", file=sys.stderr)
             return 127
 
     # 交互：进入主循环
@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     """进程最外层。
 
     任何未捕获异常都打印完整堆栈后以非零码退出 —— 兜底只做这一件事，
-    以免遗漏的错误信息被静默吞掉。
+    以免遗漏的错误信息被静默忽略。
     """
     try:
         return _run(argv)

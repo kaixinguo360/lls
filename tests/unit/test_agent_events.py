@@ -223,7 +223,7 @@ def test_retry_with_nothing_to_continue_says_so(monkeypatch, tmp_path) -> None:
 
     services, _ = _run(monkeypatch, provider, ["/retry", "/exit"], keeper)
 
-    assert services.messages == ["这一轮已经结束，没有可以接着执行的内容"]
+    assert services.messages == ["本轮已经结束，没有可继续执行的内容"]
     assert provider.requests == []
     keeper.current().close()
 
@@ -270,7 +270,7 @@ def test_rm_with_an_argument_only_shows_the_usage(monkeypatch, tmp_path) -> None
     services, _ = _run(monkeypatch, ScriptedProvider([]), ["/rm abc", "/exit"], keeper)
 
     assert keeper.current_id() is not None
-    assert services.messages == ["用法：/rm（删除本会话，不需要参数）"]
+    assert services.messages == ["用法：/rm（删除本会话，不接受参数）"]
     keeper.current().close()
 
 

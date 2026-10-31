@@ -431,7 +431,7 @@ def test_provider_error_is_reported_and_the_session_continues(monkeypatch) -> No
 
     assert result.handler == "default"
     assert provider.calls == 2
-    assert any("error: boom" in prompt for prompt in services.prompts)
+    assert any("错误：boom" in prompt for prompt in services.prompts)
 
 
 def test_ctrl_c_aborts_only_the_current_task(monkeypatch) -> None:
@@ -474,7 +474,7 @@ def test_config_error_stays_in_command_mode(monkeypatch) -> None:
     result = asyncio.run(agent_cmd.cmd_agent(services, None))
 
     assert result.handler is None
-    assert services.messages == ["error: no config"]
+    assert services.messages == ["错误：no config"]
 
 
 # ---- 不限步数与历史 ----
@@ -787,7 +787,7 @@ def test_painter_says_what_it_is_doing_at_each_phase() -> None:
     assert shown == [
         "(agent) preparing...",
         "(agent) compacting...",
-        "(agent) awaiting reply...",
+        "(agent) 等待回复…",
         "(agent) replying...",
         "(agent) replying...",      # 再来一段正文不再换相
     ]
@@ -834,7 +834,7 @@ def test_painter_forgets_the_previous_step() -> None:
 
     painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=2))
 
-    assert painter.line == "({} 2) awaiting reply...".format(agent_cmd.NAME)
+    assert painter.line == "({} 2) 等待回复…".format(agent_cmd.NAME)
 
 
 # ---- 提示词与显示预算一致 ----
@@ -1558,7 +1558,7 @@ def test_slash_undo_says_so_when_there_is_nothing_to_take_back(monkeypatch) -> N
 
     services, _ = _session(monkeypatch, ScriptedProvider([]), ["/undo", "/exit"])
 
-    assert "没有可以撤销的轮次" in services.messages[-1]
+    assert "没有可撤销的轮次" in services.messages[-1]
     assert services.values == ["", ""]
 
 
@@ -1825,7 +1825,7 @@ def test_a_command_that_would_step_on_the_turn_is_refused(monkeypatch) -> None:
 
     services, result = _session(monkeypatch, provider, ["任务一"], chars=[b"/undo"])
 
-    assert any("先 Ctrl-C" in text for text in services.messages)
+    assert any("请先按 Ctrl-C" in text for text in services.messages)
     assert len(provider.requests) == 1
 
 

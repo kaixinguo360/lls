@@ -30,7 +30,7 @@ async def cmd_sessions(s: Services, args: str | None) -> CommandResult:
     keeper = store()
     metas = keeper.list(include_archived=include_all)
     if not metas:
-        await s.show_message("还没有会话；直接运行 agent 会新开一条")
+        await s.show_message("尚没有会话；运行 agent 可新建一条")
         return CommandResult()
     current = keeper.current_id()
     rows = ["会话（* 为当前）："]
@@ -64,7 +64,7 @@ async def cmd_fork(s: Services, args: str | None) -> CommandResult:
         if part == "--at":
             index += 1
             if index >= len(parts) or not parts[index].isdigit():
-                await s.show_message("--at 需要一个序号")
+                await s.show_message("--at 需要提供序号")
                 return CommandResult()
             at_seq = int(parts[index])
         elif part.startswith("--"):
@@ -80,7 +80,7 @@ async def cmd_fork(s: Services, args: str | None) -> CommandResult:
     try:
         session = keeper.fork(spec, at_seq)
     except SessionError as e:
-        await s.show_message("error: {}".format(e))
+        await s.show_message("错误：{}".format(e))
         return CommandResult()
     await s.show_message(
         "已分叉到 {}（来自 {}，到 seq {}）".format(session.id, spec, at_seq or "末尾")
@@ -99,7 +99,7 @@ async def cmd_rm(s: Services, args: str | None) -> CommandResult:
     try:
         meta = keeper.drop(spec)
     except SessionError as e:
-        await s.show_message("error: {}".format(e))
+        await s.show_message("错误：{}".format(e))
         return CommandResult()
     await s.show_message("已删除会话 {}".format(meta.id))
     return CommandResult()

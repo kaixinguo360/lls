@@ -183,7 +183,7 @@ def test_thinking_lines_fit_under_conservative_width(columns: int) -> None:
 
 @pytest.mark.parametrize("columns", [40, 60, 80, 100])
 def test_menu_fits_under_conservative_width(columns: int) -> None:
-    rows = gen._menu_text(REAL_THINKING, ", confirm?", columns).split("\n")
+    rows = gen._menu_text(REAL_THINKING, "，确认？", columns).split("\n")
 
     for row in rows:
         assert gen._width(row) <= columns, row
@@ -193,7 +193,7 @@ def test_menu_fits_under_conservative_width(columns: int) -> None:
 
 
 @pytest.mark.parametrize("columns", [20, 40, 60, 80, 120])
-@pytest.mark.parametrize("hint", [", confirm?", ", please input 'y' or 'n':"])
+@pytest.mark.parametrize("hint", ["，确认？", "，请输入 y 或 n："])
 def test_menu_never_exceeds_the_terminal(columns: int, hint: str) -> None:
     for payload in ("ls -l", "中文" * 80, "x" * 500, ""):
         for row in gen._menu_text(payload, hint, columns).split("\n"):
@@ -202,7 +202,7 @@ def test_menu_never_exceeds_the_terminal(columns: int, hint: str) -> None:
 
 @pytest.mark.parametrize("columns", [20, 40, 60, 80, 120])
 def test_menu_respects_its_line_cap(columns: int) -> None:
-    rows = gen._menu_text("x" * 800, ", confirm?", columns).split("\n")
+    rows = gen._menu_text("x" * 800, "，确认？", columns).split("\n")
 
     assert len(rows) <= gen.MENU_LINES
 
@@ -210,22 +210,22 @@ def test_menu_respects_its_line_cap(columns: int) -> None:
 @pytest.mark.parametrize("columns", [30, 60, 80, 120])
 def test_menu_keeps_the_key_hint_visible(columns: int) -> None:
     """再长也要看得到按键提示 —— 它是这一行唯一必须留住的东西。"""
-    rows = gen._menu_text("echo " + "A" * 900, ", confirm?", columns).split("\n")
+    rows = gen._menu_text("echo " + "A" * 900, "，确认？", columns).split("\n")
 
     assert "y/i/n/e/r" in rows[-1]
 
 
 def test_menu_is_one_line_when_everything_fits() -> None:
-    line = gen._menu_text("echo hi", ", confirm?", 80)
+    line = gen._menu_text("echo hi", "，确认？", 80)
 
-    assert line == "(gen-cmd): echo hi, confirm? [y/i/n/e/r] "
+    assert line == "(gen-cmd): echo hi，确认？ [y/i/n/e/r] "
 
 
 def test_menu_wraps_instead_of_dropping_content() -> None:
     """放不下就折行，而不是按估算砍掉 payload。"""
     payload = "echo " + "A" * 120
 
-    rows = gen._menu_text(payload, ", confirm?", 60).split("\n")
+    rows = gen._menu_text(payload, "，确认？", 60).split("\n")
 
     assert len(rows) > 1
     joined = "".join(rows)
@@ -233,7 +233,7 @@ def test_menu_wraps_instead_of_dropping_content() -> None:
 
 
 def test_menu_truncates_only_when_it_exceeds_the_cap() -> None:
-    rows = gen._menu_text("x" * 900, ", confirm?", 60).split("\n")
+    rows = gen._menu_text("x" * 900, "，确认？", 60).split("\n")
 
     assert len(rows) == gen.MENU_LINES
     assert "…" in rows[-1]
@@ -307,7 +307,7 @@ def test_thinking_has_no_blank_lines_in_the_middle() -> None:
 
 
 def test_menu_flattens_payload_newlines() -> None:
-    line = gen._menu_text("a\n\nb", ", confirm?", 60)
+    line = gen._menu_text("a\n\nb", "，确认？", 60)
 
     assert "\n" not in line
     assert "a  b" in line
@@ -386,7 +386,7 @@ def test_unknown_key_reprompts(monkeypatch) -> None:
     (payload, _, _note), services = _produce(["zzz", "y"])
 
     assert payload == "ls"
-    assert "please input 'y' or 'n'" in services.lines[-1]
+    assert "请输入 y 或 n" in services.lines[-1]
 
 
 def test_edit_reads_new_request_then_regenerates(monkeypatch) -> None:
@@ -448,7 +448,7 @@ def test_hash_shortcut_still_asks_for_confirmation(monkeypatch) -> None:
     payload, _enter, _note = _produce_with(services, "说明#ls -l")
 
     assert payload is None
-    assert "confirm?" in services.lines[-1]
+    assert "确认？" in services.lines[-1]
 
 
 def test_hash_without_content_aborts(monkeypatch) -> None:
@@ -520,7 +520,7 @@ def test_run_generate_reports_errors(monkeypatch) -> None:
 
     _run(gen.run_generate(services, "请求"))
 
-    assert services.messages == ["error: backend exploded"]
+    assert services.messages == ["错误：backend exploded"]
     assert services.written == []
 
 

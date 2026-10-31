@@ -200,9 +200,9 @@ class KeyParser:
     def _finish_esc_pair(self, byte: int) -> list[Key]:
         """两字节转义（``ESC x``）。
 
-        歧义处理：用户按 Esc 再敲字符，字节流同样是 ``ESC x``。
+        歧义处理：用户按 Esc 后再输入字符，字节流同样是 ``ESC x``。
         与 readline 一致 —— 不是已知按键就按「Esc 键 + 该字符」处理，
-        否则用户按 Esc 之后打的字会被当成控制序列吞掉。
+        否则用户按 Esc 之后打的字会被当作控制序列丢弃。
         """
         self._state = _GROUND
         self._buf = b""

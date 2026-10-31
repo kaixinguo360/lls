@@ -58,7 +58,7 @@ class PassthroughHandler:
                 if i:
                     s.write(data[:i])
                 # 触发键之后同一批到达的字节属于**下一个**处理器：
-                # 用户可能在一次 read 里先按 Ctrl-E 又立刻敲命令。
+                # 用户可能在一次 read 里先按 Ctrl-E 又立刻输入命令。
                 # 丢弃会表现为「切过去之后按键失灵」，所以回填。
                 if i + 1 < len(data):
                     s.push_keys(data[i + 1 :])
@@ -129,10 +129,10 @@ class CommandHandler:
             # 完整堆栈交给应用层留档（供 err 命令查看），覆盖层只显示一行。
             if self._on_error is not None:
                 self._on_error(traceback.format_exc())
-            await s.show_message(f"error: {e}")
+            await s.show_message(f"错误：{e}")
             return
         if result is None:
-            await s.show_message(f"unknown command: {cmd}")
+            await s.show_message(f"未知命令：{cmd}")
             return
         if self._on_result is not None:
             outcome = self._on_result(s, result)
@@ -146,7 +146,7 @@ class CommandHandler:
         """离开本处理器，回到透传。
 
         ``requeue_pending_keys`` 不能省：同批到达的后续按键（按了回车/Esc 又
-        立刻敲字）还留在键盘缓冲里，而透传层读的是原始字节队列 —— 两个队列
+        立刻输入）还留在键盘缓冲里，而透传层读的是原始字节队列 —— 两个队列
         不互通，不回填就表现为「切过去之后按键失灵」。
         """
         s.requeue_pending_keys()

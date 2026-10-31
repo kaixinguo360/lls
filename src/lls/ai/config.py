@@ -35,7 +35,7 @@ def _as_str(value: Any, field_name: str, fallback: str | None = None) -> str | N
     if value is None:
         return fallback
     if not isinstance(value, str):
-        raise ConfigError(f"{field_name} must be a string")
+        raise ConfigError(f"{field_name} 必须是字符串")
     return value
 
 
@@ -53,7 +53,7 @@ def _parse_provider(
     pid: str, data: Any, notes: Optional[list[str]] = None
 ) -> ProviderConfig:
     if not isinstance(data, dict):
-        raise ConfigError(f"ai.providers.{pid} must be a mapping")
+        raise ConfigError(f"ai.providers.{pid} 必须是映射")
     _unknown(
         data,
         {
@@ -72,36 +72,36 @@ def _parse_provider(
     )
     ptype = _as_str(data.get("type"), f"ai.providers.{pid}.type")
     if not ptype:
-        raise ConfigError(f"ai.providers.{pid}.type is required")
+        raise ConfigError(f"ai.providers.{pid}.type 为必填项")
 
     models_raw = data.get("models") or []
     if not isinstance(models_raw, list):
-        raise ConfigError(f"ai.providers.{pid}.models must be a list")
+        raise ConfigError(f"ai.providers.{pid}.models 必须是列表")
     models: list[str] = []
     for item in models_raw:
         if not isinstance(item, str):
-            raise ConfigError(f"ai.providers.{pid}.models entries must be strings")
+            raise ConfigError(f"ai.providers.{pid}.models 的每一项必须是字符串")
         models.append(item)
 
     headers_raw = data.get("headers") or {}
     if not isinstance(headers_raw, dict):
-        raise ConfigError(f"ai.providers.{pid}.headers must be a mapping")
+        raise ConfigError(f"ai.providers.{pid}.headers 必须是映射")
 
     params_raw = data.get("params") or {}
     if not isinstance(params_raw, dict):
-        raise ConfigError(f"ai.providers.{pid}.params must be a mapping")
+        raise ConfigError(f"ai.providers.{pid}.params 必须是映射")
 
     window_raw = data.get("context_window", 128_000)
     if isinstance(window_raw, bool) or not isinstance(window_raw, int):
-        raise ConfigError(f"ai.providers.{pid}.context_window must be an int")
+        raise ConfigError(f"ai.providers.{pid}.context_window 必须是整数")
     if window_raw <= 0:
-        raise ConfigError(f"ai.providers.{pid}.context_window must be positive")
+        raise ConfigError(f"ai.providers.{pid}.context_window 必须大于 0")
 
     timeout_raw = data.get("timeout", 60.0)
     try:
         timeout = float(timeout_raw)
     except (TypeError, ValueError) as e:
-        raise ConfigError(f"ai.providers.{pid}.timeout must be a number") from e
+        raise ConfigError(f"ai.providers.{pid}.timeout 必须是数字") from e
 
     return ProviderConfig(
         id=pid,
@@ -123,7 +123,7 @@ def _parse_tools(raw: Any, notes: Optional[list[str]]) -> dict[str, ToolOptions]
         return {}
     if not isinstance(raw, dict):
         if notes is not None:
-            notes.append("ai.tools must be a mapping; ignored")
+            notes.append("ai.tools 必须是映射；已忽略")
         return {}
     settings: dict[str, ToolOptions] = {}
     for name, value in raw.items():
@@ -145,7 +145,7 @@ def parse_ai(
     """
     section = data.get("ai") or {}
     if not isinstance(section, dict):
-        raise ConfigError("ai must be a mapping")
+        raise ConfigError("ai 必须是映射")
     _unknown(
         section,
         {"default_model", "providers", "context_limit", "tools"},
@@ -155,7 +155,7 @@ def parse_ai(
 
     providers_raw = section.get("providers") or {}
     if not isinstance(providers_raw, dict):
-        raise ConfigError("ai.providers must be a mapping")
+        raise ConfigError("ai.providers 必须是映射")
     providers = {
         str(pid): _parse_provider(str(pid), conf, notes)
         for pid, conf in providers_raw.items()
@@ -165,7 +165,7 @@ def parse_ai(
 
     limit_raw = section.get("context_limit", 0)
     if isinstance(limit_raw, bool) or not isinstance(limit_raw, int) or limit_raw < 0:
-        raise ConfigError("ai.context_limit must be a non-negative int")
+        raise ConfigError("ai.context_limit 必须是非负整数")
 
     return AIConfig(
         providers=providers,

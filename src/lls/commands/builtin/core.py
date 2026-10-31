@@ -28,9 +28,9 @@ async def cmd_quit(s: Services, args: str | None) -> CommandResult:
 async def cmd_err(s: Services, args: str | None) -> CommandResult:
     """显示最近捕获的错误信息"""
     if not _last_error:
-        await s.show_message("no catched error")
+        await s.show_message("没有捕获到错误")
     else:
-        await s.show_message(f"catched error:\n{_last_error[0]}")
+        await s.show_message(f"最近的错误：\n{_last_error[0]}")
     return CommandResult()
 
 

@@ -7,7 +7,7 @@
 脚本），照着这三个方法实现一遍就行。
 
 读写分开是有意的：动作工具（``send_*``）只写，读屏只有 ``read_terminal`` 与
-``wait_for`` 两个入口 —— 什么时候观察由模型决定，而不是每敲一个键就回一屏。
+``wait_for`` 两个入口 —— 什么时候观察由模型决定，而不是每输入一个按键就回一屏。
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ class TerminalPort(Protocol):
     async def wait(self, timeout: float) -> None: ...
 
 
-#: 等的时候「顺手把键盘处理掉」的回调（Ctrl-C 由它变成取消）。
+#: 等的时候「同时处理键盘事件」的回调（Ctrl-C 由它变成取消）。
 Poll = Callable[[float], Awaitable[None]]
 
 
@@ -70,7 +70,7 @@ def _new_lines(before: list[str], after: list[str]) -> list[str]:
     """``after`` 里相对 ``before`` 多出来的行：按出现次数扣，不看位置。
 
     用行数而不是位置，滚屏和原地重画都不影响判断；同一个提示符第二次出现
-    时次数+1，照样算新行。
+    时次数+1，仍然算新行。
     """
     remaining: dict[str, int] = {}
     for line in before:

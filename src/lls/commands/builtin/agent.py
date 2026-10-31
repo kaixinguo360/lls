@@ -208,7 +208,7 @@ _SLASH_METAS = tuple(
 #: 会话内输入行的补全器：只认行首的 ``/命令``，路径与 ``//`` 原样放过。
 _SLASH_COMPLETER = completer_for(_SLASH_METAS, marker="/", path_escape=True)
 
-# 执行中敲下这条命令怎么办。只在「有一轮正跑着、用户又敲了命令」时才看（见
+# 执行中输入这条命令怎么办。只在「有一轮正跑着、用户又输入了命令」时才看（见
 # _typing）：判定集中在这一张表里，命令方法自己不知道忙不忙。四种：
 #   now   —— 不碰本轮正在用的东西：就地执行，完了回到执行中界面
 #   after —— 只动历史尾部：排到本轮结束后执行（提示里写明）
@@ -250,24 +250,23 @@ class _Switch(Exception):
 
 
 def _looks_like_path(name):
-    """``usr/bin/env``、``etc/passwd`` 是路径不是命令，别吃掉。"""
+    """``usr/bin/env``、``etc/passwd`` 是路径而非命令，不应作为命令处理。"""
     return "/" in name or name.startswith((".", "~"))
 
 
 def _unknown_command(name):
     """没匹配上的 ``/xxx``：报错，不当任务发出去。
 
-    打错的 ``/modle`` 若悄悄变成任务，模型会拿它当指令去执行，代价比一句
-    报错大得多；而报错是可恢复的 —— 这行已经进了输入历史，↑ 就能改。
+    拼写错误的 ``/modle`` 若悄悄变成任务，模型会拿它当指令去执行，风险远高于一句报错；而报错是可恢复的 —— 这行已经进了输入历史，↑ 就能改。
     """
-    rows = ["没有这个命令：/{}（这一行没有发给模型）".format(name)]
+    rows = ["未知命令：/{}（这一行未发送给模型）".format(name)]
     close = difflib.get_close_matches(
         name, sorted(item.name for item in _SLASH_COMMANDS), n=1, cutoff=0.6
     )
     if close:
-        rows.append("是不是想输入 /{}？".format(close[0]))
+        rows.append("是否想输入 /{}？".format(close[0]))
     rows.append("/help 列出全部命令。")
-    rows.append("要把这一行原样交给模型，行首再加一个斜杠：//{}".format(name))
+    rows.append("如需将这一行原样发送给模型，请在行首再加一个斜杠：//{}".format(name))
     return "\n".join(rows)
 
 
@@ -276,7 +275,7 @@ NAME = "agent"
 INPUT_PROMPT = "(" + NAME + "): "
 # 执行中的输入行：这一行回车不是「下一轮」，是排在这一轮后面（见 _typing）。
 QUEUE_PROMPT = "(" + NAME + "-queued): "
-# 行首一个斜杠：这一行是命令，不会发给模型。提示符当场换成它，敲下第一个
+# 行首一个斜杠：这一行是命令，不会发给模型。提示符当场换成它，输入第一个
 # 字符就能看出「回车是执行命令」而不是「回车是下一轮任务」。
 CMD_PROMPT = "(" + NAME + "-cmd): "
 TASK_PREFIX = "(" + NAME + ") "   # 任务行：与 /status 里的一字不差
@@ -307,7 +306,7 @@ SYSTEM_PROMPT = f"""\
 - read_file(path, start_line, max_lines)：直接读文件（按行号取一段），比先
   cat 再回读省钱，也不会滚出屏幕。
 - write_file(path, content, append)：直接写文件（append=false 覆盖写），适合
-  改配置、写脚本这类动作；内容多时比 send_text 敲进编辑器可靠。
+  改配置、写脚本这类动作；内容多时比 send_text 输入到编辑器可靠。
 
 显示环境：
 - 你的最终答复显示在终端会话提示里：最多 {SUGGESTED_REPLY_LINES} 行，且只保留最近 {LOG_ENTRIES} 轮，更长的
@@ -417,7 +416,7 @@ def _reply_rows(text: str, columns: int, bold: bool = False) -> list[str]:
 # 第一行没有具体动作时说的话：每一句都对应一个能核对的时刻。
 PREPARING = "preparing..."      # 快照、拼上下文：此刻没有请求在路上
 COMPACTING = "compacting..."    # 把旧历史压成摘要，一次网络请求
-AWAITING = "awaiting reply..."  # 请求已发出，模型第一个字节还没到
+AWAITING = "等待回复…"  # 请求已发出，模型第一个字节还没到
 REPLYING = "replying..."        # 正文在流里
 REASONING = "reasoning..."      # 只有推理在流里，正文还没开始
 PLANNING = "planning a call..." # 工具调用的参数在流里，还没拼完
@@ -552,7 +551,7 @@ class _Painter:
             line = _line(prefix, self._phase, columns)
         self._line = line
         if self._draw and line != self._drawn:
-            # 定时重画的多数帧一行未变：不重写屏幕，免得终端白刷。
+            # 定时重画的多数帧一行未变：不重写屏幕，避免终端重复刷新。
             self._drawn = line
             self._s.draw_overlay(line)
 
@@ -582,7 +581,7 @@ def _hands_over(line: Any) -> bool:
 class _Parsed(NamedTuple):
     """一行输入解析出来的东西：先看清要做什么，排队和兑现都用它。
 
-    执行中敲下的那一行不能把原文塞进队里、到兑现时再解释一遍 —— 那就成了
+    执行中输入的那一行不能把原文塞进队里、到兑现时再解释一遍 —— 那就成了
     两套说法（排的是这一行，跑的也许是另一行）。所以一按回车就整行解释掉，
     队里放的是这条解释的结果。
     """
@@ -590,7 +589,7 @@ class _Parsed(NamedTuple):
     kind: str        # task / command / unknown / exit / skip / end
     shown: str = ""  # 屏幕上原样显示的那一行（排队列表用）
     text: str = ""   # kind=="task"：交给模型的那一句
-    name: str = ""   # kind=="command"：要调的方法；unknown：敲的名称
+    name: str = ""   # kind=="command"：要调的方法；unknown：输入的名称
     args: str = ""
 
 
@@ -620,7 +619,7 @@ def _parse(line: Any) -> "_Parsed":
     method = _SLASH_INDEX.get(name)
     if method is None:
         if _looks_like_path(name):
-            # /usr/bin/env、/etc/passwd 这类是路径，别当命令吃掉。
+            # /usr/bin/env、/etc/passwd 这类是路径，不应作为命令处理。
             return _Parsed("task", text, text)
         return _Parsed("unknown", text, name=name)
     return _Parsed("command", text, name=method, args=rest.strip())
@@ -630,7 +629,7 @@ def _is_command_line(text: str) -> bool:
     """这一行回车是执行命令，而不是发给模型？
 
     提示符换不换、↑ 翻哪一类历史，用的都是这一条：``//转义`` 与
-    ``/usr/bin/env`` 这类路径仍算任务，敲错的命令归命令 —— 改一个字母再
+    ``/usr/bin/env`` 这类路径仍算任务，拼写错误的命令归为命令 —— 改一个字母再
     回车，本来就是翻命令的用处。
     """
     return _parse(text).kind in ("command", "unknown")
@@ -681,7 +680,7 @@ class _Session:
         self._tools.add_middleware(self._guard)
         self._log = session.log(LOG_ENTRIES) if session is not None else []
         self._retype = ""  # /undo 放回输入行的原文，读过一次就清空
-        self._draft = ""   # 执行中敲下的草稿：回到提示时原样还给你
+        self._draft = ""   # 执行中输入中的草稿：回到提示时原样还给你
         self._queue: List[str] = []   # 执行中回车排下的队，按顺序兑现
         self._notice = ""             # 执行中「已排队」那一句，画在队伍上方
         self._abort: Any = None  # 执行中的中断信号，见 _poll（每轮新建）
@@ -689,7 +688,7 @@ class _Session:
         # 键盘归这一轮自己读（见 _listen），_poll 不再去抢。
         self._typing_active = False
         self._end = False              # 这一轮里子进程没了，见 _poll
-        self._exit_requested = False   # 执行中敲了 /exit：这一轮收尾后退
+        self._exit_requested = False   # 执行中输入了 /exit：这一轮收尾后退
         self._window = None
         self._compacted_now = False
         self._compact_error = ""
@@ -707,7 +706,7 @@ class _Session:
             if task is None:
                 # 执行中排下的队先兑现：一轮结束后直接接着跑队首，
                 # 队空了才回到提示。排队的内容仍按一行的规矩解释 ——
-                # 斜杠命令照样是命令，不是任务。
+                # 斜杠命令仍然是命令，不是任务。
                 if self._queue:
                     task = await self._interpret(self._queue.pop(0))
                 else:
@@ -728,7 +727,7 @@ class _Session:
     async def _ask(self) -> Any:
         """读一个任务；返回文本或 ``_CANCEL`` / ``_EXIT`` / None（会话结束）。"""
         line = await self._s.read_line(
-            # 提示串用函数：敲下第一个字符就得换成 (agent-cmd)，见 _input_prompt。
+            # 提示串用函数：输入第一个字符就得换成 (agent-cmd)，见 _input_prompt。
             self._prompt_text,
             include_last=False,
             value=self._retype or self._draft,
@@ -753,7 +752,7 @@ class _Session:
 
         空闲的提示与执行中的队列共用这一套兑现：队里放的是解释好的
         :class:`_Parsed`（见 :func:`_parse`），到了该跑的时候只剩执行 ——
-        斜杠命令照样是命令，不是任务。
+        斜杠命令仍然是命令，不是任务。
         """
         if parsed.kind == "end":
             return None
@@ -774,7 +773,7 @@ class _Session:
     # ---- 各个 / 命令 ----
 
     async def _slash_help(self, args: str) -> Any:
-        rows = ["会话内命令（本地执行，不发给模型）："]
+        rows = ["会话内命令（本地执行，不发送给模型）："]
         for item in _SLASH_COMMANDS:
             alias = ""
             if item.aliases:
@@ -786,7 +785,7 @@ class _Session:
             elif policy == "after":
                 summary += "（本轮结束后执行）"
             rows.append("  {}{}  {}".format(item.usage, alias, summary))
-        rows.append("行首 // 表示去掉一个斜杠后原样交给模型；/usr/bin 这类路径也照原样发出。")
+        rows.append("行首 // 表示去掉一个斜杠后原样发送给模型；/usr/bin 这类路径也原样发出。")
         await self._s.show_message("\n".join(rows))
         return _CANCEL
 
@@ -839,18 +838,18 @@ class _Session:
 
     async def _slash_title(self, args: str) -> Any:
         if self._session is None:
-            await self._s.show_message("本次会话不保存到磁盘，改不了标题")
+            await self._s.show_message("本次会话不持久化，无法修改标题")
             return _CANCEL
         text = args.strip()
         if not text:
             await self._s.show_message(
-                "标题：{}（用 /title <文字> 改）".format(
+                "标题：{}（使用 /title <文字> 修改）".format(
                     self._session.meta.title or "无标题"
                 )
             )
             return _CANCEL
         self._session.set_title(text)
-        await self._s.show_message("标题已改为 " + self._session.meta.title)
+        await self._s.show_message("标题已更新为 " + self._session.meta.title)
         return _CANCEL
 
     async def _slash_model(self, args: str) -> Any:
@@ -891,7 +890,7 @@ class _Session:
             await self._s.show_message("\n".join(rows))
             return _CANCEL
         if self._typing_active:
-            await self._s.show_message("本轮执行中，等结束后再切模型")
+            await self._s.show_message("本轮正在执行，结束后才能切换模型")
             return _CANCEL
         current = "{}/{}".format(self._provider_id, self._model)
         specs = [spec for spec, _ in choices]
@@ -916,13 +915,13 @@ class _Session:
     async def _switch_model(self, spec: str) -> Any:
         """切到 provider/model；失败只报错，不改状态。"""
         if self._catalog is None:
-            await self._s.show_message("本次会话读不到模型配置，改不了模型")
+            await self._s.show_message("本次会话无法读取模型配置，无法切换模型")
             return _CANCEL
         try:
             provider_id, model_id = self._catalog.resolve_spec(spec)
             provider = self._catalog.get(provider_id)
         except (ConfigError, SessionError) as e:
-            await self._s.show_message("error: {}".format(e))
+            await self._s.show_message("错误：{}".format(e))
             return _CANCEL
         self._provider = provider
         self._provider_id = provider_id
@@ -936,7 +935,7 @@ class _Session:
             if self._keeper is not None:
                 self._keeper.write_meta(meta)
         await self._s.show_message(
-            "已切到 {}/{}（窗口 {} tok），历史不变，下一轮生效".format(
+            "已切换到 {}/{}（窗口 {} tok），历史不变，下一轮生效".format(
                 provider_id, model_id, self._budget
             )
         )
@@ -945,7 +944,7 @@ class _Session:
     async def _slash_compact(self, args: str) -> Any:
         """立刻压一次历史。摘要是一次网络请求：先摆出这一相，且可中断。"""
         if self._session is None:
-            await self._s.show_message("本次会话不保存到磁盘，没有可压缩的历史")
+            await self._s.show_message("本次会话不持久化，没有可压缩的历史")
             return _CANCEL
         painter = _Painter(self._s)
         # 这时没人打字：这一行状态自己画上去，压完由 finally 收尾。
@@ -971,7 +970,7 @@ class _Session:
     async def _slash_tools(self, args: str) -> Any:
         """工具开关：空格翻转，r 回到跟随全局，回车保存到本会话。"""
         if self._typing_active:
-            await self._s.show_message("本轮执行中，等结束后再改工具")
+            await self._s.show_message("本轮正在执行，结束后才能修改工具")
             return _CANCEL
         names = [entry.tool.name for entry in self._all_tools]
         if not names:
@@ -996,7 +995,7 @@ class _Session:
         self._apply_tool_switches(chosen)
         off = [item.name for item in chosen if not item.enabled]
         if off:
-            await self._s.show_message("已保存到本会话：关闭 " + "、".join(off))
+            await self._s.show_message("已保存到本会话：已关闭 " + "、".join(off))
         else:
             await self._s.show_message("已保存到本会话：全部启用")
         return _CANCEL
@@ -1036,14 +1035,14 @@ class _Session:
         try:
             return self._keeper.resolve(spec), ""
         except SessionError as e:
-            return None, "error: {}".format(e)
+            return None, "错误：{}".format(e)
 
     async def _slash_new(self, args: str) -> Any:
         raise _Switch(("new", args.strip()))
 
     async def _slash_fork(self, args: str) -> Any:
         if self._keeper is None or self._session is None:
-            await self._s.show_message("本次会话不保存到磁盘，没法分叉")
+            await self._s.show_message("本次会话不持久化，无法分叉")
             return _CANCEL
         at_seq = 0
         rest = args.strip()
@@ -1056,7 +1055,7 @@ class _Session:
         try:
             forked = self._keeper.fork(self._session.id, at_seq)
         except SessionError as e:
-            await self._s.show_message("error: {}".format(e))
+            await self._s.show_message("错误：{}".format(e))
             return _CANCEL
         await self._s.show_message(
             "已分叉到 {}，来自会话 {}{}".format(
@@ -1100,7 +1099,7 @@ class _Session:
             await self._s.show_message(note + "已退出 agent 模式。")
             return _EXIT
         await self._s.show_message(
-            note + "没有别的会话了，已退出 agent 模式；要新会话用 agent --new。"
+            note + "没有其他会话，已退出 agent 模式；新建会话请使用 agent --new。"
         )
         return _EXIT
 
@@ -1108,17 +1107,17 @@ class _Session:
         """删掉本会话：确认后删，然后把会话列表摆出来让人挑下一条。
 
         只认自己，不带参数 —— 会话 id 记不住，也不该为了删一条会话先
-        ``/exit``。删掉的正是「不想留」的那一条，所以不顺手再开一条空的：
+        ``/exit``。删掉的正是「不想留」的那一条，所以不会一并新建空会话：
         选界面里挑中的那条才接着用，按 q、或者一条都不剩时才退出 agent。
         """
         if args.strip():
-            await self._s.show_message("用法：/rm（删除本会话，不需要参数）")
+            await self._s.show_message("用法：/rm（删除本会话，不接受参数）")
             return _CANCEL
         if self._keeper is None:
             await self._s.show_message("会话存储不可用")
             return _CANCEL
         if self._session is None:
-            await self._s.show_message("本次会话不保存到磁盘，没有可删的会话")
+            await self._s.show_message("本次会话不持久化，没有可删除的会话")
             return _CANCEL
         meta = self._session.meta
         if not await self._confirm(
@@ -1128,7 +1127,7 @@ class _Session:
         try:
             gone = self._keeper.drop(meta.id)
         except SessionError as e:
-            await self._s.show_message("error: {}".format(e))
+            await self._s.show_message("错误：{}".format(e))
             return _CANCEL
         return await self._switch_after_gone(
             "已删除会话 {}（{}）。".format(gone.id, gone.title or "无标题")
@@ -1142,13 +1141,13 @@ class _Session:
         退出 agent —— 挑一条留着接着用，按 q 或一条都不剩时才退出。
         """
         if args.strip():
-            await self._s.show_message("用法：/archive（归档本会话，不需要参数）")
+            await self._s.show_message("用法：/archive（归档本会话，不接受参数）")
             return _CANCEL
         if self._keeper is None:
             await self._s.show_message("会话存储不可用")
             return _CANCEL
         if self._session is None:
-            await self._s.show_message("本次会话不保存到磁盘，没有可归档的会话")
+            await self._s.show_message("本次会话不持久化，没有可归档的会话")
             return _CANCEL
         meta = self._session.meta
         if not await self._confirm(
@@ -1158,7 +1157,7 @@ class _Session:
         try:
             gone = self._keeper.archive(meta.id)
         except SessionError as e:
-            await self._s.show_message("error: {}".format(e))
+            await self._s.show_message("错误：{}".format(e))
             return _CANCEL
         return await self._switch_after_gone(
             "已归档会话 {}（{}）。".format(gone.id, gone.title or "无标题")
@@ -1171,7 +1170,7 @@ class _Session:
         模型：那一轮既没有任务也没有答复，回来只会把提示行又刷一遍。
         """
         if not self._log:
-            await self._s.show_message("这一轮已经结束，没有可以接着执行的内容")
+            await self._s.show_message("本轮已经结束，没有可继续执行的内容")
             return _CANCEL
         return _CONTINUE
 
@@ -1184,17 +1183,17 @@ class _Session:
         算错，反而摆不下。
         """
         if args.strip():
-            await self._s.show_message("用法：/undo（撤销上一轮，不需要参数）")
+            await self._s.show_message("用法：/undo（撤销上一轮，不接受参数）")
             return _CANCEL
         if self._session is None:
             if not self._log:
-                await self._s.show_message("没有可以撤销的轮次")
+                await self._s.show_message("没有可撤销的轮次")
                 return _CANCEL
             task = self._log.pop()[0]
         else:
             point = self._session.undo_point()
             if point is None:
-                await self._s.show_message("没有可以撤销的轮次")
+                await self._s.show_message("没有可撤销的轮次")
                 return _CANCEL
             start, task = point
             self._session.append_undo(start - 1)
@@ -1215,7 +1214,7 @@ class _Session:
 
         屏幕在这一轮里分成两段（见 :meth:`_listen`）：用户没按键时只有那一
         行状态，和以前一模一样；按了第一个键才换成输入行 —— 一边看它跑一边
-        把下一句敲完回车就排进队（见 :meth:`_typing`）。
+        输入下一句并回车即可排入队列（见 :meth:`_typing`）。
         """
         painter = _Painter(self._s)
         # 先摆上状态，再去忙那些要等的事（快照、压缩、拼上下文）：等下去的
@@ -1318,7 +1317,7 @@ class _Session:
         走到这里说明用户已经按过键了（见 :meth:`_listen`）：这是完整界面在
         执行中的样子，不是这一轮的默认长相。与空闲提示用的是同一个编辑器、
         同一个 ``history_id``：↑ 召回、多行粘贴、emoji 退格全都一样。草稿一
-        敲下就交给 :meth:`_remember_draft` 存着，所以中断之后回到提示，那句话
+        输入后即交给 :meth:`_remember_draft` 存着，所以中断之后回到提示，那句话
         还在原处，不会白打一遍。
         """
 
@@ -1328,7 +1327,7 @@ class _Session:
             if work.done():
                 return _FINISHED
             if not self._draft and not self._s.keys_pending():
-                # 一格没敲、手上也没有键：收起输入行，回单行执行界面。
+                # 没有输入、手上也没有按键：收起输入行，回单行执行界面。
                 return _COLLAPSE
             return None
 
@@ -1396,7 +1395,7 @@ class _Session:
                 # 下一步怎么做：不是默默无视。
                 self._draft = text
                 await self._s.show_message(
-                    "本轮执行中，先 Ctrl-C 中断本轮再执行 {}。".format(text)
+                    "本轮正在执行，请先按 Ctrl-C 中断，再执行 {}。".format(text)
                 )
                 continue
             if parsed.kind == "unknown":
@@ -1410,7 +1409,7 @@ class _Session:
             return False
 
     def _remember_draft(self, text: str, cursor: int) -> None:
-        """执行中敲下的草稿：中断之后回到提示时原样还给你。"""
+        """执行中输入中的草稿：中断之后回到提示时原样还给你。"""
         self._draft = text
 
     async def _poll(self, timeout: float) -> None:
@@ -1481,7 +1480,7 @@ class _Session:
             self._record(label, "", str(e))
             return
         except Exception as e:  # noqa: BLE001
-            note = "error: {}".format(e)
+            note = "错误：{}".format(e)
             self._finish_turn("error", note, window, None)
             self._record(label, "", note)
             return
@@ -1736,7 +1735,7 @@ class _Session:
     def _input_prompt(self, task_prompt: str, cmd_prompt: str) -> str:
         """这一行是任务还是命令：行首一个斜杠就是命令（``//`` 是转义）。
 
-        提示符跟着换，敲下第一个字符就看出回车会执行命令、不会发给模型。
+        提示符跟着换，输入第一个字符就看出回车会执行命令、不会发给模型。
         执行中也不换：命令就是命令，不因这一轮还在跑就另起一个提示符。
         """
         if _is_command_line(self._draft):
@@ -1878,7 +1877,7 @@ def _parse_args(args: str | None) -> _Options:
         elif head in ("--resume", "--model"):
             value, _, tail = tail.strip().partition(" ")
             if not value:
-                raise ValueError("{} 需要一个值".format(head))
+                raise ValueError("{} 需要提供值".format(head))
             if head == "--resume":
                 opts.resume = value
             else:
@@ -1887,7 +1886,7 @@ def _parse_args(args: str | None) -> _Options:
         elif head == "--title":
             # 标题可能带空格：整行剩下的都算标题。
             if not tail.strip():
-                raise ValueError("--title 需要一段文字")
+                raise ValueError("--title 需要提供文本")
             opts.title = tail.strip()
             rest = ""
         else:
@@ -1928,7 +1927,7 @@ async def _choose_session(
     """
     metas = await offload(keeper.list)
     if not metas:
-        await services.show_message("还没有会话；直接运行 agent 会新开一条")
+        await services.show_message("尚没有会话；运行 agent 可新建一条")
         return None
     labels = [
         _session_label(meta, meta.id == current, meta.id == busy) for meta in metas
@@ -1986,7 +1985,7 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
     try:
         opts = _parse_args(args)
     except ValueError as e:
-        await s.show_message("error: {}".format(e))
+        await s.show_message("错误：{}".format(e))
         return CommandResult()
 
     keeper = store()
@@ -1994,14 +1993,14 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
         metas = keeper.list(include_archived=opts.all)
         await s.show_message(
             "\n".join([_session_label(m) for m in metas])
-            or "还没有会话；直接运行 agent 会新开一条"
+            or "尚没有会话；运行 agent 可新建一条"
         )
         return CommandResult()
 
     try:
         catalog = default_catalog()
     except ConfigError as e:
-        await s.show_message("error: {}".format(e))
+        await s.show_message("错误：{}".format(e))
         return CommandResult()
 
     # 全局工具策略从配置重算（--set 改过的也算数）；会话层在 _Session 里叠加。
@@ -2021,12 +2020,12 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
             why, busy = "{}".format(e), e.session_id
         except SessionError as e:
             if not opts.resume:
-                await s.show_message("error: {}".format(e))
+                await s.show_message("错误：{}".format(e))
                 return CommandResult()
-            why = "error: {}".format(e)
+            why = "错误：{}".format(e)
         except ConfigError as e:
             # 模型 / provider 配置本身有问题，换会话也没用。
-            await s.show_message("error: {}".format(e))
+            await s.show_message("错误：{}".format(e))
             return CommandResult()
         else:
             try:
@@ -2035,7 +2034,7 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
                 gone = session.id
                 session.close()
                 session = None
-                why = "error: {}（会话 {} 的 provider 已不存在）".format(e, gone)
+                why = "错误：{}（会话 {} 的 provider 已不存在）".format(e, gone)
         if why:
             await s.show_message(why)
             chosen = await _choose_session(

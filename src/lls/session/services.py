@@ -149,7 +149,7 @@ class Services:
 
         ``prompt`` 可以是函数（每次重画现算提示串）。``tick()`` 在空转的
         每一格被调用，返回非 None 就带着它离开 —— 调用方据此把「轮次结束」
-        这类外部事件变成一次返回，也顺手把状态行的时间刷新了。
+        这类外部事件变成一次返回，也同时刷新状态行的时间。
         ``on_edit(text, cursor)`` 每处理一个键调一次，供调用方存草稿。
         ``completer(text, cursor)`` 给出 Tab 补全与行尾语法提示；不给时 Tab
         无动作。``completion_style`` 覆盖引擎的默认长相（``ghost`` 虚影 /
@@ -205,7 +205,7 @@ class Services:
     def record_history(self, value: str, history_id: str) -> None:
         """把一条内容记入某 ``history_id`` 的历史，供之后用 ↑ 召回。
 
-        用于那些**不是用户敲进提示行**、但事后需要召回的内容（例如 generate
+        用于那些**不是用户输入到提示行**、但事后需要召回的内容（例如 generate
         产出的命令）。不改变任何编辑状态。
         """
         self._engine.record_history(value, history_id)

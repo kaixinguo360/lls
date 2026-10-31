@@ -68,7 +68,7 @@ async def cmd_tools(s: Services, args: str | None) -> CommandResult:
     apply_global_states(chosen)
     off = [item.name for item in chosen if not item.enabled]
     if off:
-        await s.show_message("全局工具已更新（本次进程有效）：关闭 " + "、".join(off))
+        await s.show_message("全局工具已更新（本次进程有效）：已关闭 " + "、".join(off))
     else:
         await s.show_message("全局工具已更新（本次进程有效）：全部启用")
     return CommandResult()

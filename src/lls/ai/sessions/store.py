@@ -7,7 +7,7 @@
     <root>/<id>/blobs/<sha1>   大块工具输出，事件里只留指针
     <root>/<id>/lock           fcntl 排他锁，内容是占用者的 pid
 
-写事件不重写文件：崩溃最多丢最后一行，不会把整条会话弄坏。``index.json``
+写事件不重写文件：崩溃最多丢最后一行，不会把整条会话损坏。``index.json``
 只是「当前会话」的缓存，丢了按目录重扫即可。
 """
 
@@ -206,7 +206,7 @@ def _title_of(text: str) -> str:
 def _dropped(seq: int, ranges: List[Tuple[int, int]]) -> bool:
     """``seq`` 落在某次撤销抹掉的区间里吗：``drop_from < seq < undo.seq``。
 
-    undo 自己那条不在区间内（上界是开区间），所以它照样可读、可继续叠加。
+    undo 自己那条不在区间内（上界是开区间），所以它仍然可读、可继续叠加。
     """
     for low, high in ranges:
         if low < seq < high:

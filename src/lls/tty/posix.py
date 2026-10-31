@@ -89,7 +89,7 @@ class _PosixConsole:
         """查询宿主终端光标位置（DSR：``ESC[6n`` → ``ESC[行;列R``）。
 
         返回 1-based ``(row, column)``；终端不响应（重定向/不支持）时返回 None。
-        期间读到的非应答字节（用户提前敲的键）存入 ``_pending``，
+        期间读到的非应答字节（用户提前输入的按键）存入 ``_pending``，
         由 :meth:`take_pending` 取回，避免丢键。
         """
         fd = sys.stdin.fileno()

@@ -27,7 +27,7 @@ def parse_model_spec(spec: str) -> tuple[str, str]:
     provider_id = provider_id.strip()
     model_id = model_id.strip()
     if not sep or not provider_id or not model_id:
-        raise ConfigError(f"model spec must be 'provider/model', got {spec!r}")
+        raise ConfigError(f"模型标识必须为 'provider/model'，得到 {spec!r}")
     return provider_id, model_id
 
 
@@ -49,7 +49,7 @@ class Catalog:
         conf = self._config.providers.get(provider_id)
         if conf is None:
             raise ConfigError(
-                "no such provider {!r} (configured: {})".format(
+                "没有名为 {!r} 的 provider（已配置：{}）".format(
                         provider_id, ", ".join(self.provider_ids()) or "<none>"
                     )
             )
@@ -68,7 +68,7 @@ class Catalog:
         chosen = spec or self._config.default_model
         if not chosen:
             raise ConfigError(
-                "no model configured: set ai.default_model in %s"
+                "未配置模型：请在 %s 中设置 ai.default_model"
                 % (self._config.path or "config")
             )
         return parse_model_spec(chosen)
@@ -77,7 +77,7 @@ class Catalog:
         """取 provider 的配置（窗口、超时这些预算参数都在这里）。"""
         conf = self._config.providers.get(provider_id)
         if conf is None:
-            raise ConfigError("no such provider {!r}".format(provider_id))
+            raise ConfigError("没有名为 {!r} 的 provider".format(provider_id))
         return conf
 
     def context_limit(self) -> int:

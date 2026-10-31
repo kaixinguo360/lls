@@ -3,7 +3,7 @@
 配置文件是唯一入口，环境变量只负责指定文件位置（``LLS_CONFIG`` /
 ``XDG_CONFIG_HOME``，以及命令行 ``--config``）。文件不存在、YAML 坏掉或某
 一段写错时，靠默认值照常启动；只有真正用到 ``ai`` 的命令才把配置错误报给
-用户。未知键会告警，避免把 ``histroy:`` 这种拼写问题静默吞掉。
+用户。未知键会告警，避免把 ``histroy:`` 这种拼写问题静默忽略。
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ DEFAULT_FILENAME = "config.yaml"
 #: 载入进 ↑ 的条数上限。放在这里，配置层与历史层共用同一个默认值。
 DEFAULT_HISTORY_MAX_ENTRIES = 200
 
-#: 单个历史文件超过它就顺手压缩。
+#: 单个历史文件超过它就自动压缩。
 DEFAULT_HISTORY_MAX_BYTES = 128 * 1024
 
 #: 输入行补全的默认长相：行尾虚影（另一种是 ``"redis"`` 轮盘）。
@@ -153,24 +153,24 @@ def _read_raw(target: Path) -> dict[str, Any]:
     """读取 YAML 顶层映射；不存在或坏掉直接抛 :class:`ConfigError`。"""
     if not target.exists():
         raise ConfigError(
-            f"config not found: {target}\ncreate it with at least:\n\n{MINIMAL_EXAMPLE}"
+            f"未找到配置文件：{target}\n至少需要以下内容：\n\n{MINIMAL_EXAMPLE}"
         )
     try:
         import yaml
     except ImportError as e:  # pragma: no cover - 声明为硬依赖
-        raise ConfigError("PyYAML is required: pip install pyyaml") from e
+        raise ConfigError("需要 PyYAML：pip install pyyaml") from e
 
     try:
         raw = yaml.safe_load(target.read_text(encoding="utf-8"))
     except OSError as e:
-        raise ConfigError(f"cannot read {target}: {e}") from e
+        raise ConfigError(f"无法读取 {target}：{e}") from e
     except yaml.YAMLError as e:
-        raise ConfigError(f"invalid YAML in {target}: {e}") from e
+        raise ConfigError(f"{target} 中的 YAML 非法：{e}") from e
 
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        raise ConfigError("top-level config must be a mapping")
+        raise ConfigError("配置顶层必须是映射")
     return raw
 
 
@@ -178,11 +178,11 @@ def _override_value(value: str) -> Any:
     try:
         import yaml
     except ImportError as e:  # pragma: no cover
-        raise ConfigError("PyYAML is required: pip install pyyaml") from e
+        raise ConfigError("需要 PyYAML：pip install pyyaml") from e
     try:
         return yaml.safe_load(value)
     except yaml.YAMLError as e:
-        raise ConfigError(f"invalid --set value {value!r}: {e}") from e
+        raise ConfigError(f"--set 的值非法 {value!r}：{e}") from e
 
 
 def _apply_overrides(raw: Mapping[str, Any], overrides: Sequence[str]) -> dict[str, Any]:
@@ -192,10 +192,10 @@ def _apply_overrides(raw: Mapping[str, Any], overrides: Sequence[str]) -> dict[s
         key, sep, value = item.partition("=")
         key = key.strip()
         if not sep or not key:
-            raise ConfigError(f"--set expects KEY=VALUE, got {item!r}")
+            raise ConfigError(f"--set 需要 KEY=VALUE，得到 {item!r}")
         parts = key.split(".")
         if any(not part for part in parts):
-            raise ConfigError(f"--set has an empty key segment: {item!r}")
+            raise ConfigError(f"--set 的键包含空段：{item!r}")
         node: Any = result
         for part in parts[:-1]:
             child = node.get(part)
@@ -203,7 +203,7 @@ def _apply_overrides(raw: Mapping[str, Any], overrides: Sequence[str]) -> dict[s
                 child = {}
                 node[part] = child
             if not isinstance(child, dict):
-                raise ConfigError(f"--set cannot descend into non-mapping {part!r}")
+                raise ConfigError(f"--set 无法进入非映射项 {part!r}")
             node = child
         node[parts[-1]] = _override_value(value)
     return result
@@ -214,7 +214,7 @@ def _mapping(raw: Mapping[str, Any], name: str, notes: list[str]) -> dict[str, A
     if value is None:
         return {}
     if not isinstance(value, dict):
-        notes.append(f"{name} must be a mapping; using defaults")
+        notes.append(f"{name} 必须是映射；使用默认值")
         return {}
     return value
 
@@ -239,9 +239,9 @@ def _unknown(
             continue
         renamed = _RENAMED_KEYS.get((prefix, key))
         if renamed:
-            notes.append(f"config key {prefix}{key} was renamed to {prefix}{renamed}")
+            notes.append(f"配置项 {prefix}{key} 已更名为 {prefix}{renamed}")
         else:
-            notes.append(f"unknown config key: {prefix}{key}")
+            notes.append(f"未知配置项：{prefix}{key}")
 
 
 def _path_value(
@@ -254,7 +254,7 @@ def _path_value(
     if value is None:
         return default
     if not isinstance(value, str) or not value.strip():
-        notes.append(f"{field_name} must be a non-empty path; using {default}")
+        notes.append(f"{field_name} 必须是非空路径；使用 {default}")
         return default
     path = Path(value).expanduser()
     if not path.is_absolute():
@@ -266,7 +266,7 @@ def _positive_int(value: Any, field_name: str, default: int, notes: list[str]) -
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        notes.append(f"{field_name} must be a positive integer; using {default}")
+        notes.append(f"{field_name} 必须是正整数；使用 {default}")
         return default
     return value
 
@@ -282,7 +282,7 @@ def _bool_value(value: Any, field_name: str, default: bool, notes: list[str]) ->
             return True
         if text in {"0", "off", "no", "false"}:
             return False
-    notes.append(f"{field_name} must be a boolean; using {default}")
+    notes.append(f"{field_name} 必须是布尔值；使用 {default}")
     return default
 
 
@@ -352,7 +352,7 @@ def _parse_input_completion(
     style = value.strip().lower() if isinstance(value, str) else ""
     if style not in ("ghost", "redis"):
         notes.append(
-            "input_completion.style must be ghost or redis; using "
+            "input_completion.style 只能为 ghost 或 redis；使用 "
             + DEFAULT_COMPLETION_STYLE
         )
         style = DEFAULT_COMPLETION_STYLE
@@ -377,7 +377,7 @@ def load(path: str | None = None, *, emit_warnings: bool = True) -> AppConfig:
     ai_error: str | None = None
     if not exists:
         ai_error = (
-            f"config not found: {target}\ncreate it with at least:\n\n{MINIMAL_EXAMPLE}"
+            f"未找到配置文件：{target}\n至少需要以下内容：\n\n{MINIMAL_EXAMPLE}"
         )
     else:
         try:

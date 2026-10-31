@@ -106,7 +106,7 @@ def test_invalid_yaml_reports_location(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as caught:
         load(_write(tmp_path, "ai: [\n"))
 
-    assert "invalid YAML" in str(caught.value)
+    assert "YAML 非法" in str(caught.value)
 
 
 def test_top_level_must_be_mapping(tmp_path: Path) -> None:
@@ -125,7 +125,7 @@ def test_type_is_required(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as caught:
         load(_write(tmp_path, "ai:\n  providers:\n    p:\n      api_key: k\n"))
 
-    assert "type is required" in str(caught.value)
+    assert "type 为必填项" in str(caught.value)
 
 
 def test_models_must_be_list_of_strings(tmp_path: Path) -> None:

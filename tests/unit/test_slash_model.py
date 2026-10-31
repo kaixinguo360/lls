@@ -110,7 +110,7 @@ def test_no_argument_opens_the_picker_at_the_current_model(monkeypatch) -> None:
     assert calls[0]["cursor"] == 0          # 当前模型是 p/a
     assert calls[0]["labels"][0].startswith("* ")
     assert calls[0]["labels"][1].startswith("  ")
-    assert any("已切到 p/b" in text for text in worker._s.messages)
+    assert any("已切换到 p/b" in text for text in worker._s.messages)
 
 
 def test_cancelling_the_picker_changes_nothing(monkeypatch) -> None:
@@ -147,7 +147,7 @@ def test_typing_blocks_the_picker(monkeypatch) -> None:
     asyncio.run(worker._slash_model(""))
 
     assert calls == []
-    assert any("执行中" in text for text in worker._s.messages)
+    assert any("正在执行" in text for text in worker._s.messages)
 
 
 def test_an_explicit_spec_skips_the_picker(monkeypatch) -> None:

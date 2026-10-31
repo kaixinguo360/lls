@@ -66,7 +66,7 @@ _GLOBAL_SCOPE = "global"
 #
 # 解析是纯 Python，一整屏重绘约 10ms。一次 read 可能拿到 10KB（十几帧），
 # 同步解析完再返回会让事件循环被独占上百毫秒，期间读不到新输出，显示只能
-# 一顿一顿地刷新。分批后每轮只解析一小片，读写都及时。
+# 断续刷新。分批后每轮只解析一小片，读写都及时。
 #
 # 切片与预算的取值来自「30 帧整屏重绘下的帧间隔」测量：不分批约 200ms，
 # 2048 字节配 4ms 预算约 120ms；切片缩到 512 字节反而更差（约 170ms），
@@ -301,7 +301,7 @@ class Engine:
                     # 任何未捕获异常都不能让 traceback 直接写到 stderr:
                     # 那些字节不经过显示逻辑，会撑滚终端并冲掉覆盖层。
                     with contextlib.suppress(Exception):
-                        await self.show_message(f"error: {e}")
+                        await self.show_message(f"错误：{e}")
                 # 处理器可能请求了切换（协作式：本轮做完才切）
                 if self._pending_handler is not None:
                     self._current = self._pending_handler
@@ -383,7 +383,7 @@ class Engine:
         if take_pending is not None:
             pending = take_pending()
             if pending:
-                # 查询期间用户可能已经敲了键，交给主循环，不丢失。它们是缓冲里
+                # 查询期间用户可能已经输入了键，交给主循环，不丢失。它们是缓冲里
                 # 最老的字节，放队首。
                 self._push_stdin(pending, front=True)
         row, column = position
@@ -422,7 +422,7 @@ class Engine:
             #
             # 先喂模型，是为了让覆盖层贴住子进程当前光标；喂的是**有预算**的
             # 一小片（解析是纯 Python，整屏重绘约 10ms，不许在写终端前同步
-            # 追平，否则事件循环被占住、读不到下一批输出，画面一顿一顿）。
+            # 追平，否则事件循环被占住、读不到下一批输出，画面断续）。
             # 覆盖层贴的是它自己画上去时定的锚点（_repaint_overlay），不再
             # 依赖模型是否追上，所以这里不存在「按过时光标定锚」的问题。
             #
@@ -660,7 +660,7 @@ class Engine:
     ) -> None:
         """把一段 stdin 字节连同**到达时刻**放进缓冲，并唤醒等待者。
 
-        ``front`` 用于把比缓冲里一切都老的内容放回队首（光标查询期间用户敲
+        ``front`` 用于把比缓冲里一切都老的内容放回队首（光标查询期间用户输入
         的键就属于这种）。
         """
         if not data:
@@ -722,7 +722,7 @@ class Engine:
         平台探测），它们退出同样会送来该信号。若不加区分地把任何 SIGCHLD 当成
         「终端会话结束」，一次普通的外部命令退出就会让整个会话误判为终止 ——
         正在读取输入的命令（如 ``generate``）会把它当成「用户中断」而静默放弃，
-        真正的原因反而被吞掉。
+        真正的原因反而被丢弃。
 
         因此只有确认 PTY 子进程真的被 ``waitpid`` 回收，才算会话结束。
         """
@@ -1051,7 +1051,7 @@ class Engine:
                 return Completion()
             try:
                 return completer(text, cursor)  # type: ignore[misc]
-            except Exception:  # noqa: BLE001 - 补全坏了不能把输入也带崩
+            except Exception:  # noqa: BLE001 - 补全坏了不能影响输入
                 return Completion()
 
         def _ghost_now() -> Ghost:
@@ -1071,7 +1071,7 @@ class Engine:
             """按当前编辑状态重画提示行。
 
             ``shown`` 记住画出去的是哪一帧（整段提示 + 光标下标）：空转的
-            时候提示串多半没变，跳过重写，免得终端白刷。
+            时候提示串多半没变，跳过重写，避免终端重复刷新。
             """
             nonlocal shown
             head = _head()
@@ -1236,7 +1236,7 @@ class Engine:
                     editor.insert(key.char)
                 if on_edit is not None:
                     # 每处理完一个键就把草稿交出去：下一次进来（Ctrl-C 之后）
-                    # 靠它原样恢复，不会白丢已经敲下的字。
+                    # 靠它原样恢复，不会丢失已输入的内容。
                     on_edit(editor.text, editor.cursor)
                 # 同一批到达的键先全部应用，只重画最后那一帧。每处理一个键
                 # 就画一次时，这些帧会逐个上屏：连按方向键，中间帧里的光标
@@ -1274,14 +1274,14 @@ class Engine:
         """键盘上有没有已经到达、还没人取走的输入？不消费任何东西。
 
         给「先按老样子、有人动手才换成输入行」那类界面用：它只想知道用户
-        动没动手，是哪个键、敲的是什么，都留给接手的那一屏按原顺序处理。
+        动没动手，是哪个键、输入的是什么，都留给接手的那一屏按原顺序处理。
         """
         return bool(self._key_buf or self._held_keys or self._stdin_buf)
 
     def requeue_pending_keys(self) -> None:
         """把尚在键缓冲里的按键回填到输入队列。
 
-        用于退出覆盖模式时：用户可能在同一个字节块里先按了 Esc（退出）又敲了
+        用于退出覆盖模式时：用户可能在同一个字节块里先按了 Esc（退出）又输入了
         别的字；这些字节属于新的上下文（通常要交给子进程），直接丢弃会表现为
         「按键失灵」。
         """
@@ -1378,8 +1378,8 @@ class Engine:
             elif key.control == "terminal_response":
                 self._pty_write(key.raw)
             else:
-                # 同一批里先到的键照样留着：中断只放弃这一轮，不该吞掉用户
-                # 已经敲下去的字。
+                # 同一批里先到的键仍然留着：中断只放弃这一轮，不应丢弃用户
+                # 已经输入的内容。
                 self._held_keys.append(key)
         if abort:
             raise Interrupted("已中断")

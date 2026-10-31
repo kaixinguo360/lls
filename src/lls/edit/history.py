@@ -2,7 +2,7 @@
 
 历史按 ``history_id`` 分文件，作用域只有两种：
 
-* ``global``：命令行、行模式这类「本机上敲过的东西」，跨进程共用一份；
+* ``global``：命令行、行模式这类「本机上输入过的内容」，跨进程共用一份；
 * ``session-<id>``：AI 会话专属的输入（任务描述、生成指令），换会话就换一份，
   会话删掉时整目录一起删。
 
@@ -34,10 +34,10 @@ __all__ = [
 #: 载入进 ↑ 的条数上限：再多也翻不到，白占内存。
 DEFAULT_MAX_ENTRIES = DEFAULT_HISTORY_MAX_ENTRIES
 
-#: 单个历史文件超过它就顺手压缩（只在载入时做，不挡输入）。
+#: 单个历史文件超过它就自动压缩（只在载入时做，不挡输入）。
 DEFAULT_MAX_BYTES = DEFAULT_HISTORY_MAX_BYTES
 
-#: 不跟着会话走的那一份：本机敲过的东西，跨进程共用。
+#: 不跟着会话走的那一份：本机输入过的内容，跨进程共用。
 _GLOBAL = "global"
 
 #: 读文件的硬上限：历史文件被外部塞大也不差这一次全读。
@@ -166,7 +166,7 @@ class HistoryStore:
         path = self.path_for(history_id, session=session)
         if path not in self._last:
             # 本进程第一次写这个文件：先看看磁盘上最后一条是什么，
-            # 不然重启后接着敲同一条会写进两遍。
+            # 不然重启后接着输入同一条会写进两遍。
             self.load(history_id, session=session)
         if self._last.get(path) == value:
             return
@@ -203,7 +203,7 @@ class HistoryStore:
         临时文件 + rename，读者看不到半成品。
         """
         payload = b"".join(lines)
-        # 行很长时按字节数触发的压缩其实什么都丢不掉，重写一遍只是白写，
+        # 行很长时按字节数触发的压缩其实什么都丢不掉，重写只是无谓的写入，
         # 而且下次载入还会触发 —— 真能变小才动手。
         if len(payload) >= _size(path):
             return

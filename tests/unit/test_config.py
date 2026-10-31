@@ -32,7 +32,7 @@ def test_missing_file_uses_defaults(tmp_path: Path, monkeypatch) -> None:
     assert cfg.paths.history_dir == tmp_path / ".local" / "lls" / "history"
     assert cfg.input_history.enabled is True
     assert cfg.ai.providers == {}
-    assert cfg.ai_error and "config not found" in cfg.ai_error
+    assert cfg.ai_error and "未找到配置文件" in cfg.ai_error
 
 
 def test_broken_yaml_uses_defaults_and_ai_still_errors(tmp_path: Path) -> None:
@@ -40,9 +40,9 @@ def test_broken_yaml_uses_defaults_and_ai_still_errors(tmp_path: Path) -> None:
 
     cfg = load(path, emit_warnings=False)
     assert cfg.paths.root.name == "lls"
-    assert cfg.ai_error and "invalid YAML" in cfg.ai_error
+    assert cfg.ai_error and "YAML 非法" in cfg.ai_error
 
-    with pytest.raises(ConfigError, match="invalid YAML"):
+    with pytest.raises(ConfigError, match="YAML 非法"):
         load_ai(path)
 
 
@@ -59,7 +59,7 @@ def test_bad_paths_do_not_hide_history_or_ai(tmp_path: Path) -> None:
     assert cfg.paths.root.name == "lls"
     assert cfg.input_history.max_entries == 7
     assert cfg.ai.default_model == "p/m"
-    assert any("paths must be a mapping" in note for note in cfg.warnings)
+    assert any("paths 必须是映射" in note for note in cfg.warnings)
 
 
 def test_paths_derive_and_share_one_base(tmp_path: Path) -> None:
@@ -104,8 +104,8 @@ def test_renamed_keys_point_at_the_new_name(tmp_path: Path) -> None:
     cfg = load(path, emit_warnings=False)
 
     notes = "\n".join(cfg.warnings)
-    assert "state was renamed to paths" in notes
-    assert "history was renamed to input_history" in notes
+    assert "配置项 state 已更名为 paths" in notes
+    assert "配置项 history 已更名为 input_history" in notes
 
 
 def test_cli_overrides_use_the_same_parser(tmp_path: Path) -> None:

@@ -110,7 +110,7 @@ class LineEditor:
     def history_up(self) -> None:
         if not self._history:
             return
-        # 翻哪一类，看这一趟是从哪儿出发的：从草稿出发就按草稿分类（敲了
+        # 翻哪一类，看这一趟是从哪儿出发的：从草稿出发就按草稿分类（输入了
         # ``/`` 才翻命令），已经在历史里就一路翻同一类，不会中途跳到另一类。
         kind = self._hist_kind if self._hist_idx is not None else self._kind(self._text)
         start = len(self._history) if self._hist_idx is None else self._hist_idx

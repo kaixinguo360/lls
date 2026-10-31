@@ -102,7 +102,7 @@ def _tolerant(name: str):
 
     这里退一步：先按原样调用；失败就去掉 ``private`` 再试；仍失败说明这个
     私有变体 pyte 不认识，按未知序列处理 —— 终端模拟器遇到读不懂的序列应该
-    忽略，而不是把引擎带崩。
+    忽略，而不是导致引擎崩溃。
     """
 
     original = getattr(pyte.Screen, name)
