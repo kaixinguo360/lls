@@ -63,6 +63,15 @@ class LineEditor:
         self._hist_idx = None
         self._draft = ""
 
+    def set_text(self, value: str, cursor: int | None = None) -> None:
+        """整体换掉这一行（补全落地用）；默认光标到末尾。
+
+        不动 ``_hist_idx`` / ``_draft``：从历史里召回的一行被补全后，↓ 仍按
+        readline 的老规矩回到草稿，不会因为改了字就丢历史位置。
+        """
+        self._text = value
+        self._cursor = len(value) if cursor is None else max(0, min(cursor, len(value)))
+
     # ---- 编辑 ----
 
     def insert(self, char: str) -> None:

@@ -10,6 +10,7 @@ import asyncio
 import os
 import sys
 
+from .commands.catalog import registry_completer
 from .edit import history_from_config
 from .handlers import CommandHandler, PassthroughHandler
 from .session.engine import Engine
@@ -48,7 +49,12 @@ def build_handlers() -> dict[str, Handler]:
 
     return {
         "default": PassthroughHandler({_KEY_COMMAND: "command"}),
-        "command": CommandHandler(":", on_error=on_error, escape=_ESCAPE),
+        "command": CommandHandler(
+            ":",
+            on_error=on_error,
+            escape=_ESCAPE,
+            completer=registry_completer(),
+        ),
     }
 
 

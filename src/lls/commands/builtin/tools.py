@@ -50,7 +50,7 @@ def apply_global_states(switches: list[ToolSwitch]) -> None:
             policy.disable(item.name)
 
 
-@command("tools", category="ai")
+@command("tools", category="ai", usage="tools")
 async def cmd_tools(s: Services, args: str | None) -> CommandResult:
     """打开全局工具开关（影响之后的 agent 会话）"""
     names = tool_names(s)

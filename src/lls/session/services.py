@@ -132,6 +132,7 @@ class Services:
         tick: Any = None,
         tick_interval: float = 0.1,
         on_edit: Any = None,
+        completer: Any = None,
     ) -> Any:
         """读一行（完整行编辑）。
 
@@ -149,6 +150,8 @@ class Services:
         每一格被调用，返回非 None 就带着它离开 —— 调用方据此把「轮次结束」
         这类外部事件变成一次返回，也顺手把状态行的时间刷新了。
         ``on_edit(text, cursor)`` 每处理一个键调一次，供调用方存草稿。
+        ``completer(text, cursor)`` 给出 Tab 补全与行尾语法提示；不给时 Tab
+        无动作（与引擎的 ``read_line`` 同名同义）。
         """
         return await self._engine.read_line(
             prompt,
@@ -165,6 +168,7 @@ class Services:
             tick=tick,
             tick_interval=tick_interval,
             on_edit=on_edit,
+            completer=completer,
         )
 
     def push_keys(self, data: bytes) -> None:

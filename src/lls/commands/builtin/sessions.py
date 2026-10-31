@@ -23,7 +23,7 @@ def _stamp(value: float) -> str:
         return "-"
 
 
-@command("sessions", aliases=("ls",), category="ai")
+@command("sessions", aliases=("ls",), category="ai", usage="sessions [--all]")
 async def cmd_sessions(s: Services, args: str | None) -> CommandResult:
     """列出会话：id、标题、模型、轮数、大小、更新时间"""
     include_all = bool(args and "--all" in args.split())
@@ -52,7 +52,7 @@ async def cmd_sessions(s: Services, args: str | None) -> CommandResult:
     return CommandResult()
 
 
-@command("fork", category="ai")
+@command("fork", category="ai", usage="fork <id> [--at <seq>]")
 async def cmd_fork(s: Services, args: str | None) -> CommandResult:
     """从某条会话的某个位置分叉出新会话：fork <id> [--at <seq>]"""
     parts = (args or "").split()
@@ -88,7 +88,7 @@ async def cmd_fork(s: Services, args: str | None) -> CommandResult:
     return CommandResult()
 
 
-@command("rm", category="ai")
+@command("rm", category="ai", usage="rm <id>")
 async def cmd_rm(s: Services, args: str | None) -> CommandResult:
     """删除一条会话（连同它的输入历史）"""
     spec = (args or "").strip()

@@ -18,13 +18,13 @@ def record_error(text: str) -> None:
     _last_error.append(text)
 
 
-@command("quit", aliases=("q", "exit"), category="core")
+@command("quit", aliases=("q", "exit"), category="core", usage="quit")
 async def cmd_quit(s: Services, args: str | None) -> CommandResult:
     """退出当前模式，恢复终端显示"""
     return CommandResult(handler="default")
 
 
-@command("err", category="core")
+@command("err", category="core", usage="err")
 async def cmd_err(s: Services, args: str | None) -> CommandResult:
     """显示最近捕获的错误信息"""
     if not _last_error:
@@ -34,7 +34,7 @@ async def cmd_err(s: Services, args: str | None) -> CommandResult:
     return CommandResult()
 
 
-@command("help", aliases=("h", "?"), category="core")
+@command("help", aliases=("h", "?"), category="core", usage="help")
 async def cmd_help(s: Services, args: str | None) -> CommandResult:
     """列出所有可用命令"""
     from lls.commands.registry import command_help

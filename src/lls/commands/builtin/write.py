@@ -43,13 +43,13 @@ async def _write_flow(
     return CommandResult()
 
 
-@command("exec", aliases=("e",), category="write")
+@command("exec", aliases=("e",), category="write", usage="exec <命令>")
 async def cmd_exec(s: Services, args: str | None) -> CommandResult:
     """执行单条命令，末尾自动附加回车"""
     return await _write_flow(s, enter=True, data=args)
 
 
-@command("input", aliases=("i",), category="write")
+@command("input", aliases=("i",), category="write", usage="input <文本>")
 async def cmd_input(s: Services, args: str | None) -> CommandResult:
     """执行单条命令，末尾不附加回车"""
     return await _write_flow(s, enter=False, data=args)

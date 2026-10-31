@@ -420,7 +420,7 @@ async def run_generate(s: Services, request: str | None = None) -> bool:
         return False
 
 
-@command("generate", aliases=("g", "gen"), category="ai")
+@command("generate", aliases=("g", "gen"), category="ai", usage="generate <请求>")
 async def cmd_generate(s: Services, args: str | None) -> CommandResult:
     """由终端状态与请求生成一段输入，确认后写入子进程"""
     wrote = await run_generate(s, args)

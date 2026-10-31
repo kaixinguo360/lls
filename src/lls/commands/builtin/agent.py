@@ -63,6 +63,7 @@ from lls.ai.tools import (
 )
 from lls.ai.tool_options import ToolOptions
 from lls.ai.tools.policy import ToolPolicy, global_policy, reset_global_policy
+from lls.commands.catalog import CommandMeta, completer_for
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.offload import offload
@@ -133,27 +134,79 @@ SUGGESTED_REPLY_LINES = 6 # 只用于提示词：建议的答复长度，显示�
 # ---- 会话内斜杠命令 ----
 # 名字、别名、处理方法、一句话说明；/help 与「未知命令」的提示都由它生成：
 # 加一条命令只需在这里加一行，再写一个 ``_slash_<名字>`` 方法。
+class _SlashCommand(NamedTuple):
+    """会话内命令：名字、别名、处理方法、说明、行尾语法提示。"""
+
+    name: str
+    aliases: Tuple[str, ...]
+    method: str
+    summary: str
+    usage: str
+
+
 _SLASH_COMMANDS = (
-    ("help", ("h", "?"), "_slash_help", "列出这些命令"),
-    ("status", ("s",), "_slash_status", "整屏翻看全部对话"),
-    ("title", (), "_slash_title", "查看或修改标题：/title [文字]"),
-    ("model", (), "_slash_model", "查看或切换模型：/model [provider/model]"),
-    ("compact", (), "_slash_compact", "立刻把最旧的一段历史压成摘要"),
-    ("tools", (), "_slash_tools", "列出模型可用的工具"),
-    ("sessions", ("ls", "resume"), "_slash_sessions", "选一条会话切过去：/sessions"),
-    ("new", (), "_slash_new", "开一条新会话并切过去：/new [标题]"),
-    ("fork", (), "_slash_fork", "从当前会话分叉：/fork [--at <seq>]"),
-    ("rm", (), "_slash_rm", "删除本会话（要确认），随后挑一条接着用"),
-    ("archive", (), "_slash_archive", "归档本会话（要确认），随后挑一条接着用"),
-    ("retry", (), "_slash_retry", "接着本轮继续执行：/retry"),
-    ("undo", (), "_slash_undo", "撤销上一轮，并把那句话放回输入行"),
-    ("exit", ("quit", "q"), "_slash_exit", "退出 agent 模式"),
+    _SlashCommand("help", ("h", "?"), "_slash_help", "列出这些命令", "/help"),
+    _SlashCommand("status", ("s",), "_slash_status", "整屏翻看全部对话", "/status"),
+    _SlashCommand(
+        "title", (), "_slash_title", "查看或修改标题：/title [文字]", "/title [文字]"
+    ),
+    _SlashCommand(
+        "model",
+        (),
+        "_slash_model",
+        "查看或切换模型：/model [provider/model]",
+        "/model [provider/model]",
+    ),
+    _SlashCommand(
+        "compact", (), "_slash_compact", "立刻把最旧的一段历史压成摘要", "/compact"
+    ),
+    _SlashCommand("tools", (), "_slash_tools", "列出模型可用的工具", "/tools"),
+    _SlashCommand(
+        "sessions",
+        ("ls", "resume"),
+        "_slash_sessions",
+        "选一条会话切过去：/sessions",
+        "/sessions",
+    ),
+    _SlashCommand("new", (), "_slash_new", "开一条新会话并切过去：/new [标题]", "/new [标题]"),
+    _SlashCommand(
+        "fork", (), "_slash_fork", "从当前会话分叉：/fork [--at <seq>]", "/fork [--at <seq>]"
+    ),
+    _SlashCommand(
+        "rm", (), "_slash_rm", "删除本会话（要确认），随后挑一条接着用", "/rm"
+    ),
+    _SlashCommand(
+        "archive", (), "_slash_archive", "归档本会话（要确认），随后挑一条接着用", "/archive"
+    ),
+    _SlashCommand("retry", (), "_slash_retry", "接着本轮继续执行：/retry", "/retry"),
+    _SlashCommand(
+        "undo", (), "_slash_undo", "撤销上一轮，并把那句话放回输入行", "/undo"
+    ),
+    _SlashCommand("exit", ("quit", "q"), "_slash_exit", "退出 agent 模式", "/exit"),
 )
 
 _SLASH_INDEX = dict(
-    [(item[0], item[2]) for item in _SLASH_COMMANDS]
-    + [(alias, item[2]) for item in _SLASH_COMMANDS for alias in item[1]]
+    [(item.name, item.method) for item in _SLASH_COMMANDS]
+    + [
+        (alias, item.method)
+        for item in _SLASH_COMMANDS
+        for alias in item.aliases
+    ]
 )
+
+#: 补全表：与 /help、_SLASH_INDEX 共用同一份数据（redis 的命令表也兼着这个）。
+_SLASH_METAS = tuple(
+    CommandMeta(
+        name=item.name,
+        aliases=item.aliases,
+        usage=item.usage,
+        summary=item.summary,
+    )
+    for item in _SLASH_COMMANDS
+)
+
+#: 会话内输入行的补全器：只认行首的 ``/命令``，路径与 ``//`` 原样放过。
+_SLASH_COMPLETER = completer_for(_SLASH_METAS, marker="/", path_escape=True)
 
 # 执行中敲下这条命令怎么办。只在「有一轮正跑着、用户又敲了命令」时才看（见
 # _typing）：判定集中在这一张表里，命令方法自己不知道忙不忙。四种：
@@ -209,7 +262,7 @@ def _unknown_command(name):
     """
     rows = ["没有这个命令：/{}（这一行没有发给模型）".format(name)]
     close = difflib.get_close_matches(
-        name, sorted(item[0] for item in _SLASH_COMMANDS), n=1, cutoff=0.6
+        name, sorted(item.name for item in _SLASH_COMMANDS), n=1, cutoff=0.6
     )
     if close:
         rows.append("是不是想输入 /{}？".format(close[0]))
@@ -685,6 +738,7 @@ class _Session:
             history_scope="session",
             history_kind=_history_kind,
             escape=_ESCAPE,
+            completer=_SLASH_COMPLETER,
             handoff=_hands_over,
             on_edit=self._remember_draft,
         )
@@ -721,16 +775,17 @@ class _Session:
 
     async def _slash_help(self, args: str) -> Any:
         rows = ["会话内命令（本地执行，不发给模型）："]
-        for name, aliases, method, summary in _SLASH_COMMANDS:
+        for item in _SLASH_COMMANDS:
             alias = ""
-            if aliases:
-                alias = " ({})".format("、".join("/" + item for item in aliases))
-            policy = _SLASH_POLICY.get(method, "")
+            if item.aliases:
+                alias = " ({})".format("、".join("/" + name for name in item.aliases))
+            policy = _SLASH_POLICY.get(item.method, "")
+            summary = item.summary
             if policy == "idle":
                 summary += "（执行中不可用）"
             elif policy == "after":
                 summary += "（本轮结束后执行）"
-            rows.append("  /{}{}  {}".format(name, alias, summary))
+            rows.append("  {}{}  {}".format(item.usage, alias, summary))
         rows.append("行首 // 表示去掉一个斜杠后原样交给模型；/usr/bin 这类路径也照原样发出。")
         await self._s.show_message("\n".join(rows))
         return _CANCEL
@@ -1293,6 +1348,7 @@ class _Session:
                 history_scope="session",
                 history_kind=_history_kind,
                 escape=_ESCAPE,
+                completer=_SLASH_COMPLETER,
                 handoff=keep,
                 tick=tick,
                 tick_interval=PAINT_INTERVAL,
@@ -1924,7 +1980,7 @@ def _budget_for(catalog: Any, provider_id: str) -> int:
     return default_budget(conf.context_window, catalog.context_limit())
 
 
-@command("agent", aliases=("a",), category="ai")
+@command("agent", aliases=("a",), category="ai", usage="agent [任务]")
 async def cmd_agent(s: Services, args: str | None) -> CommandResult:
     """进入交互式 Agent 会话，按任务自动多轮执行"""
     try:

@@ -1743,7 +1743,7 @@ def test_every_command_declares_what_it_does_while_a_turn_runs() -> None:
     漏了也不报错，只是那条命令在忙时悄悄按「排到后面」处理 —— 加一条命令
     就得想清楚它属于哪一档，所以拿测试把它钉住。
     """
-    methods = set(item[2] for item in agent_cmd._SLASH_COMMANDS)
+    methods = set(item.method for item in agent_cmd._SLASH_COMMANDS)
     assert methods == set(agent_cmd._SLASH_POLICY)
     assert set(agent_cmd._SLASH_POLICY.values()) <= {"now", "after", "idle", "abort"}
 

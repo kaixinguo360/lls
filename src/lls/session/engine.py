@@ -25,6 +25,7 @@ from collections import deque
 from typing import Any, Callable
 
 from lls.edit import HistoryStore, LineEditor
+from lls.edit.complete import Completion, Completer, clip_hint, display_width
 from lls.term import ScreenModel
 from lls.tty import Console, Key, KeyParser, PtySession, TerminalBackend, Winsize
 from lls.ui import render_row_cells
@@ -923,6 +924,14 @@ class Engine:
         line += render_row_cells(prefix, keep_trailing_blank=True)
         self._out.write(line.encode())
 
+    def _bell(self) -> None:
+        """响一声铃：没有候选、或补全轮盘绕完一圈。
+
+        直接写终端的 BEL：它不占格子、不进帧缓冲，也不会被下一帧重绘抹掉。
+        """
+        if self._console is not None:
+            self._console.write(b"\a")
+
     # ---- 行读取 ----
 
     def _editor_for(self, history_id: str, *, session: bool = False) -> LineEditor:
@@ -965,6 +974,7 @@ class Engine:
         tick: Callable[[], Any] | None = None,
         tick_interval: float = TICK_INTERVAL,
         on_edit: Callable[[str, int], None] | None = None,
+        completer: Completer | None = None,
     ) -> Any:
         """读一行输入，完整行编辑。
 
@@ -979,6 +989,10 @@ class Engine:
         结束了」这类外部事件变成一次返回。它同时是重画的时机：状态行里的
         计时、排队的条数都靠这一格更新。``on_edit(text, cursor)`` 在每处理
         完一个按键后调用一次，调用方可存下草稿（下一次用 ``value`` 原样恢复）。
+
+        ``completer(text, cursor)`` 提供 Tab 补全与行尾提示（redis/linenoise
+        同型）：候选是整行，按 Tab 先预览、再 Tab 原地轮换，Esc 取消、其它键
+        接受；提示画在光标右侧，只在行尾显示。不给就是老行为：Tab 无动作。
 
         ``history_scope`` 为 ``"session"`` 时这份 ↑ 历史跟着当前 AI 会话走
         （换会话就换一份，会话删掉一起删）；``"global"`` 是本机共用的一份。
@@ -1005,6 +1019,32 @@ class Engine:
 
         shown: tuple[str, int] | None = None
         handed_over = False
+        # 补全预览：``(候选, 轮盘下标)``；下标为 None 表示绕回原样。预览只改
+        # “显示”，不写编辑器 —— Esc / Ctrl-C 因此可以零成本退出。
+        preview: tuple[tuple[str, ...], int | None] | None = None
+
+        def _frame_text() -> tuple[str, int]:
+            """这一帧该显示的输入行与光标：预览中显示候选，否则显示编辑器。"""
+            if preview is not None and preview[1] is not None:
+                value = preview[0][preview[1]]
+                return value, len(value)
+            return editor.text, editor.cursor
+
+        def _hint_for(text: str, cursor: int) -> str:
+            """行尾语法提示：补全器算出来的那一条；出错就当没有。"""
+            if completer is None or cursor != len(text):
+                return ""
+            try:
+                return completer(text, cursor).hint
+            except Exception:  # noqa: BLE001 - 补全坏了不能把输入也带崩
+                return ""
+
+        def _complete_now(text: str, cursor: int) -> Completion:
+            """要候选；补全器抛异常时当作“没有候选”，而不是抛出这一行。"""
+            try:
+                return completer(text, cursor)  # type: ignore[misc]
+            except Exception:  # noqa: BLE001
+                return Completion()
 
         def _draw() -> None:
             """按当前编辑状态重画提示行。
@@ -1014,7 +1054,17 @@ class Engine:
             """
             nonlocal shown
             head = _head()
-            frame = (head + editor.text, len(head) + editor.cursor)
+            text, cursor = _frame_text()
+            body = head + text
+            hint = _hint_for(text, cursor)
+            if hint:
+                # 提示画在光标右边（行尾）。宽度按“这一行已经占了多少列”算，
+                # 放不下就截断 —— 折到下一行会让覆盖层长高、位置跟着跳。
+                room = self.screen.columns - 2 - display_width(body.rsplit("\n", 1)[-1])
+                clipped = clip_hint(hint, room)
+                if clipped:
+                    body += " \x1b[90m" + clipped + "\x1b[0m"
+            frame = (body, len(head) + cursor)
             if frame == shown:
                 return
             self.draw_overlay(frame[0], frame[1])
@@ -1052,6 +1102,43 @@ class Engine:
                     # 转发给子进程 —— 它在等这个结果；绝不当按键编辑或显示。
                     self._pty_write(key.raw)
                     continue
+                if key.control == "tab" and completer is not None:
+                    # redis 式补全：第一个候选先“预览”在行上（不写编辑器），
+                    # 继续按 Tab 原地轮换；绕完一圈回到原样并响铃，再按又从头。
+                    if editor.cursor != len(editor.text):
+                        self._bell()  # 候选是整行，光标在中间时没有唯一答案
+                        continue
+                    if preview is None:
+                        result = _complete_now(editor.text, editor.cursor)
+                        if not result.items:
+                            self._bell()
+                            continue
+                        preview = (result.items, 0)
+                    else:
+                        items, index = preview
+                        nxt = 0 if index is None else index + 1
+                        if nxt >= len(items):
+                            preview = (items, None)
+                            self._bell()
+                        else:
+                            preview = (items, nxt)
+                    _draw()
+                    continue
+                if key.control == "escape" and preview is not None:
+                    # Esc 只取消预览，不退出这一行：agent 的 Esc 语义留给非预览态。
+                    preview = None
+                    _draw()
+                    continue
+                if preview is not None:
+                    # 其它键先接受当前预览：Enter 提交的就是它，空格、退格也接着
+                    # 它改。Ctrl-C/Ctrl-D 是“放弃这一行”，预览一并丢掉。
+                    items, index = preview
+                    if key.control in ("ctrl_c", "ctrl_d"):
+                        preview = None
+                    else:
+                        if index is not None:
+                            editor.set_text(items[index])
+                        preview = None
                 if key.control in ("ctrl_c", "ctrl_d", "enter") or (
                     key.control == "escape" and escape is not None
                 ):

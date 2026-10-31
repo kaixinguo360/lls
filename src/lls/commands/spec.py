@@ -27,6 +27,10 @@ class CommandSpec:
     aliases: tuple[str, ...] = ()
     category: str = "misc"
     summary: str = ""
+    #: 行尾语法提示（含命令名，如 ``agent [任务]``）；补全与 help 共用。
+    usage: str = ""
+    #: 参数位允许补全的静态关键词；空表示不猜参数（键名、会话 id 都不猜）。
+    subcommands: tuple[str, ...] = ()
 
 
 _REGISTRY: dict[str, CommandSpec] = {}
@@ -36,13 +40,25 @@ def command(
     name: str,
     aliases: tuple[str, ...] = (),
     category: str = "misc",
+    usage: str = "",
+    subcommands: tuple[str, ...] = (),
 ) -> Callable[[CommandFn], CommandFn]:
-    """把函数注册为命令。docstring 首行作为说明。"""
+    """把函数注册为命令。docstring 首行作为说明。
+
+    ``usage`` 只用于行尾提示与补全（``agent [任务]``），不参与执行；
+    ``subcommands`` 声明参数位可补的静态关键词。
+    """
 
     def decorator(fn: CommandFn) -> CommandFn:
         summary = (fn.__doc__ or "").strip().split("\n", 1)[0]
         spec = CommandSpec(
-            name=name, fn=fn, aliases=aliases, category=category, summary=summary
+            name=name,
+            fn=fn,
+            aliases=aliases,
+            category=category,
+            summary=summary,
+            usage=usage or name,
+            subcommands=subcommands,
         )
         _REGISTRY[name] = spec
         for alias in aliases:

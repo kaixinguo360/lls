@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import inspect
 import traceback
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from lls.commands import execute_command
 from lls.commands.result import CommandResult
@@ -89,8 +89,10 @@ class CommandHandler:
         cancel: str | None = "q",
         escape: object | None = None,
         restore_on_exit: bool = True,
+        completer: Any = None,
     ) -> None:
         self._prompt = prompt
+        self._completer = completer
         self._cancel = cancel
         self._escape = escape
         self._on_result = on_result
@@ -104,6 +106,7 @@ class CommandHandler:
             cancel=self._cancel,
             history_id="line_mode",
             escape=self._escape,
+            completer=self._completer,
         )
         if line is None:
             # 子进程退出
