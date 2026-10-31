@@ -194,10 +194,12 @@ async def toggle_tools(
             return
         item = items[cursor]
         if intent == "toggle":
+            # 全局层没有「会话」可言，拨完来源仍是 global；只有能跟随的
+            # 那一层（会话）才把拨动算作本会话的显式设置。
             items[cursor] = ToolSwitch(
                 name=item.name,
                 enabled=not item.enabled,
-                source=SOURCE_SESSION,
+                source=SOURCE_SESSION if allow_follow else item.source,
                 fallback=item.fallback,
             )
         elif intent == "follow" and allow_follow:

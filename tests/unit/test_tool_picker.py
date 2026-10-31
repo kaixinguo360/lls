@@ -68,7 +68,7 @@ def test_following_is_disabled_for_the_global_layer() -> None:
     result = asyncio.run(toggle_tools(services, _items(), allow_follow=False))
 
     assert result is not None
-    assert result[0].source == "session"
+    assert result[0].source == "global"   # 全局层没有会话可言
     assert result[0].enabled is False
 
 
