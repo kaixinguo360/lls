@@ -10,6 +10,7 @@ from functools import lru_cache
 from ..config import ConfigError, load_ai, resolve_config_path
 from .config import AIConfig
 from .provider import Provider
+from .tool_options import ToolOptions
 from .types import ProviderConfig
 from .registry import create_provider
 
@@ -82,6 +83,10 @@ class Catalog:
     def context_limit(self) -> int:
         """配置里的单次请求上限；0 表示不设。"""
         return self._config.context_limit
+
+    def tools(self) -> dict[str, ToolOptions]:
+        """``ai.tools`` 段：全局工具设置的初值。"""
+        return dict(self._config.tools)
 
     def resolve(self, spec: str | None = None) -> tuple[Provider, str]:
         """解析 ``provider/model``；省略时用配置里的 ``default_model``。

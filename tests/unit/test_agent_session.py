@@ -212,6 +212,9 @@ class FakeCatalog:
     def context_limit(self):
         return 0
 
+    def tools(self):
+        return {}
+
 
 class ScriptedProvider:
     id = "stub"

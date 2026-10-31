@@ -55,7 +55,14 @@ from lls.ai.sessions import (
     task_message,
 )
 from lls.ai.sessions.events import SUMMARY_PREFIX
-from lls.ai.tools import RepeatReminder, ScreenView, builtin_tools
+from lls.ai.tools import (
+    RepeatReminder,
+    ScreenView,
+    Toolbox,
+    builtin_tools,
+)
+from lls.ai.tool_options import ToolOptions
+from lls.ai.tools.policy import ToolPolicy, global_policy, reset_global_policy
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.offload import offload
@@ -74,6 +81,7 @@ from lls.session.errors import Interrupted, SessionEnded
 from ..keys import Aborted, SessionClosed, poll_keys
 from .agent_pager import page
 from .agent_picker import pick
+from .tool_picker import toggle_tools
 
 __all__ = ["cmd_agent"]
 
@@ -609,7 +617,14 @@ class _Session:
         self._budget = max(0, int(budget))
         self._view = ScreenView(services, self._poll)
         self._guard = RepeatReminder()
-        self._tools = builtin_tools(services, self._poll, view=self._view)
+        # 两层策略：会话层只含 meta.json 里显式写过的部分，
+        # 与全局（进程级）逐字段合并后才是这条会话实际生效的设置。
+        self._session_policy = ToolPolicy.from_json(
+            session.meta.tools if session is not None else {}
+        )
+        self._policy = global_policy().merged(self._session_policy)
+        self._all_tools = builtin_tools(services, self._poll, view=self._view)
+        self._tools = Toolbox(self._policy.filter(list(self._all_tools)))
         self._tools.add_middleware(self._guard)
         self._log = session.log(LOG_ENTRIES) if session is not None else []
         self._retype = ""  # /undo 放回输入行的原文，读过一次就清空
@@ -850,14 +865,50 @@ class _Session:
         return _CANCEL
 
     async def _slash_tools(self, args: str) -> Any:
-        rows = ["模型可用的工具（何时调用由模型自己决定）："]
-        for item in self._tools:
-            rows.append("  " + item.tool.name)
-            summary = (item.tool.description or "").strip().split("\n", 1)[0]
-            if summary:
-                rows.append("    " + summary)
-        await self._s.show_message("\n".join(rows))
+        """工具开关：空格翻转，回车保存到本会话，q 取消。"""
+        if self._typing_active:
+            await self._s.show_message("本轮执行中，等结束后再改工具")
+            return _CANCEL
+        names = [entry.tool.name for entry in self._all_tools]
+        if not names:
+            await self._s.show_message("没有可用工具")
+            return _CANCEL
+        states = {
+            name: self._policy.options(name).enabled is not False for name in names
+        }
+        global_off = [name for name in names if not global_policy().enabled(name)]
+        header = "工具开关（空格切换，Enter 保存到本会话，q 取消）"
+        if global_off:
+            header += "；全局已禁用：" + "、".join(global_off)
+        chosen = await toggle_tools(self._s, names, states, header=header)
+        if chosen is None:
+            return _CANCEL
+        self._apply_tool_states(chosen)
+        off = [name for name in names if not chosen[name]]
+        if off:
+            await self._s.show_message("已保存到本会话：关闭 " + "、".join(off))
+        else:
+            await self._s.show_message("已保存到本会话：全部启用")
         return _CANCEL
+
+    def _apply_tool_states(self, states: dict[str, bool]) -> None:
+        """把开关结果写回会话层；下一轮请求立即用新工具集。
+
+        与全局一致的项不在会话层留显式值 —— 会话只存「与全局不同的部分」。
+        """
+        for name, desired in states.items():
+            if desired == global_policy().enabled(name):
+                self._session_policy.set_options(name, ToolOptions())
+            elif desired:
+                self._session_policy.enable(name)
+            else:
+                self._session_policy.disable(name)
+        self._policy = global_policy().merged(self._session_policy)
+        self._tools = Toolbox(self._policy.filter(list(self._all_tools)))
+        self._tools.add_middleware(self._guard)
+        if self._session is not None and self._keeper is not None:
+            self._session.meta.tools = self._session_policy.to_json()
+            self._keeper.write_meta(self._session.meta)
 
     async def _slash_sessions(self, args: str) -> Any:
         """列出全部会话，光标上下选，回车切过去。"""
@@ -1841,6 +1892,9 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
     except ConfigError as e:
         await s.show_message("error: {}".format(e))
         return CommandResult()
+
+    # 全局工具策略从配置重算（--set 改过的也算数）；会话层在 _Session 里叠加。
+    reset_global_policy(catalog.tools())
 
     task = opts.task
     exited = False

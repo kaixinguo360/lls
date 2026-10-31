@@ -22,7 +22,7 @@ import secrets
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
@@ -117,6 +117,8 @@ class SessionMeta:
     last_seq: int = 0
     size: int = 0
     archived: bool = False
+    tools: Dict[str, dict] = field(default_factory=dict)
+    """会话层工具设置；空表示全部继承全局。"""
 
     @property
     def model(self) -> str:
@@ -138,6 +140,7 @@ class SessionMeta:
             "turns": self.turns,
             "last_seq": self.last_seq,
             "size": self.size,
+            "tools": self.tools,
         }
 
 
@@ -158,7 +161,17 @@ def _meta_from_json(raw: Any, session_id: str) -> SessionMeta:
         turns=_integer(raw.get("turns")),
         last_seq=_integer(raw.get("last_seq")),
         size=_integer(raw.get("size")),
+        tools=_tools_map(raw.get("tools")),
     )
+
+
+def _tools_map(value: Any) -> Dict[str, dict]:
+    """``meta.json`` 的 ``tools``：只收映射项，坏值丢弃。"""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(name): item for name, item in value.items() if isinstance(item, dict)
+    }
 
 
 def _text(value: Any) -> str:

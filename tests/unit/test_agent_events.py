@@ -110,6 +110,9 @@ class FakeCatalog:
     def context_limit(self):
         return 0
 
+    def tools(self):
+        return {}
+
 
 class ScriptedProvider:
     id = "stub"
@@ -592,6 +595,9 @@ def test_a_missing_provider_also_offers_the_picker(monkeypatch, tmp_path) -> Non
         def context_limit(self):
             return 0
 
+        def tools(self):
+            return {}
+
     services = FakeServices([])
     monkeypatch.setattr(agent_cmd, "store", lambda: SessionStore(root=tmp_path))
     monkeypatch.setattr(agent_cmd, "default_catalog", lambda: Missing())
@@ -618,6 +624,9 @@ def test_a_missing_provider_names_the_session(monkeypatch, tmp_path) -> None:
 
         def context_limit(self):
             return 0
+
+        def tools(self):
+            return {}
 
     services = FakeServices([])
     monkeypatch.setattr(agent_cmd, "store", lambda: keeper)

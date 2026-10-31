@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from ..config import ConfigError
+from .tool_options import ToolOptions, parse_tool_options
 from .types import ProviderConfig
 
 __all__ = ["AIConfig", "parse_ai"]
@@ -24,6 +25,8 @@ class AIConfig:
     default_model: str | None = None
     context_limit: int = 0
     """单次请求的 token 上限；0 表示只按模型的 context window 算。"""
+    tools: dict[str, ToolOptions] = field(default_factory=dict)
+    """每个工具的设置（``ai.tools`` 段）；没写到的工具默认启用。"""
     path: Path | None = None
     """配置来源文件。"""
 
@@ -114,6 +117,22 @@ def _parse_provider(
     )
 
 
+def _parse_tools(raw: Any, notes: Optional[list[str]]) -> dict[str, ToolOptions]:
+    """``ai.tools`` 段：工具名 → 设置；未知字段只告警。"""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        if notes is not None:
+            notes.append("ai.tools must be a mapping; ignored")
+        return {}
+    settings: dict[str, ToolOptions] = {}
+    for name, value in raw.items():
+        options = parse_tool_options(value, "ai.tools.{}".format(name), notes)
+        if not options.is_empty():
+            settings[str(name)] = options
+    return settings
+
+
 def parse_ai(
     data: Mapping[str, Any],
     path: Path,
@@ -127,7 +146,12 @@ def parse_ai(
     section = data.get("ai") or {}
     if not isinstance(section, dict):
         raise ConfigError("ai must be a mapping")
-    _unknown(section, {"default_model", "providers", "context_limit"}, "ai.", notes)
+    _unknown(
+        section,
+        {"default_model", "providers", "context_limit", "tools"},
+        "ai.",
+        notes,
+    )
 
     providers_raw = section.get("providers") or {}
     if not isinstance(providers_raw, dict):
@@ -147,5 +171,6 @@ def parse_ai(
         providers=providers,
         default_model=default_model,
         context_limit=limit_raw,
+        tools=_parse_tools(section.get("tools"), notes),
         path=path,
     )

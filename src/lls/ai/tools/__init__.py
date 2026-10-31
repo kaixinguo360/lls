@@ -25,6 +25,7 @@ from __future__ import annotations
 from .box import Middleware, Next, Run, Toolbox
 from .files import file_tools
 from .middleware import RepeatReminder
+from .policy import ToolPolicy, global_policy, reset_global_policy
 from .shell import Shell, shell_tools, shared
 from .terminal import Poll, ScreenView, TerminalPort, terminal_tools
 
@@ -37,8 +38,11 @@ __all__ = [
     "ScreenView",
     "Shell",
     "TerminalPort",
+    "ToolPolicy",
     "Toolbox",
     "builtin_tools",
+    "global_policy",
+    "reset_global_policy",
     "file_tools",
     "shell_tools",
     "terminal_tools",
