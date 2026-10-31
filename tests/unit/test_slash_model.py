@@ -108,7 +108,8 @@ def test_no_argument_opens_the_picker_at_the_current_model(monkeypatch) -> None:
     assert keeper.written == 1
     assert calls[0]["items"] == ["p/a", "p/b"]
     assert calls[0]["cursor"] == 0          # 当前模型是 p/a
-    assert any("← 当前" in label for label in calls[0]["labels"])
+    assert calls[0]["labels"][0].startswith("* ")
+    assert calls[0]["labels"][1].startswith("  ")
     assert any("已切到 p/b" in text for text in worker._s.messages)
 
 

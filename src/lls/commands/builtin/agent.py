@@ -840,7 +840,12 @@ class _Session:
             return _CANCEL
         current = "{}/{}".format(self._provider_id, self._model)
         specs = [spec for spec, _ in choices]
-        labels = [spec + ("  ← 当前" if spec == current else "") for spec in specs]
+        # 与 /sessions 一样用 * 标当前；名字列对齐。
+        width = max(len(spec) for spec in specs)
+        labels = [
+            "{} {}".format("*" if spec == current else " ", spec.ljust(width))
+            for spec in specs
+        ]
         start = specs.index(current) if current in specs else 0
         chosen = await pick(
             self._s,
