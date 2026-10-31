@@ -8,6 +8,6 @@
 
 from __future__ import annotations
 
-from . import agent, core, generate, sessions, write  # noqa: F401
+from . import agent, core, generate, sessions, tools, write  # noqa: F401
 
-__all__ = ["agent", "core", "generate", "sessions", "write"]
+__all__ = ["agent", "core", "generate", "sessions", "tools", "write"]
