@@ -29,9 +29,10 @@ lls bash        # 指定命令
 
 ## 命令
 
-`Ctrl-E` 进入命令模式，回车或 Esc 回到透传。命令名与参数支持 Tab 补全
-（redis-cli 风格）：按 Tab 先预览第一个候选，再按 Tab 原地轮换，Esc 取消、
-其它键接受；行尾的灰色虚影是当前命令的用法提示。
+`Ctrl-E` 进入命令模式，回车或 Esc 回到透传。命令名与参数支持 Tab 补全，
+默认是**行尾虚影**：输入后面用灰字显示还没打的那一截与用法参数，`Tab` 或
+`→` 接受。写 `input_completion.style: redis` 可换成 redis-cli 式轮盘：第一个
+候选先预览在行上，再 Tab 原地轮换，Esc 取消、其它键接受。
 
 | 命令 | 别名 | 说明 |
 |---|---|---|
@@ -98,8 +99,8 @@ lls bash        # 指定命令
 
 忙碌只是一个状态位，不是另一套界面：斜杠命令在这一轮跑着时照样可用。行首敲
 下 `/` 提示符就换成 `(agent-cmd)`（执行中也一样，命令就是命令），回车是
-执行命令而不是下一轮任务。`/` 命令同样支持 Tab 补全：补出来的是规范名
-（`/ls` 会补成 `/sessions`），行尾灰色虚影给出用法。命令按「会不会碰到本轮正在用的东西」分四档：
+执行命令而不是下一轮任务。`/` 命令同样支持补全：补出来的是规范名
+（`/ls` 会补成 `/sessions`），默认的行尾虚影同时给还没打的那一截与用法。命令按「会不会碰到本轮正在用的东西」分四档：
 `/help` `/s` `/tools` `/title` `/model` 就地执行，做完回到执行中界面；
 `/compact` 排到本轮结束后；`/undo` `/retry` `/sessions` `/new` `/fork` `/rm`
 `/archive` 执行中拒绝，并提示先 `Ctrl-C`；`/exit` 先让本轮收尾再退出。
@@ -200,6 +201,9 @@ input_history:
   enabled: true
   max_entries: 200
   max_bytes: 131072
+
+input_completion:
+  style: ghost                  # ghost：行尾虚影（Tab / → 接受）；redis：Tab 轮盘
 
 ai:
   default_model: openai/gpt-4o-mini

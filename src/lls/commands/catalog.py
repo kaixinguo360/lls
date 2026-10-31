@@ -46,6 +46,18 @@ def _replace(text: str, start: int, stop: int, value: str) -> str:
     return text[:start] + value + text[stop:]
 
 
+def _tail(usage: str, typed: str) -> str:
+    """``usage`` 去掉与 ``typed`` 相同的开头：行尾只显示还没输入的那一截。
+
+    比较大小写不敏感；``typed`` 是命令位整个词，或参数位的命令词加空格。
+    """
+    limit = min(len(usage), len(typed))
+    index = 0
+    while index < limit and usage[index].casefold() == typed[index].casefold():
+        index += 1
+    return usage[index:]
+
+
 def completer_for(
     metas: Iterable[CommandMeta],
     *,
@@ -74,14 +86,18 @@ def completer_for(
         head = text[:start]
 
         if head.strip():
-            # 参数位：只补命令自己声明的静态子命令。
+            # 参数位：只补命令自己声明的静态子命令。行首那一段必须是本补全器
+            # 认可的命令词，否则（任务文本里的普通单词）不碰。
             word = _first_word(text)
-            if marker and word.startswith(marker):
+            if marker and not word.startswith(marker):
+                return Completion()
+            if marker:
                 word = word[len(marker):]
             meta = by_name.get(word.casefold())
             if meta is None:
                 return Completion()
-            hint = meta.usage
+            typed = (marker + word + " ") if marker else (word + " ")
+            hint = _tail(meta.usage, typed)
             if not meta.subcommands:
                 return Completion(hint=hint)
             matched = [
@@ -122,13 +138,21 @@ def completer_for(
             value = candidate + " " if stop == len(text) else candidate
             items.append(_replace(text, start, stop, value))
 
-        hint = ""
+        # 提示只在命中同一条命令时给：多条命令并列时任何一条都可能是用户想要
+        # 的，先不猜；给的时候去掉已经输入的那一截（`ag` 只提示 `ent [任务]`）。
+        hit = None
+        ambiguous = False
         for meta in metas:
             names = (meta.name,) + meta.aliases
-            if any(stem.casefold() == name.casefold() for name in names):
-                hint = meta.usage
+            if not any(name.casefold().startswith(stem.casefold()) for name in names):
+                continue
+            if hit is not None and hit is not meta:
+                ambiguous = True
                 break
-        return Completion(tuple(items), hint)
+            hit = meta
+        if hit is None or ambiguous:
+            return Completion(tuple(items))
+        return Completion(tuple(items), _tail(hit.usage, token))
 
     return complete
 

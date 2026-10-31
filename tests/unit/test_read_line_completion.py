@@ -34,7 +34,15 @@ class FakeConsole:
         return out
 
 
-def _run(keys: bytes, completer=None, *, rows=8, columns=40, **kwargs):
+def _run(
+    keys: bytes,
+    completer=None,
+    *,
+    rows=8,
+    columns=40,
+    completion_style="redis",
+    **kwargs
+):
     async def go():
         screen = PyteScreenModel(rows=rows, columns=columns)
         console = FakeConsole()
@@ -51,7 +59,9 @@ def _run(keys: bytes, completer=None, *, rows=8, columns=40, **kwargs):
         engine._exit_event = asyncio.Event()
         screen.feed(b"$ ")
         engine.push_keys(keys)
-        line = await engine.read_line("> ", completer=completer, **kwargs)
+        line = await engine.read_line(
+            "> ", completer=completer, completion_style=completion_style, **kwargs
+        )
         return line, bytes(console.data), engine
 
     return asyncio.run(go())
@@ -106,7 +116,7 @@ def test_the_hint_is_painted_gray_after_the_line() -> None:
     assert line == "/title"
     screen = _screen(out)
     text = "\n".join(screen.display)
-    assert "/title [文字]" in text
+    assert "[文字]" in text
     for y, row in enumerate(screen.display):
         x = row.find("文字")
         if x >= 0:
@@ -123,3 +133,61 @@ def test_a_long_hint_is_cut_instead_of_wrapping_the_overlay() -> None:
     assert line == "/title"
     assert engine.overlay.lines == 1
     assert "文字" not in "\n".join(_screen(out, columns=12).display)
+
+# ---- ghost 风格：行尾虚影 ----
+
+def test_ghost_shows_the_remaining_text() -> None:
+    line, out, _ = _run(
+        b"/st\r", COMPLETE, completion_style="ghost", handoff=lambda _line: True
+    )
+    assert line == "/st"
+    assert "atus" in "\n".join(_screen(out).display)
+
+
+def test_ghost_shows_the_usage_tail() -> None:
+    line, out, _ = _run(
+        b"/ti\r", COMPLETE, completion_style="ghost", handoff=lambda _line: True
+    )
+    assert line == "/ti"
+    text = "\n".join(_screen(out).display)
+    assert "tle" in text
+    assert "[文字]" in text
+
+
+def test_ghost_marks_more_candidates_with_an_ellipsis() -> None:
+    line, out, _ = _run(
+        b"/\r", COMPLETE, completion_style="ghost", handoff=lambda _line: True
+    )
+    assert line == "/"
+    text = "\n".join(_screen(out).display)
+    assert "help" in text and "…" in text
+
+
+def test_ghost_tab_accepts_the_suggestion() -> None:
+    line, _, _ = _run(b"/st\t\r", COMPLETE, completion_style="ghost")
+    assert line == "/status "
+
+
+def test_ghost_right_arrow_accepts_the_suggestion() -> None:
+    line, _, _ = _run(b"/st\x1b[C\r", COMPLETE, completion_style="ghost")
+    assert line == "/status "
+
+
+def test_ghost_right_arrow_still_moves_when_there_is_nothing_to_accept() -> None:
+    line, _, _ = _run(b"xy\x1b[D\x1b[C\r", COMPLETE, completion_style="ghost")
+    assert line == "xy"
+
+
+def test_ghost_is_painted_gray() -> None:
+    line, out, _ = _run(
+        b"/st\r", COMPLETE, completion_style="ghost", handoff=lambda _line: True
+    )
+    assert line == "/st"
+    screen = _screen(out)
+    for y, row in enumerate(screen.display):
+        x = row.find("atus")
+        if x >= 0:
+            assert screen.buffer[y][x].fg == "brightblack"
+            break
+    else:  # pragma: no cover - 找不到就是没画
+        raise AssertionError("ghost not painted")

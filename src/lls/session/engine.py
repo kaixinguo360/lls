@@ -25,7 +25,15 @@ from collections import deque
 from typing import Any, Callable
 
 from lls.edit import HistoryStore, LineEditor
-from lls.edit.complete import Completion, Completer, clip_hint, display_width
+from lls.edit.complete import (
+    Completion,
+    Completer,
+    Ghost,
+    clip_hint,
+    clip_text,
+    display_width,
+    ghost_for,
+)
 from lls.term import ScreenModel
 from lls.tty import Console, Key, KeyParser, PtySession, TerminalBackend, Winsize
 from lls.ui import render_row_cells
@@ -171,6 +179,7 @@ class Engine:
         handlers: dict[str, Handler],
         initial_handler: str,
         history: HistoryStore | None = None,
+        completion_style: str = "ghost",
     ) -> None:
         self._backend = backend
         self._argv = argv
@@ -200,6 +209,8 @@ class Engine:
 
         # 输入历史落盘；None 表示不持久化（只在本次进程里召回）。
         self._history = history
+        # 补全的默认长相；read_line 可以逐行覆盖（见 completion_style）。
+        self._completion_style = completion_style
 
         # 覆盖层：提示行、消息框、翻看器都浮在子进程画面之上，由它自己的
         # 屏幕模型记住内容、折行与光标（见 :class:`~.overlay.Overlay`）。
@@ -975,6 +986,7 @@ class Engine:
         tick_interval: float = TICK_INTERVAL,
         on_edit: Callable[[str, int], None] | None = None,
         completer: Completer | None = None,
+        completion_style: str | None = None,
     ) -> Any:
         """读一行输入，完整行编辑。
 
@@ -990,9 +1002,11 @@ class Engine:
         计时、排队的条数都靠这一格更新。``on_edit(text, cursor)`` 在每处理
         完一个按键后调用一次，调用方可存下草稿（下一次用 ``value`` 原样恢复）。
 
-        ``completer(text, cursor)`` 提供 Tab 补全与行尾提示（redis/linenoise
-        同型）：候选是整行，按 Tab 先预览、再 Tab 原地轮换，Esc 取消、其它键
-        接受；提示画在光标右侧，只在行尾显示。不给就是老行为：Tab 无动作。
+        ``completer(text, cursor)`` 提供 Tab 补全与行尾提示。``completion_style``
+        决定长相：``"ghost"``（默认）把第一个候选的剩余字符与用法画成行尾
+        虚影，Tab 或 → 接受；``"redis"`` 是 Tab 轮盘预览（首个候选先画在行上，
+        再 Tab 原地轮换，Esc 取消、其它键接受），行尾只显示用法。不给
+        completer 时 Tab 无动作（老行为）。
 
         ``history_scope`` 为 ``"session"`` 时这份 ↑ 历史跟着当前 AI 会话走
         （换会话就换一份，会话删掉一起删）；``"global"`` 是本机共用的一份。
@@ -1008,6 +1022,7 @@ class Engine:
         子进程画面。交接时改为保留锚点与行数，下一个 ``draw_overlay``
         原地顶替，中间不露底。
         """
+        style = completion_style or self._completion_style
         session = history_scope == "session"
         editor = self._editor_for(history_id, session=session)
         editor.history_kind = history_kind
@@ -1030,21 +1045,27 @@ class Engine:
                 return value, len(value)
             return editor.text, editor.cursor
 
-        def _hint_for(text: str, cursor: int) -> str:
-            """行尾语法提示：补全器算出来的那一条；出错就当没有。"""
-            if completer is None or cursor != len(text):
-                return ""
-            try:
-                return completer(text, cursor).hint
-            except Exception:  # noqa: BLE001 - 补全坏了不能把输入也带崩
-                return ""
-
         def _complete_now(text: str, cursor: int) -> Completion:
             """要候选；补全器抛异常时当作“没有候选”，而不是抛出这一行。"""
+            if completer is None or cursor != len(text):
+                return Completion()
             try:
                 return completer(text, cursor)  # type: ignore[misc]
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - 补全坏了不能把输入也带崩
                 return Completion()
+
+        def _ghost_now() -> Ghost:
+            """当前行尾虚影；ghost 风格的接受键也用它。"""
+            return ghost_for(
+                editor.text, editor.cursor, _complete_now(editor.text, editor.cursor)
+            )
+
+        def _ghost_text(ghost: Ghost) -> str:
+            """虚影画出来的一段：剩余字符 + 用法里的参数段。"""
+            text = ghost.suffix
+            if ghost.usage:
+                text += " " + ghost.usage
+            return text
 
         def _draw() -> None:
             """按当前编辑状态重画提示行。
@@ -1056,14 +1077,20 @@ class Engine:
             head = _head()
             text, cursor = _frame_text()
             body = head + text
-            hint = _hint_for(text, cursor)
-            if hint:
-                # 提示画在光标右边（行尾）。宽度按“这一行已经占了多少列”算，
-                # 放不下就截断 —— 折到下一行会让覆盖层长高、位置跟着跳。
-                room = self.screen.columns - 2 - display_width(body.rsplit("\n", 1)[-1])
-                clipped = clip_hint(hint, room)
+            result = _complete_now(text, cursor)
+            # 宽度按“这一行已经占了多少列”算，放不下就截断 —— 折到下一行
+            # 会让覆盖层长高、位置跟着跳。
+            room = self.screen.columns - 2 - display_width(body.rsplit("\n", 1)[-1])
+            if style == "ghost":
+                painted = clip_text(_ghost_text(ghost_for(text, cursor, result)), room)
+                if painted:
+                    body += "\x1b[90m" + painted + "\x1b[0m"
+            elif result.hint:
+                clipped = clip_hint(result.hint, room)
                 if clipped:
-                    body += " \x1b[90m" + clipped + "\x1b[0m"
+                    # 提示已经去掉了输入过的部分，可能以空格开头：不再多插。
+                    sep = "" if clipped.startswith(" ") else " "
+                    body += sep + "\x1b[90m" + clipped + "\x1b[0m"
             frame = (body, len(head) + cursor)
             if frame == shown:
                 return
@@ -1102,7 +1129,22 @@ class Engine:
                     # 转发给子进程 —— 它在等这个结果；绝不当按键编辑或显示。
                     self._pty_write(key.raw)
                     continue
-                if key.control == "tab" and completer is not None:
+                if key.control == "tab" and style == "ghost":
+                    # 虚影风格：Tab 直接接受建议；没有建议就只响一声。
+                    ghost = _ghost_now()
+                    if not ghost.candidate:
+                        self._bell()
+                        continue
+                    editor.set_text(ghost.candidate)
+                    if on_edit is not None:
+                        on_edit(editor.text, editor.cursor)
+                    _draw()
+                    continue
+                if (
+                    key.control == "tab"
+                    and completer is not None
+                    and style != "ghost"
+                ):
                     # redis 式补全：第一个候选先“预览”在行上（不写编辑器），
                     # 继续按 Tab 原地轮换；绕完一圈回到原样并响铃，再按又从头。
                     if editor.cursor != len(editor.text):
@@ -1163,6 +1205,15 @@ class Engine:
                             self._remember(history_id, line, session=session)
                         return _leave(line)
                     return _leave(escape)  # Esc
+                if key.control == "right" and style == "ghost":
+                    # → 先接受虚影；没有虚影才走常规的右移光标。
+                    ghost = _ghost_now()
+                    if ghost.candidate:
+                        editor.set_text(ghost.candidate)
+                        if on_edit is not None:
+                            on_edit(editor.text, editor.cursor)
+                        _draw()
+                        continue
                 if key.control == "backspace":
                     editor.backspace()
                 elif key.control == "delete":

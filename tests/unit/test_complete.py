@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from lls.commands.catalog import CommandMeta, completer_for
-from lls.edit.complete import clip_hint, display_width, token_span
+from lls.edit.complete import (
+    Completion,
+    clip_hint,
+    clip_text,
+    display_width,
+    ghost_for,
+    token_span,
+)
 
 SLASH = (
     CommandMeta("help", ("h", "?"), "/help"),
@@ -61,13 +68,13 @@ def test_argument_completion_uses_declared_subcommands_and_keeps_the_command() -
 def test_a_command_without_subcommands_completes_nothing_but_still_hints() -> None:
     result = COMPLETE("/title x", len("/title x"))
     assert result.items == ()
-    assert result.hint == "/title [文字]"
+    assert result.hint == "[文字]"
 
 
 def test_hint_only_for_a_complete_command() -> None:
-    assert COMPLETE("/title", 6).hint == "/title [文字]"
-    assert COMPLETE("/ti", 3).hint == ""
-    assert COMPLETE("/title ", 7).hint == "/title [文字]"
+    assert COMPLETE("/title", 6).hint == " [文字]"
+    assert COMPLETE("/ti", 3).hint == "tle [文字]"
+    assert COMPLETE("/title ", 7).hint == "[文字]"
 
 
 def test_without_a_marker_the_first_word_is_the_command() -> None:
@@ -103,7 +110,7 @@ def test_the_agent_completer_reuses_the_slash_table() -> None:
     from lls.commands.builtin.agent import _SLASH_COMPLETER
 
     assert _SLASH_COMPLETER("/st", 3).items == ("/status ",)
-    assert _SLASH_COMPLETER("/model", 6).hint == "/model [provider/model]"
+    assert _SLASH_COMPLETER("/model", 6).hint == " [provider/model]"
     assert _SLASH_COMPLETER("/usr/bin", 8).items == ()
     assert _SLASH_COMPLETER("/nope", 5).items == ()
 
@@ -113,4 +120,40 @@ def test_the_global_command_set_completes_through_the_registry() -> None:
 
     complete = registry_completer()
     assert complete("ag", 2).items == ("agent ",)
-    assert complete("agent ", 6).hint == "agent [任务]"
+    assert complete("agent ", 6).hint == "[任务]"
+
+def test_ghost_suggestion_is_the_remaining_suffix() -> None:
+    ghost = ghost_for("/st", 3, Completion(("/status ",), "/status"))
+    assert ghost.candidate == "/status "
+    assert ghost.suffix == "atus "
+    assert ghost.usage == ""
+
+
+def test_ghost_usage_keeps_only_the_argument_part() -> None:
+    ghost = ghost_for("/ti", 3, Completion(("/title ",), "/title [文字]"))
+    assert ghost.suffix == "tle "
+    assert ghost.usage == "[文字]"
+
+
+def test_ghost_has_no_suffix_when_the_candidate_rewrites_the_word() -> None:
+    ghost = ghost_for("/LS", 3, Completion(("/sessions ",), "/sessions"))
+    assert ghost.suffix == ""
+    assert ghost.usage == ""
+
+
+def test_ghost_marks_more_matches_and_ignores_mid_line_cursor() -> None:
+    ghost = ghost_for("/", 1, Completion(("/help ", "/status ")))
+    assert ghost.suffix == "help …"
+    assert ghost_for("/st", 2, Completion(("/status ",))).candidate == ""
+
+
+def test_clip_text_keeps_spaces() -> None:
+    assert clip_text("a b", 3) == "a b"
+    assert clip_text("abc", 2) == "ab"
+    assert clip_text("  x", 2) == "  "
+    assert clip_text("", 4) == ""
+
+def test_ghost_usage_handles_hints_that_already_dropped_the_typed_part() -> None:
+    ghost = ghost_for("/title", 6, Completion(("/title ",), " [文字]"))
+    assert ghost.usage == "[文字]"
+    assert ghost_for("/st", 3, Completion(("/status ",), "atus ")).usage == ""

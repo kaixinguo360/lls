@@ -1,4 +1,4 @@
-"""应用配置：位置、``paths`` / ``input_history`` / ``ai`` 三段解析。
+"""应用配置：位置、``paths`` / ``input_history`` / ``input_completion`` / ``ai`` 四段解析。
 
 配置文件是唯一入口，环境变量只负责指定文件位置（``LLS_CONFIG`` /
 ``XDG_CONFIG_HOME``，以及命令行 ``--config``）。文件不存在、YAML 坏掉或某
@@ -21,6 +21,7 @@ __all__ = [
     "DEFAULT_FILENAME",
     "DEFAULT_HISTORY_MAX_ENTRIES",
     "DEFAULT_HISTORY_MAX_BYTES",
+    "InputCompletionConfig",
     "InputHistoryConfig",
     "MINIMAL_EXAMPLE",
     "PathsConfig",
@@ -37,6 +38,9 @@ DEFAULT_HISTORY_MAX_ENTRIES = 200
 
 #: 单个历史文件超过它就顺手压缩。
 DEFAULT_HISTORY_MAX_BYTES = 128 * 1024
+
+#: 输入行补全的默认长相：行尾虚影（另一种是 ``"redis"`` 轮盘）。
+DEFAULT_COMPLETION_STYLE = "ghost"
 
 MINIMAL_EXAMPLE = """\
 ai:
@@ -72,6 +76,17 @@ class InputHistoryConfig:
 
 
 @dataclass(frozen=True)
+class InputCompletionConfig:
+    """``input_completion`` 段：Tab 补全的长相。
+
+    ``style`` 只接受 ``"ghost"``（行尾虚影，Tab / → 接受）与 ``"redis"``
+    （Tab 轮盘预览）。写错时用默认值并告警。
+    """
+
+    style: str = DEFAULT_COMPLETION_STYLE
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """一次配置读取的结果。
 
@@ -84,6 +99,7 @@ class AppConfig:
     exists: bool
     paths: PathsConfig
     input_history: InputHistoryConfig
+    input_completion: InputCompletionConfig
     ai: Any = None
     ai_error: str | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
@@ -325,6 +341,24 @@ def _parse_input_history(
     )
 
 
+def _parse_input_completion(
+    raw: Mapping[str, Any], notes: list[str]
+) -> InputCompletionConfig:
+    section = _mapping(raw, "input_completion", notes)
+    _unknown(section, {"style"}, "input_completion.", notes)
+    value = section.get("style")
+    if value is None:
+        return InputCompletionConfig()
+    style = value.strip().lower() if isinstance(value, str) else ""
+    if style not in ("ghost", "redis"):
+        notes.append(
+            "input_completion.style must be ghost or redis; using "
+            + DEFAULT_COMPLETION_STYLE
+        )
+        style = DEFAULT_COMPLETION_STYLE
+    return InputCompletionConfig(style=style)
+
+
 def _emit(notes: Sequence[str]) -> None:
     for note in notes:
         warnings.warn(note, RuntimeWarning, stacklevel=4)
@@ -353,9 +387,10 @@ def load(path: str | None = None, *, emit_warnings: bool = True) -> AppConfig:
             raw = {}
 
     raw = _apply_overrides(raw, _CLI_OVERRIDES)
-    _unknown(raw, {"paths", "input_history", "ai"}, "", notes)
+    _unknown(raw, {"paths", "input_history", "input_completion", "ai"}, "", notes)
     paths = _parse_paths(raw, target, notes)
     input_history = _parse_input_history(raw, notes)
+    input_completion = _parse_input_completion(raw, notes)
     ai = None
     if ai_error is None:
         try:
@@ -375,6 +410,7 @@ def load(path: str | None = None, *, emit_warnings: bool = True) -> AppConfig:
         exists=exists,
         paths=paths,
         input_history=input_history,
+        input_completion=input_completion,
         ai=ai,
         ai_error=ai_error,
         warnings=tuple(notes),
@@ -390,7 +426,7 @@ def load_ai(path: str | None = None, *, emit_warnings: bool = True) -> Any:
     notes: list[str] = []
     raw = _read_raw(target)
     raw = _apply_overrides(raw, _CLI_OVERRIDES)
-    _unknown(raw, {"paths", "input_history", "ai"}, "", notes)
+    _unknown(raw, {"paths", "input_history", "input_completion", "ai"}, "", notes)
     from .ai.config import parse_ai
 
     try:

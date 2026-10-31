@@ -130,3 +130,18 @@ def test_cli_overrides_use_the_same_parser(tmp_path: Path) -> None:
 def test_bad_override_is_rejected_at_entry() -> None:
     with pytest.raises(ConfigError, match="KEY=VALUE"):
         configure(overrides=["input_history.max_entries"])
+
+def test_completion_style_defaults_to_ghost(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    cfg = load(tmp_path / "missing.yaml", emit_warnings=False)
+    assert cfg.input_completion.style == "ghost"
+
+
+def test_completion_style_accepts_redis_and_rejects_typos(tmp_path: Path) -> None:
+    path = _write(tmp_path, "input_completion:\n  style: redis\n")
+    assert load(path, emit_warnings=False).input_completion.style == "redis"
+
+    bad = _write(tmp_path, "input_completion:\n  style: fuzzy\n")
+    cfg = load(bad, emit_warnings=False)
+    assert cfg.input_completion.style == "ghost"
+    assert any("input_completion.style" in note for note in cfg.warnings)

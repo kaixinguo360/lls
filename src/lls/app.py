@@ -11,6 +11,7 @@ import os
 import sys
 
 from .commands.catalog import registry_completer
+from .config import load as load_config
 from .edit import history_from_config
 from .handlers import CommandHandler, PassthroughHandler
 from .session.engine import Engine
@@ -73,6 +74,7 @@ def run_interactive(command: list[str]) -> int:
         build_handlers(),
         "default",
         history=history_from_config(_current_session_id),
+        completion_style=load_config().input_completion.style,
     )
 
     try:
