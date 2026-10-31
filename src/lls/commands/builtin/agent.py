@@ -799,8 +799,31 @@ class _Session:
         return _CANCEL
 
     async def _slash_model(self, args: str) -> Any:
+        """查看或切换模型：/model [provider/model]"""
         spec = args.strip()
-        if not spec:
+        if spec:
+            return await self._switch_model(spec)
+        return await self._pick_model()
+
+    def _model_choices(self) -> List[Tuple[str, str]]:
+        """配置里列出的全部模型：``[(provider/model, 标签)]``。"""
+        rows: List[Tuple[str, str]] = []
+        if self._catalog is None:
+            return rows
+        for provider_id in self._catalog.provider_ids():
+            try:
+                provider = self._catalog.provider_config(provider_id)
+            except Exception:  # noqa: BLE001 - 单个 provider 坏掉不该断了整张表
+                continue
+            for model_id in provider.models:
+                spec = "{}/{}".format(provider_id, model_id)
+                rows.append((spec, spec))
+        return rows
+
+    async def _pick_model(self) -> Any:
+        """无参数：弹出选择器；没有可选项时退回文本提示。"""
+        choices = self._model_choices()
+        if not choices:
             rows = [
                 "当前模型：{}（provider {}）".format(
                     self._model, self._provider_id or "-"
@@ -808,9 +831,30 @@ class _Session:
             ]
             if self._catalog is not None and self._catalog.provider_ids():
                 rows.append("已配置 provider：" + "、".join(self._catalog.provider_ids()))
+            rows.append("没有可选的模型（ai.providers.<id>.models 为空）")
             rows.append("用法：/model <provider/model>")
             await self._s.show_message("\n".join(rows))
             return _CANCEL
+        if self._typing_active:
+            await self._s.show_message("本轮执行中，等结束后再切模型")
+            return _CANCEL
+        current = "{}/{}".format(self._provider_id, self._model)
+        specs = [spec for spec, _ in choices]
+        labels = [spec + ("  ← 当前" if spec == current else "") for spec in specs]
+        start = specs.index(current) if current in specs else 0
+        chosen = await pick(
+            self._s,
+            specs,
+            labels,
+            cursor=start,
+            header="选择模型（↑↓ 移动，回车切换）：",
+        )
+        if chosen is None:
+            return _CANCEL
+        return await self._switch_model(chosen)
+
+    async def _switch_model(self, spec: str) -> Any:
+        """切到 provider/model；失败只报错，不改状态。"""
         if self._catalog is None:
             await self._s.show_message("本次会话读不到模型配置，改不了模型")
             return _CANCEL
