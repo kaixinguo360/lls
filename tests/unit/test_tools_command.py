@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from lls.ai.tool_options import ToolOptions
 from lls.ai.tools.policy import global_policy, reset_global_policy
 from lls.commands.builtin import tools as tools_cmd
 from lls.commands.spec import get_command
@@ -76,6 +77,17 @@ def test_cancelling_leaves_the_global_policy_alone() -> None:
     asyncio.run(tools_cmd.cmd_tools(services, None))
 
     assert global_policy().disabled() == []
+    reset_global_policy()
+
+
+def test_tool_switches_carry_the_global_state() -> None:
+    reset_global_policy({"write_file": ToolOptions(enabled=False)})
+
+    items = tools_cmd.tool_switches(["write_file", "bash"])
+
+    assert items[0].enabled is False
+    assert items[0].source == "global"
+    assert items[1].enabled is True
     reset_global_policy()
 
 

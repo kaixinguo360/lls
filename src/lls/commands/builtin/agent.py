@@ -81,7 +81,7 @@ from lls.session.errors import Interrupted, SessionEnded
 from ..keys import Aborted, SessionClosed, poll_keys
 from .agent_pager import page
 from .agent_picker import pick
-from .tool_picker import toggle_tools
+from .tool_picker import ToolSwitch, toggle_tools
 
 __all__ = ["cmd_agent"]
 
@@ -865,7 +865,7 @@ class _Session:
         return _CANCEL
 
     async def _slash_tools(self, args: str) -> Any:
-        """工具开关：空格翻转，回车保存到本会话，q 取消。"""
+        """工具开关：空格翻转，r 回到跟随全局，回车保存到本会话。"""
         if self._typing_active:
             await self._s.show_message("本轮执行中，等结束后再改工具")
             return _CANCEL
@@ -873,36 +873,42 @@ class _Session:
         if not names:
             await self._s.show_message("没有可用工具")
             return _CANCEL
-        states = {
-            name: self._policy.options(name).enabled is not False for name in names
-        }
-        global_off = [name for name in names if not global_policy().enabled(name)]
-        header = "工具开关（空格切换，Enter 保存到本会话，q 取消）"
-        if global_off:
-            header += "；全局已禁用：" + "、".join(global_off)
-        chosen = await toggle_tools(self._s, names, states, header=header)
+        switches = [
+            ToolSwitch(
+                name=name,
+                enabled=self._policy.options(name).enabled is not False,
+                source="session" if name in self._session_policy else "global",
+                fallback=global_policy().enabled(name),
+            )
+            for name in names
+        ]
+        chosen = await toggle_tools(
+            self._s,
+            switches,
+            header="工具开关（空格切换，r 跟随全局，Enter 保存到本会话）",
+        )
         if chosen is None:
             return _CANCEL
-        self._apply_tool_states(chosen)
-        off = [name for name in names if not chosen[name]]
+        self._apply_tool_switches(chosen)
+        off = [item.name for item in chosen if not item.enabled]
         if off:
             await self._s.show_message("已保存到本会话：关闭 " + "、".join(off))
         else:
             await self._s.show_message("已保存到本会话：全部启用")
         return _CANCEL
 
-    def _apply_tool_states(self, states: dict[str, bool]) -> None:
-        """把开关结果写回会话层；下一轮请求立即用新工具集。
+    def _apply_tool_switches(self, switches: "list[ToolSwitch]") -> None:
+        """把界面结果写回会话层；下一轮请求立即用新工具集。
 
-        与全局一致的项不在会话层留显式值 —— 会话只存「与全局不同的部分」。
+        ``source == "global"`` 表示这一项跟随全局：从会话层删掉它。
         """
-        for name, desired in states.items():
-            if desired == global_policy().enabled(name):
-                self._session_policy.set_options(name, ToolOptions())
-            elif desired:
-                self._session_policy.enable(name)
+        for item in switches:
+            if item.source == "global":
+                self._session_policy.set_options(item.name, ToolOptions())
+            elif item.enabled:
+                self._session_policy.enable(item.name)
             else:
-                self._session_policy.disable(name)
+                self._session_policy.disable(item.name)
         self._policy = global_policy().merged(self._session_policy)
         self._tools = Toolbox(self._policy.filter(list(self._all_tools)))
         self._tools.add_middleware(self._guard)

@@ -6,8 +6,9 @@
   会话；已经在跑的会话下一轮请求也会用它（每轮现算）。
 * agent 内的开关改的是当前会话层，只影响那一条会话。
 
-两层逐字段合并，会话层更近。全局修改只对当前进程有效：写回 ``config.yaml``
-需要保留注释与格式，那是另一件事；要持久化就手改配置里的 ``ai.tools``。
+全局层没有可以跟随的上一层，所以界面里没有 ``r``：每一行都由全局说了算。
+全局修改只对当前进程有效：写回 ``config.yaml`` 需要保留注释与格式，那是
+另一件事；要持久化就手改配置里的 ``ai.tools``。
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.session.services import Services
 
-from .tool_picker import toggle_tools
+from .tool_picker import ToolSwitch, toggle_tools
 
 
 def tool_names(services: Services) -> list[str]:
@@ -26,14 +27,27 @@ def tool_names(services: Services) -> list[str]:
     return [entry.tool.name for entry in builtin_tools(services, services.wait)]
 
 
-def apply_global_states(states: dict[str, bool]) -> None:
+def tool_switches(names: list[str]) -> list[ToolSwitch]:
+    """全局层的一行：值就是全局值，来源总是 ``global``。"""
+    return [
+        ToolSwitch(
+            name=name,
+            enabled=global_policy().enabled(name),
+            source="global",
+            fallback=global_policy().enabled(name),
+        )
+        for name in names
+    ]
+
+
+def apply_global_states(switches: list[ToolSwitch]) -> None:
     """把界面结果写进全局策略。"""
     policy = global_policy()
-    for name, wanted in states.items():
-        if wanted:
-            policy.enable(name)
+    for item in switches:
+        if item.enabled:
+            policy.enable(item.name)
         else:
-            policy.disable(name)
+            policy.disable(item.name)
 
 
 @command("tools", category="ai")
@@ -43,17 +57,16 @@ async def cmd_tools(s: Services, args: str | None) -> CommandResult:
     if not names:
         await s.show_message("没有可用工具")
         return CommandResult()
-    states = {name: global_policy().enabled(name) for name in names}
     chosen = await toggle_tools(
         s,
-        names,
-        states,
+        tool_switches(names),
         header="全局工具开关（之后的 agent 会话都按它算；本次进程有效）",
+        allow_follow=False,
     )
     if chosen is None:
         return CommandResult()
     apply_global_states(chosen)
-    off = [name for name in names if not chosen[name]]
+    off = [item.name for item in chosen if not item.enabled]
     if off:
         await s.show_message("全局工具已更新（本次进程有效）：关闭 " + "、".join(off))
     else:
