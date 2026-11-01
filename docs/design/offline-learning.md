@@ -2,7 +2,8 @@
 
 离线学习与正向推理彻底分离：`lls-learn` 只读写磁盘、起外部命令；主仓库
 不引入 torch/transformers，也不在服务进程里改权重。训练器/评测器通过
-数据集与 `metrics.json` 契约接入，可以是任意语言、任意环境。
+数据集与 `metrics.json` 契约接入，可以是任意语言、任意环境。仓库里有一份
+可直接跑通的最小实现：[examples/trainer](../../examples/trainer/README.md)。
 
 ## 一、数据
 

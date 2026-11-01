@@ -207,8 +207,9 @@ lls-learn cycle          # 导出 → 训练 → 评测 → 晋升
 训练器在 `{adapter}` 写出非空 adapter；评测器在 `{metrics}` 写
 `{"score": 0..1, "passed": n, "total": n}`。只有
 `score >= max(baseline, current.score) + min_delta` 才会更新
-`adapters/current.json`；任何一步失败都不动线上指针。详见
-[离线学习](docs/design/offline-learning.md)。
+`adapters/current.json`；任何一步失败都不动线上指针。仓库里附了一份可直接
+跑通的参考训练器/评测器：[examples/trainer](examples/trainer/README.md)。
+详见 [离线学习](docs/design/offline-learning.md)。
 
 ## 输入历史
 
@@ -324,6 +325,8 @@ Windows 原生没有这些模块，请使用 WSL；`lls --doctor` 会给出结�
   旧数据策略。
 - [离线学习](docs/design/offline-learning.md)：从 v2 会话导出 SFT、
   去掉求助痕迹的范围与边界。
+- [后训练冒烟记录](docs/reviews/2026-11-02-post-training-smoke.md)：真实
+  Qwen2-0.5B CPU 训练、评测、门禁与晋升的实测数据。
 
 ## 开发
 

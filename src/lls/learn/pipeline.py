@@ -180,7 +180,6 @@ def _run_command(
     try:
         completed = subprocess.run(
             list(argv),
-            cwd=str(run.root),
             env=env,
             capture_output=True,
             text=True,
