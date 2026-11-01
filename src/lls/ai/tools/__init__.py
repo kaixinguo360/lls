@@ -27,6 +27,7 @@ from .files import file_tools
 from .middleware import RepeatReminder
 from .policy import ToolPolicy, global_policy, reset_global_policy
 from .shell import Shell, shell_tools, shared
+from .teacher import teacher_tools
 from .terminal import Poll, ScreenView, TerminalPort, terminal_tools
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "reset_global_policy",
     "file_tools",
     "shell_tools",
+    "teacher_tools",
     "terminal_tools",
 ]
 

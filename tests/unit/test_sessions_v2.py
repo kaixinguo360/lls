@@ -12,8 +12,7 @@ from lls.ai import Chunk, ChunkKind, Message, ToolCall
 from lls.ai.sessions import SessionStore
 from lls.ai.sessions.events import Event, decode, encode, fold
 from lls.ai.sessions.store import LegacySession, SCHEMA_VERSION
-from lls.learn.help import HintLedger, TranscriptView, build_help_tool
-from lls.learn.teacher import ModelTeacher
+from lls.ai.tools.teacher import teacher_tools
 
 
 def test_session_and_events_use_the_dsh_envelope(tmp_path: Path) -> None:
@@ -144,33 +143,22 @@ class _StubProvider:
             yield chunk
 
 
-def test_teacher_never_gets_tools_and_rejects_tool_calls() -> None:
+def test_teacher_tool_never_gets_tools_and_returns_text() -> None:
     provider = _StubProvider(
         [Chunk(ChunkKind.TEXT, "先看 stderr"), Chunk(ChunkKind.DONE)]
     )
-    teacher = ModelTeacher(provider, "m")
-    reply = asyncio.run(teacher.advise("怎么办", [Message("user", "任务")]))
-    assert reply.text == "先看 stderr"
+    tool = teacher_tools(provider, "m", lambda: [Message("user", "任务")])[0]
+
+    text = asyncio.run(tool.run({"question": "怎么办"}))
+
+    assert text == "先看 stderr"
     assert provider.tools is None
 
-    bad = _StubProvider(
-        [Chunk(ChunkKind.DONE)]
-    )
-    # 没有工具调用时返回空文本，应报“没有内容”，而不是把执行权带回来。
-    with pytest.raises(RuntimeError):
-        asyncio.run(ModelTeacher(bad, "m").advise("怎么办", []))
 
+def test_teacher_tool_reports_empty_or_bad_answers() -> None:
+    empty = _StubProvider([Chunk(ChunkKind.DONE)])
+    tool = teacher_tools(empty, "m", lambda: [])[0]
+    assert asyncio.run(tool.run({"question": "怎么办"})).startswith("error:")
 
-def test_help_budget_and_redaction() -> None:
-    class _Teacher:
-        async def advise(self, question, messages):
-            assert "sk-secret" not in question
-            return type("Reply", (), {"text": "看 stderr", "usage": {}})()
-
-    ledger = HintLedger(max_per_turn=1, max_per_session=1, min_tool_calls=0)
-    view = TranscriptView([Message("user", "任务")])
-    tool = build_help_tool(_Teacher(), ledger, view, redact_patterns=[r"sk-[a-z]+"])
-    text = asyncio.run(tool.run({"question": "sk-secret 怎么办"}))
-    assert "导师建议" in text
-    again = asyncio.run(tool.run({"question": "再问一次"}))
-    assert again.startswith("error:")
+    missing = teacher_tools(empty, "m", lambda: [])[0]
+    assert asyncio.run(missing.run({})).startswith("error:")

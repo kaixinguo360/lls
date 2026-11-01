@@ -23,6 +23,7 @@ class AIConfig:
 
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     default_model: str | None = None
+    teacher_model: str | None = None
     context_limit: int = 0
     """单次请求的 token 上限；0 表示只按模型的 context window 算。"""
     tools: dict[str, ToolOptions] = field(default_factory=dict)
@@ -148,7 +149,7 @@ def parse_ai(
         raise ConfigError("ai 必须是映射")
     _unknown(
         section,
-        {"default_model", "providers", "context_limit", "tools"},
+        {"default_model", "teacher_model", "providers", "context_limit", "tools"},
         "ai.",
         notes,
     )
@@ -162,6 +163,7 @@ def parse_ai(
     }
 
     default_model = _as_str(section.get("default_model"), "ai.default_model")
+    teacher_model = _as_str(section.get("teacher_model"), "ai.teacher_model")
 
     limit_raw = section.get("context_limit", 0)
     if isinstance(limit_raw, bool) or not isinstance(limit_raw, int) or limit_raw < 0:
@@ -170,6 +172,7 @@ def parse_ai(
     return AIConfig(
         providers=providers,
         default_model=default_model,
+        teacher_model=teacher_model,
         context_limit=limit_raw,
         tools=_parse_tools(section.get("tools"), notes),
         path=path,

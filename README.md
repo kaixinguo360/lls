@@ -163,24 +163,17 @@ sessions/
 
 ### 求助教师（可选）
 
-`agent` 可以在配置里打开 `learning.help`，给模型一个 `ask_teacher` 工具。
+配置 `ai.teacher_model` 后，`agent` 会多一个普通工具 `ask_teacher`。
 教师是另一个 provider 上的普通 chat 请求，**不传 tools**，只能给诊断、
 下一步查什么、为什么和如何验证；不能执行、不能替模型判断完成与否。
-调用与回复仍走普通的 `tool/call` + `tool/result` 事件，不另设记录格式。
+调用与回复就是普通的 `tool/call` + `tool/result` 事件，不另设记录格式。
 
 ```yaml
-learning:
-  help:
-    enabled: false
-    teacher_model: openai/gpt-5
-    max_per_turn: 2
-    max_per_session: 10
-    min_tool_calls: 2
-    timeout: 60
-    redact: ["(?i)sk-[a-z0-9]{10,}"]
+ai:
+  teacher_model: openai/gpt-5
 ```
 
-默认关闭；打开即表示允许把脱敏后的会话上下文发给教师。
+不配置就没有这个工具；会话上下文会原样作为问题的一部分发给教师。
 
 ## 输入历史
 
@@ -301,7 +294,6 @@ Windows 原生没有这些模块，请使用 WSL；`lls --doctor` 会给出结�
 pip install -e ".[dev]"
 
 python -m pytest        # 测试
-lls-learn doctor        # 学习侧配置自检
 ruff check src tests    # 静态检查
 mypy                    # 类型检查（term 与 edit 两个包为严格模式）
 ```

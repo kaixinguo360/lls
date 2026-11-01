@@ -63,6 +63,7 @@ from lls.ai.tools import (
     ScreenView,
     Toolbox,
     builtin_tools,
+    teacher_tools,
 )
 from lls.ai.tool_options import ToolOptions
 from lls.ai.tools.policy import ToolPolicy, global_policy, reset_global_policy
@@ -70,8 +71,6 @@ from lls.commands.catalog import CommandMeta, completer_for
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
 from lls.config import load as load_config
-from lls.learn.help import HintLedger, TranscriptView, build_help_tool
-from lls.learn.teacher import ModelTeacher
 from lls.offload import offload
 from lls.session.services import Services
 from lls.ui import (
@@ -692,43 +691,24 @@ class _Session:
         )
         self._policy = global_policy().merged(self._session_policy)
         self._all_tools = builtin_tools(services, self._poll, view=self._view)
-        self._learning = load_config().learning
-        help_config = self._learning.help
         self._teacher: Any = None
-        self._teacher_model = ""
-        self._help_ledger = HintLedger(
-            help_config.max_per_turn,
-            help_config.max_per_session,
-            help_config.min_tool_calls,
-        )
-        self._transcript_view = TranscriptView([])
-        self._pending_teacher_meta: dict = {}
-        if help_config.enabled and help_config.teacher_model and catalog is not None:
+        self._transcript_messages: List[Message] = []
+        config = load_config()
+        teacher_model = getattr(config.ai, "teacher_model", None) if config.ai else None
+        if teacher_model and catalog is not None:
             try:
-                teacher_provider, teacher_model = catalog.resolve(
-                    help_config.teacher_model
-                )
+                teacher_provider, teacher_name = catalog.resolve(teacher_model)
             except Exception:  # noqa: BLE001 - 教师配置坏了不该挡住会话
                 teacher_provider = None
-                teacher_model = ""
+                teacher_name = ""
             if teacher_provider is not None:
-                self._teacher = ModelTeacher(
-                    teacher_provider,
-                    teacher_model,
-                    timeout=help_config.timeout,
-                    max_chars=help_config.max_chars,
-                )
-                self._teacher_model = help_config.teacher_model
+                self._teacher = teacher_provider
                 self._all_tools.extend(
-                    [
-                        build_help_tool(
-                            self._teacher,
-                            self._help_ledger,
-                            self._transcript_view,
-                            redact_patterns=help_config.redact,
-                            on_reply=self._on_teacher_reply,
-                        )
-                    ]
+                    teacher_tools(
+                        teacher_provider,
+                        teacher_name,
+                        lambda: self._transcript_messages,
+                    )
                 )
         self._tools = Toolbox(self._policy.filter(list(self._all_tools)))
         self._tools.add_middleware(self._guard)
@@ -1286,7 +1266,6 @@ class _Session:
         self._reasoning = ""
         self._calls.clear()
         self._call_seqs.clear()
-        self._help_ledger.begin_turn()
         if self._session is not None:
             self._session.append_turn_start(self._turn_no)
         self._compacted_now = False
@@ -1527,7 +1506,7 @@ class _Session:
             self._submit(task, screen)
         painter.awaiting()
 
-        self._transcript_view.seed(window.messages)
+        self._transcript_messages = list(window.messages)
         system = SYSTEM_PROMPT + (HELP_PROMPT if self._teacher is not None else "")
         self._record_request(system)
         agent = Agent(
@@ -1784,19 +1763,11 @@ class _Session:
         return text.strip()
 
 
-    def _on_teacher_reply(self, reply: Any) -> None:
-        self._pending_teacher_meta = {
-            "lls": {
-                "teacher_model": self._teacher_model,
-                "usage": reply.usage or {},
-            }
-        }
-
     def _on_message(self, message: Any, usage: Any) -> None:
         """Agent 的每条消息 → 一条事件；user 由本命令自己记，跳过。"""
         if self._session is None:
             return
-        self._transcript_view.append(message)
+        self._transcript_messages.append(message)
         if message.role == "assistant":
             self._session.append_assistant(
                 message.content or "",
@@ -1809,7 +1780,6 @@ class _Session:
             )
             for call in message.tool_calls:
                 self._calls[call.id] = call.name
-                self._help_ledger.note_tool_call()
                 event = self._session.append_tool_call(
                     call, self._turn_no, self._step
                 )
@@ -1820,10 +1790,6 @@ class _Session:
             call_id = message.tool_call_id or ""
             status = "error" if text.startswith("error:") else "ok"
             name = self._calls.get(call_id, "")
-            meta = None
-            if name == "ask_teacher" and self._pending_teacher_meta:
-                meta = self._pending_teacher_meta
-                self._pending_teacher_meta = {}
             self._session.append_tool_result(
                 ToolCall(call_id, name, ""),
                 text,
@@ -1831,7 +1797,6 @@ class _Session:
                 self._turn_no,
                 self._step,
                 self._call_seqs.get(call_id, 0),
-                meta,
             )
 
     def _finish_turn(self, status: str, note: str, window: Any, usage: Any) -> None:
