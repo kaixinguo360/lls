@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import hashlib
+import json
 import time
-from typing import Any, List, NamedTuple, Tuple
+from typing import Any, Dict, List, NamedTuple, Tuple
 
 from lls.ai import (
     Agent,
@@ -40,6 +42,7 @@ from lls.ai import (
     AgentEventKind,
     ConfigError,
     Message,
+    ToolCall,
     default_catalog,
     stream_reply,
 )
@@ -66,6 +69,9 @@ from lls.ai.tools.policy import ToolPolicy, global_policy, reset_global_policy
 from lls.commands.catalog import CommandMeta, completer_for
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
+from lls.config import load as load_config
+from lls.learn.help import HintLedger, TranscriptView, build_help_tool
+from lls.learn.teacher import ModelTeacher
 from lls.offload import offload
 from lls.session.services import Services
 from lls.ui import (
@@ -327,6 +333,16 @@ SYSTEM_PROMPT = f"""\
 - 没有固定步数上限，但也不要空转：连续没有进展时，直接说明现状与建议。
 - 只执行与任务相关的操作；不要做用户没有要求的破坏性操作。
 - 会话历史会跨任务保留；用户的新任务可能引用之前的终端状态。
+"""
+
+HELP_PROMPT = """\
+
+求助：
+- 卡住时可以调用 ask_teacher(question)。教师不能执行、不能替你判断，
+  只会给诊断、下一步查什么、为什么以及如何验证。
+- 只有已经尝试过、确实缺少信息或反复失败时才问；问题里写清楚试过什么、
+  看到什么错误、怀疑什么。
+- 收到建议后自己验证；任务是否完成由你判断，最终答复说明依据和还缺什么。
 """
 
 
@@ -676,6 +692,44 @@ class _Session:
         )
         self._policy = global_policy().merged(self._session_policy)
         self._all_tools = builtin_tools(services, self._poll, view=self._view)
+        self._learning = load_config().learning
+        help_config = self._learning.help
+        self._teacher: Any = None
+        self._teacher_model = ""
+        self._help_ledger = HintLedger(
+            help_config.max_per_turn,
+            help_config.max_per_session,
+            help_config.min_tool_calls,
+        )
+        self._transcript_view = TranscriptView([])
+        self._pending_teacher_meta: dict = {}
+        if help_config.enabled and help_config.teacher_model and catalog is not None:
+            try:
+                teacher_provider, teacher_model = catalog.resolve(
+                    help_config.teacher_model
+                )
+            except Exception:  # noqa: BLE001 - 教师配置坏了不该挡住会话
+                teacher_provider = None
+                teacher_model = ""
+            if teacher_provider is not None:
+                self._teacher = ModelTeacher(
+                    teacher_provider,
+                    teacher_model,
+                    timeout=help_config.timeout,
+                    max_chars=help_config.max_chars,
+                )
+                self._teacher_model = help_config.teacher_model
+                self._all_tools.extend(
+                    [
+                        build_help_tool(
+                            self._teacher,
+                            self._help_ledger,
+                            self._transcript_view,
+                            redact_patterns=help_config.redact,
+                            on_reply=self._on_teacher_reply,
+                        )
+                    ]
+                )
         self._tools = Toolbox(self._policy.filter(list(self._all_tools)))
         self._tools.add_middleware(self._guard)
         self._log = session.log(LOG_ENTRIES) if session is not None else []
@@ -693,6 +747,12 @@ class _Session:
         self._compacted_now = False
         self._compact_error = ""
         self._compact_skip = ""  # 上一次没压成的原因，见 _skip_reason
+        self._turn_no = 0
+        self._step = 0
+        self._reasoning = ""
+        self._calls: dict[str, str] = {}
+        self._call_seqs: dict[str, int] = {}
+        self._render_id = ""
 
     async def run(self, first_task: str | None) -> bool:
         """进入会话；返回 True 表示用户主动退出，False 表示子进程结束。
@@ -1221,6 +1281,14 @@ class _Session:
         # 那几秒屏幕上不能是空的。
         painter.begin()
         self._guard.reset()
+        self._turn_no += 1
+        self._step = 0
+        self._reasoning = ""
+        self._calls.clear()
+        self._call_seqs.clear()
+        self._help_ledger.begin_turn()
+        if self._session is not None:
+            self._session.append_turn_start(self._turn_no)
         self._compacted_now = False
         self._compact_error = ""
         self._compact_skip = ""
@@ -1459,12 +1527,15 @@ class _Session:
             self._submit(task, screen)
         painter.awaiting()
 
+        self._transcript_view.seed(window.messages)
+        system = SYSTEM_PROMPT + (HELP_PROMPT if self._teacher is not None else "")
+        self._record_request(system)
         agent = Agent(
             self._provider,
             self._model,
-            system=SYSTEM_PROMPT,
+            system=system,
             tools=self._tools,
-            on_event=painter.on_event,
+            on_event=lambda event: self._on_agent_event(event, painter),
             poll=self._poll,
             on_message=self._on_message,
         )
@@ -1499,9 +1570,69 @@ class _Session:
         """
         if self._session is None:
             return
-        snapshot = self._session.append_screen(screen)
+        snapshot = self._session.append_screen(screen, self._turn_no)
         self._session.append_user(
             task, screen=snapshot.seq if snapshot is not None else 0, source="typed"
+        )
+
+    def _on_agent_event(self, event: AgentEvent, painter: "_Painter") -> None:
+        """把 Agent 的进度交给界面，同时维护本轮的步号与推理缓冲。"""
+        painter.on_event(event)
+        if event.kind is AgentEventKind.STEP:
+            self._step = event.step
+            self._reasoning = ""
+            if self._session is not None:
+                self._session.append_step_start(self._turn_no, self._step)
+        elif event.kind is AgentEventKind.REASONING:
+            self._reasoning += event.text
+        elif event.kind is AgentEventKind.STEP_END:
+            if self._session is not None:
+                self._session.append_step_end(self._turn_no, event.step)
+
+    def _record_request(self, system: str) -> None:
+        """把这一次请求的信封记下来，内容没变就不重复写。"""
+        if self._session is None:
+            return
+        tools: List[Dict[str, Any]] = []
+        for entry in self._tools:
+            payload = entry.tool.to_payload().get("function")
+            if isinstance(payload, dict):
+                tools.append(payload)
+        params: Dict[str, Any] = {}
+        context_window = 0
+        if self._catalog is not None and self._provider_id:
+            try:
+                provider = self._catalog.provider_config(self._provider_id)
+            except Exception:  # noqa: BLE001 - 配置错误不该挡住记录
+                provider = None
+            if provider is not None:
+                params = dict(getattr(provider, "params", {}) or {})
+                context_window = int(getattr(provider, "context_window", 0) or 0)
+        config = {"provider": self._provider_id, "model": self._model}
+        config.update(params)
+        header = {"config": config, "adapterDefaults": {}, "tools": tools}
+        fingerprint = json.dumps(
+            {
+                "system": system,
+                "header": header,
+                "budget": self._budget,
+                "context_window": context_window,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        render_id = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()
+        if render_id == self._render_id:
+            return
+        self._render_id = render_id
+        self._session.append_system(system, self._turn_no, 1, render_id)
+        self._session.append_request_header(header, render_id)
+        self._session.append_request_context(
+            self._provider_id,
+            self._model,
+            context_window,
+            self._budget,
+            render_id,
         )
 
     def _keep_partial(self, agent: Any) -> None:
@@ -1511,7 +1642,13 @@ class _Session:
         """
         text = agent.partial_text
         if self._session is not None and text:
-            self._session.append_assistant(text)
+            self._session.append_assistant(
+                text,
+                reasoning=self._reasoning,
+                model=self._model,
+                turn=self._turn_no,
+                step=self._step,
+            )
 
     def _prepare_window(self, pending: Any) -> Any:
         """本轮要带上的上下文：按预算从事件里裁出来。
@@ -1647,30 +1784,66 @@ class _Session:
         return text.strip()
 
 
+    def _on_teacher_reply(self, reply: Any) -> None:
+        self._pending_teacher_meta = {
+            "lls": {
+                "teacher_model": self._teacher_model,
+                "usage": reply.usage or {},
+            }
+        }
+
     def _on_message(self, message: Any, usage: Any) -> None:
         """Agent 的每条消息 → 一条事件；user 由本命令自己记，跳过。"""
         if self._session is None:
             return
+        self._transcript_view.append(message)
         if message.role == "assistant":
             self._session.append_assistant(
-                message.content or "", message.tool_calls, self._model, usage
+                message.content or "",
+                message.tool_calls,
+                reasoning=self._reasoning,
+                model=self._model,
+                usage=usage,
+                turn=self._turn_no,
+                step=self._step,
             )
+            for call in message.tool_calls:
+                self._calls[call.id] = call.name
+                self._help_ledger.note_tool_call()
+                event = self._session.append_tool_call(
+                    call, self._turn_no, self._step
+                )
+                if event is not None:
+                    self._call_seqs[call.id] = event.seq
         elif message.role == "tool":
             text = message.content or ""
+            call_id = message.tool_call_id or ""
             status = "error" if text.startswith("error:") else "ok"
-            self._session.append_tool(message.tool_call_id or "", text, status)
+            name = self._calls.get(call_id, "")
+            meta = None
+            if name == "ask_teacher" and self._pending_teacher_meta:
+                meta = self._pending_teacher_meta
+                self._pending_teacher_meta = {}
+            self._session.append_tool_result(
+                ToolCall(call_id, name, ""),
+                text,
+                status,
+                self._turn_no,
+                self._step,
+                self._call_seqs.get(call_id, 0),
+                meta,
+            )
 
     def _finish_turn(self, status: str, note: str, window: Any, usage: Any) -> None:
-        """收尾：写 turn_end，并刷新覆盖层的任务列表。"""
+        """收尾：写 turn/end，并刷新覆盖层的任务列表。"""
         if self._session is None:
             return
         detail = "；".join(part for part in (note, self._turn_note(window)) if part)
-        extra = {"usage": usage} if usage else {}
         self._session.append_turn_end(
             status=status,
             note=detail,
-            model=self._model,
-            **extra,
+            usage=usage,
+            turn=self._turn_no,
         )
         self._log = self._session.log(LOG_ENTRIES)
 

@@ -158,19 +158,25 @@ def test_a_completed_turn_writes_events_with_usage(monkeypatch, tmp_path) -> Non
     assert session is not None
     events = session.events()
     assert [event.type for event in events] == [
-        "session_start",
-        "screen",
-        "user",
-        "assistant",
-        "turn_end",
+        "session",
+        "turn/start",
+        "lls/screen",
+        "user/message",
+        "system/message",
+        "request/header",
+        "request/context",
+        "step/start",
+        "assistant/message",
+        "step/end",
+        "turn/end",
     ]
     # 画面先落盘，任务那条指向它：重放时才有当时发出去的那段正文。
-    assert events[1].content == "screen"
-    assert events[2].screen == events[1].seq
-    assert events[3].usage == {"prompt": 9, "completion": 4}
-    assert events[4].status == "ok"
-    # 常规一轮不写备注：条数与预算由 /status 看，耗时由前后两条 ts 相减。
-    assert events[4].note == ""
+    assert events[2].data["content"] == "screen"
+    assert events[3].data["lls"]["screen_seq"] == events[2].seq
+    assert events[8].data["usage"]["inputTokens"] == 9
+    assert events[10].data["reason"]["kind"] == "completed"
+    # 常规一轮不写备注：条数与预算由 /status 看，耗时由前后两条 time 相减。
+    assert events[10].data["lls"].get("note", "") == ""
     assert session.meta.turns == 1
     session.close()
 
@@ -185,13 +191,22 @@ def test_retry_continues_without_adding_a_message(monkeypatch, tmp_path) -> None
     session = keeper.current()
     events = session.events()
     assert [event.type for event in events] == [
-        "session_start",
-        "screen",
-        "user",
-        "assistant",
-        "turn_end",
-        "assistant",
-        "turn_end",
+        "session",
+        "turn/start",
+        "lls/screen",
+        "user/message",
+        "system/message",
+        "request/header",
+        "request/context",
+        "step/start",
+        "assistant/message",
+        "step/end",
+        "turn/end",
+        "turn/start",
+        "step/start",
+        "assistant/message",
+        "step/end",
+        "turn/end",
     ]
     # 第二次请求里没有新的用户消息：会话原样继续。
     sent = provider.requests[-1]
@@ -260,7 +275,7 @@ def test_rm_keeps_the_session_and_stays_when_the_answer_is_not_yes(
     alive = keeper.list()
     assert len(alive) == 1
     kept = keeper.get(alive[0].id)
-    assert any(event.type == "user" for event in kept.events())
+    assert any(event.type == "user/message" for event in kept.events())
     kept.close()
 
 
@@ -384,7 +399,7 @@ def test_an_aborted_turn_stays_in_context_marked_as_interrupted(monkeypatch, tmp
     asyncio.run(agent_cmd.cmd_agent(services, None))
 
     session = keeper.current()
-    statuses = [event.status for event in session.events() if event.type == "turn_end"]
+    statuses = [event.data["lls"]["status"] for event in session.events() if event.type == "turn/end"]
     assert statuses == ["aborted", "ok"]
     # 中断的一轮留在上下文里，后面跟一行标记：下一轮不会当它没发生过。
     sent = provider.requests[-1]
@@ -445,7 +460,7 @@ def test_an_interrupted_reply_keeps_what_was_already_shown(monkeypatch, tmp_path
     asyncio.run(agent_cmd.cmd_agent(services, None))
 
     session = keeper.current()
-    partial = [event.content for event in session.events() if event.type == "assistant"]
+    partial = ["".join(part.get("text", "") for part in event.data["message"]["content"] if part.get("type") == "text") for event in session.events() if event.type == "assistant/message"]
     assert partial and "先看一下终端".startswith(partial[0]) and partial[0]
     # 下一轮的请求里带着这段正文，紧接着才是中断标记。
     sent = provider.requests[-1]
@@ -712,9 +727,9 @@ def test_old_turns_are_summarised_before_they_are_dropped(monkeypatch, tmp_path)
     )
 
     session = keeper.current()
-    compacts = [event for event in session.events() if event.type == "compact"]
-    assert compacts and compacts[0].content == "摘要：之前在做旧任务"
-    assert compacts[0].upto_seq > 0
+    compacts = [event for event in session.events() if event.type == "lls/compact"]
+    assert compacts and compacts[0].data["summary"] == "摘要：之前在做旧任务"
+    assert compacts[0].data["upto_seq"] > 0
     # 真正那轮请求以摘要开头，旧任务不再逐条重发。
     sent = provider.requests[-1]
     assert "摘要：之前在做旧任务" in (sent[1].content or "")
@@ -749,9 +764,9 @@ def test_every_round_can_compact_further_into_the_transcript(monkeypatch, tmp_pa
     )
 
     session = keeper.current()
-    compacts = [event for event in session.events() if event.type == "compact"]
+    compacts = [event for event in session.events() if event.type == "lls/compact"]
     assert len(compacts) >= 2
-    cutoffs = [event.upto_seq for event in compacts]
+    cutoffs = [event.data["upto_seq"] for event in compacts]
     assert cutoffs == sorted(set(cutoffs))
     assert cutoffs[-1] > cutoffs[0]
     # 压缩是累积的：历史里只剩一段摘要加上之后没被裁掉的部分。
@@ -788,7 +803,7 @@ def test_the_watermark_compacts_before_anything_is_dropped(monkeypatch, tmp_path
     )
 
     session = keeper.current()
-    compacts = [event for event in session.events() if event.type == "compact"]
+    compacts = [event for event in session.events() if event.type == "lls/compact"]
     assert len(compacts) == 1
     # 压完停在目标水位以下，而不是刚好够这一次请求。
     window = session.window(12000)
@@ -797,7 +812,7 @@ def test_the_watermark_compacts_before_anything_is_dropped(monkeypatch, tmp_path
     # 留下的还是最近几轮旧历史 + 这一轮，不是只留一条摘要。
     assert sum(1 for m in session.history() if m.role == "user") >= 10
     # 这一轮真压过，才在覆盖层留一句话。
-    assert "已压缩" in session.last_turn_end().note
+    assert "已压缩" in session.last_turn_end().data["lls"].get("note", "")
     session.close()
 
 
@@ -816,7 +831,7 @@ def test_the_next_turns_do_not_compact_again(monkeypatch, tmp_path) -> None:
     )
 
     session = keeper.current()
-    compacts = [event for event in session.events() if event.type == "compact"]
+    compacts = [event for event in session.events() if event.type == "lls/compact"]
     assert len(compacts) == 1
     session.close()
 
@@ -854,7 +869,7 @@ def test_a_later_compaction_merges_the_previous_summary(monkeypatch, tmp_path) -
     )
 
     session = keeper.current()
-    cutoffs = [event.upto_seq for event in session.events() if event.type == "compact"]
+    cutoffs = [event.data["upto_seq"] for event in session.events() if event.type == "lls/compact"]
     assert len(cutoffs) >= 2
     assert cutoffs == sorted(set(cutoffs))  # 每次都比上一次更远，不原地打转
     assert "上一版摘要：" not in provider.summaries[0]
@@ -891,9 +906,9 @@ def test_a_failed_summary_falls_back_to_a_hard_cut(monkeypatch, tmp_path) -> Non
 
     session = keeper.current()
     # 摘要失败就退回硬截断：没有 compact 事件，但这一轮照常完成并入库。
-    assert not [event for event in session.events() if event.type == "compact"]
+    assert not [event for event in session.events() if event.type == "lls/compact"]
     assert session.log()[-1][:2] == ("新任务", "新答复")
-    assert session.last_turn_end().status == "ok"
+    assert session.last_turn_end().data["lls"]["status"] == "ok"
     session.close()
 
 # ---- 撤销 ----
@@ -926,7 +941,7 @@ def test_undo_takes_back_the_last_turn_and_the_compaction_after_it(tmp_path) -> 
     assert all("旧任务 2" not in (m.content or "") for m in session.history())
     # 原文还在磁盘上：撤销只改视图，事件一条不少。
     assert any(
-        event.type == "user" and event.content == "旧任务 2"
+        event.type == "user/message" and event.data["content"][0]["text"] == "旧任务 2"
         for event in session.events()
     )
     assert session.meta.turns == 2

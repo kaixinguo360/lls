@@ -67,6 +67,7 @@ class AgentEventKind(str, Enum):
     """进度事件的种类（只供 UI 使用）。"""
 
     STEP = "step"
+    STEP_END = "step_end"
     TEXT = "text"
     REASONING = "reasoning"
     CALL_DELTA = "call_delta"
@@ -269,6 +270,7 @@ class Agent:
 
             if not calls:
                 # 没有工具调用 = 正常结束；文本就是最终答复（空文本也照常结束）。
+                self._emit(AgentEvent(AgentEventKind.STEP_END, step=step))
                 return AgentResult(
                     "completed", text, step, tuple(conversation), self._usage
                 )
@@ -286,6 +288,7 @@ class Agent:
                 self._push(
                     conversation, Message("tool", result, tool_call_id=call.id), None
                 )
+            self._emit(AgentEvent(AgentEventKind.STEP_END, step=step))
 
     # ---- 收尾 ----
 
@@ -300,6 +303,7 @@ class Agent:
 
         # 合成提示只用于这次请求：conversation 里从未出现它，最终总结照常保留。
         self._push(conversation, Message("assistant", text), self._usage)
+        self._emit(AgentEvent(AgentEventKind.STEP_END, step=step))
         return AgentResult(
             "step_limit", text, step, tuple(conversation), self._usage
         )

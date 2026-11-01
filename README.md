@@ -113,8 +113,10 @@ sessions/
   index.json                  当前会话的缓存，丢了按目录重扫
   20251028-1052-7d1075/
     meta.json                 标题、模型、cwd、轮数、大小、更新时间
-    events.jsonl              session_start / screen / user / assistant / tool /
-                              turn_end / compact
+    events.jsonl              session / turn/start / step/start / step/end /
+                              user/message / system/message / request/header /
+                              request/context / assistant/message / tool/call /
+                              tool/result / turn/end / lls/screen / lls/compact
     blobs/<sha1>              超过 8KB 的工具输出与画面正文，事件里只留指针
     lock                      占用者的 fcntl 排他锁
 ```
@@ -131,7 +133,7 @@ sessions/
 - 中断、出错的轮次仍会进入上下文：没等到结果的 `tool_calls` 补一条 `error: …`，
   中断的那一轮再补一行「被用户中断」的标记 —— 下一轮看得见上一轮停在哪儿，
   不会重复已完成的操作；
-- 用量到预算的 85% 就把最旧的一段压成摘要、压回预算的 60%（`compact` 事件，原文
+- 用量到预算的 85% 就把最旧的一段压成摘要、压回预算的 60%（`lls/compact` 事件，原文
   仍在 events 里），两次压缩之间因此隔得开几轮；新摘要以旧摘要为底稿合并；
   摘要失败才退回硬截断，压掉的太少就不压 —— 摘要请求本身也会产生开销。
 
@@ -158,6 +160,27 @@ sessions/
 `/archive`。
 
 `agent` 不请求确认，模型给出的输入直接写入子进程 —— 请在允许其操作终端的会话中使用。
+
+### 求助教师（可选）
+
+`agent` 可以在配置里打开 `learning.help`，给模型一个 `ask_teacher` 工具。
+教师是另一个 provider 上的普通 chat 请求，**不传 tools**，只能给诊断、
+下一步查什么、为什么和如何验证；不能执行、不能替模型判断完成与否。
+调用与回复仍走普通的 `tool/call` + `tool/result` 事件，不另设记录格式。
+
+```yaml
+learning:
+  help:
+    enabled: false
+    teacher_model: openai/gpt-5
+    max_per_turn: 2
+    max_per_session: 10
+    min_tool_calls: 2
+    timeout: 60
+    redact: ["(?i)sk-[a-z0-9]{10,}"]
+```
+
+默认关闭；打开即表示允许把脱敏后的会话上下文发给教师。
 
 ## 输入历史
 
@@ -267,12 +290,18 @@ src/lls/tty/             PTY 与终端后端、按键编解码
 判据是 `pty` / `termios` / `fcntl` 三个模块是否真的可用，而不是平台名。
 Windows 原生没有这些模块，请使用 WSL；`lls --doctor` 会给出结论。
 
+## 设计文档
+
+- [会话事件 v2](docs/design/event-schema-v2.md)：事件形状、parts、版本与
+  旧数据策略。
+
 ## 开发
 
 ```bash
 pip install -e ".[dev]"
 
 python -m pytest        # 测试
+lls-learn doctor        # 学习侧配置自检
 ruff check src tests    # 静态检查
 mypy                    # 类型检查（term 与 edit 两个包为严格模式）
 ```

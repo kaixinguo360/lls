@@ -52,15 +52,15 @@ def test_a_new_session_lives_in_its_own_directory(tmp_path: Path) -> None:
     assert raw["model_id"] == "stub-model"
 
 
-def test_session_start_records_model_and_cwd(tmp_path: Path) -> None:
+def test_session_records_model_and_cwd(tmp_path: Path) -> None:
     keeper = SessionStore(root=tmp_path)
     session = keeper.create("stub", "m")
 
     first = session.events()[0]
 
-    assert first.type == "session_start"
-    assert first.model == "stub/m"
-    assert first.note  # cwd
+    assert first.type == "session"
+    assert first.data["lls"]["model"] == "stub/m"
+    assert first.data["cwd"]
     session.close()
 
 
@@ -87,10 +87,14 @@ def test_appended_events_come_back_in_order(tmp_path: Path) -> None:
     session.append_assistant("答复")
 
     events = session.events()
-    assert [event.seq for event in events] == [1, 2, 3]
-    assert [event.type for event in events] == ["session_start", "user", "assistant"]
-    assert events[1].content == "任务"
-    assert events[2].content == "答复"
+    assert [event.seq for event in events] == [0, 1, 2]
+    assert [event.type for event in events] == [
+        "session",
+        "user/message",
+        "assistant/message",
+    ]
+    assert events[1].data["content"][0]["text"] == "任务"
+    assert events[2].data["message"]["content"][0]["text"] == "答复"
     session.close()
 
 
@@ -105,7 +109,7 @@ def test_meta_tracks_seq_size_title_and_turns(tmp_path: Path) -> None:
     assert session.meta.title.endswith("啊")
     assert len(session.meta.title) == 40
     assert session.meta.turns == 1
-    assert session.meta.last_seq == 4
+    assert session.meta.last_seq == 3
     assert session.meta.size > 0
     session.close()
 
@@ -118,11 +122,11 @@ def test_a_truncated_last_line_only_loses_that_event(tmp_path: Path) -> None:
     session.close()
 
     with path.open("a", encoding="utf-8") as handle:
-        handle.write('{"type":"assistant","seq":3,"ts":1.0,"cont')
+        handle.write('{"type":"assistant/message","seq":3,"time":1,"data":{')
 
     reopened = keeper.open()
     assert reopened is not None
-    assert [event.type for event in reopened.events()] == ["session_start", "user"]
+    assert [event.type for event in reopened.events()] == ["session", "user/message"]
     assert reopened.bad_lines == 1
     assert reopened.history() == [Message("user", "完整的一条")]
     reopened.close()
@@ -135,8 +139,9 @@ def test_fold_builds_messages_and_keeps_tool_pairs(tmp_path: Path) -> None:
     keeper = SessionStore(root=tmp_path)
     session = keeper.create("stub", "m")
     session.append_user("任务")
-    session.append_assistant("", (ToolCall("c1", "shell", "{}"),))
-    session.append_tool("c1", "输出")
+    call = ToolCall("c1", "shell", "{}")
+    session.append_assistant("", (call,))
+    session.append_tool_result(call, "输出")
     session.append_assistant("答复")
 
     assert session.history() == [
@@ -151,11 +156,27 @@ def test_fold_builds_messages_and_keeps_tool_pairs(tmp_path: Path) -> None:
 def test_fold_answers_a_tool_call_that_was_never_answered() -> None:
     """中断、崩溃都会留下没有回复的调用；补一条，别让请求缺配对。"""
     events = [
-        Event(type="user", seq=1, content="任务"),
         Event(
-            type="assistant",
+            type="user/message",
+            seq=1,
+            data={"content": [{"type": "text", "text": "任务"}]},
+        ),
+        Event(
+            type="assistant/message",
             seq=2,
-            tool_calls=(ToolCall("c1", "shell", "{}"),),
+            data={
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool-call",
+                            "id": "c1",
+                            "name": "shell",
+                            "arguments": "{}",
+                        }
+                    ],
+                }
+            },
         ),
     ]
 
@@ -258,8 +279,9 @@ def test_a_big_screen_goes_to_blobs(tmp_path: Path) -> None:
     snapshot = session.append_screen(screen)
     session.append_user("任务", screen=snapshot.seq)
 
-    assert snapshot.blob and snapshot.size > store_module.BLOB_BYTES
-    assert (session.path / "blobs" / snapshot.blob).is_file()
+    blob = snapshot.data["blob"]
+    assert blob and snapshot.data["size"] > store_module.BLOB_BYTES
+    assert (session.path / "blobs" / blob).is_file()
     assert session.history()[-1] == Message("user", task_message("任务", screen))
     assert "行\n行\n行" not in (session.path / "events.jsonl").read_text("utf-8")
     session.close()
@@ -270,7 +292,7 @@ def test_a_screen_whose_blob_is_gone_falls_back_to_the_task(tmp_path: Path) -> N
     session = keeper.create("stub", "m")
     snapshot = session.append_screen("行\n" * 5000)
     session.append_user("任务", screen=snapshot.seq)
-    (session.path / "blobs" / snapshot.blob).unlink()
+    (session.path / "blobs" / snapshot.data["blob"]).unlink()
 
     assert session.history() == [Message("user", "任务")]
     session.close()
@@ -290,8 +312,10 @@ def test_the_context_starts_after_the_last_compaction(tmp_path: Path) -> None:
 
     recent = session.recent()
 
-    assert recent[0].type == "compact"
-    assert [event.content for event in recent[1:]] == ["新任务"]
+    assert recent[0].type == "lls/compact"
+    assert [
+        event.data["content"][0]["text"] for event in recent[1:]
+    ] == ["新任务"]
     assert session.history()[0].content == SUMMARY_PREFIX + "旧任务已经做完，结论是 X"
     assert session.compacted_upto() == upto
     session.close()
@@ -303,7 +327,7 @@ def test_looking_back_from_the_end_does_not_return_the_first_event(
     keeper = SessionStore(root=tmp_path)
     session = keeper.create("stub", "m")
 
-    # 尾部倒读找不到目标时会把整份日志读完，第一条是 session_start。
+    # 尾部倒读找不到目标时会把整份日志读完，第一条是 session。
     assert session.last_turn_end() is None
     assert session.usage() is None
     assert session.compacted_upto() == 0
@@ -318,13 +342,15 @@ def test_a_big_tool_output_goes_to_blobs(tmp_path: Path) -> None:
     session = keeper.create("stub", "m")
     text = "行\n" * 5000
 
-    session.append_assistant("", (ToolCall("c1", "shell", "{}"),))
-    session.append_tool("c1", text)
+    call = ToolCall("c1", "shell", "{}")
+    session.append_assistant("", (call,))
+    session.append_tool_result(call, text)
 
     event = session.events()[-1]
-    assert event.blob and event.size > 8192
-    assert event.content == ""
-    assert (session.path / "blobs" / event.blob).is_file()
+    part = event.data["message"]["content"][0]
+    assert part["blob"] and part["size"] > 8192
+    assert part["text"] == ""
+    assert (session.path / "blobs" / part["blob"]).is_file()
     assert session.history()[-1] == Message("tool", text, tool_call_id="c1")
     session.close()
 
@@ -333,10 +359,11 @@ def test_a_missing_blob_leaves_a_placeholder_not_a_gap(tmp_path: Path) -> None:
     keeper = SessionStore(root=tmp_path)
     session = keeper.create("stub", "m")
     session.append_user("任务")
-    session.append_assistant("", (ToolCall("c1", "shell", "{}"),))
-    session.append_tool("c1", "大" * 5000)
+    call = ToolCall("c1", "shell", "{}")
+    session.append_assistant("", (call,))
+    session.append_tool_result(call, "大" * 5000)
     event = session.events()[-1]
-    (session.path / "blobs" / event.blob).unlink()
+    (session.path / "blobs" / event.data["message"]["content"][0]["blob"]).unlink()
 
     history = session.history()
 
@@ -347,7 +374,7 @@ def test_a_missing_blob_leaves_a_placeholder_not_a_gap(tmp_path: Path) -> None:
 def test_events_stay_small_when_the_output_is_big(tmp_path: Path) -> None:
     keeper = SessionStore(root=tmp_path)
     session = keeper.create("stub", "m")
-    session.append_tool("c1", "大" * 5000)
+    session.append_tool_result(ToolCall("c1", "shell", "{}"), "大" * 5000)
     session.close()
 
     raw = (session.path / "events.jsonl").read_text("utf-8")
@@ -362,8 +389,9 @@ def test_window_drops_whole_turns_and_never_orphans_a_tool(tmp_path: Path) -> No
     session = keeper.create("stub", "m")
     for index in range(4):
         session.append_user("任务 {}".format(index))
-        session.append_assistant("", (ToolCall("c{}".format(index), "shell", "{}"),))
-        session.append_tool("c{}".format(index), "输出" * 200)
+        call = ToolCall("c{}".format(index), "shell", "{}")
+        session.append_assistant("", (call,))
+        session.append_tool_result(call, "输出" * 200)
         session.append_assistant("答复 {}".format(index))
         session.append_turn_end("ok")
 
@@ -434,11 +462,18 @@ def test_two_appends_from_two_handles_keep_distinct_seq(tmp_path: Path) -> None:
 
     with (session.path / "events.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(
-            json.dumps({"type": "user", "seq": 3, "ts": 1.0, "content": "第二条"})
+            json.dumps(
+                {
+                    "type": "user/message",
+                    "seq": 3,
+                    "time": 1,
+                    "data": {"content": [{"type": "text", "text": "第二条"}]},
+                }
+            )
             + "\n"
         )
 
-    assert [event.seq for event in session.events()] == [1, 2, 3]
+    assert [event.seq for event in session.events()] == [0, 1, 3]
     session.close()
 
 
@@ -517,7 +552,6 @@ def test_fork_copies_events_up_to_the_given_seq(tmp_path: Path) -> None:
     assert forked.id != source.id
     assert forked.meta.parent_id == source.id
     assert [message.content for message in forked.history()] == ["任务一", "答复一"]
-    assert any(event.type == "fork" for event in forked.events())
     source.close()
     forked.close()
 
@@ -526,8 +560,9 @@ def test_fork_copies_the_blobs_it_points_at(tmp_path: Path) -> None:
     keeper = SessionStore(root=tmp_path)
     source = keeper.create("stub", "m")
     source.append_user("读点东西")
-    source.append_assistant("", (ToolCall("c1", "shell", "{}"),))
-    source.append_tool("c1", "大" * 20_000)
+    call = ToolCall("c1", "shell", "{}")
+    source.append_assistant("", (call,))
+    source.append_tool_result(call, "大" * 20_000)
     source.append_turn_end("ok")
 
     forked = keeper.fork(source.id)
@@ -554,13 +589,14 @@ def test_fork_renumbers_the_fields_that_point_at_other_events(tmp_path: Path) ->
     forked = keeper.fork(source.id)
 
     events = forked.events()
-    compact = next(event for event in events if event.type == "compact")
-    snapshot = next(event for event in events if event.type == "screen")
+    compact = next(event for event in events if event.type == "lls/compact")
+    snapshot = next(event for event in events if event.type == "lls/screen")
     task = events[-1]
     # 摘要覆盖到最后一条被压掉的事件（旧答复），不是它自己。
-    assert compact.upto_seq == compact.seq - 1
+    assert compact.data["upto_seq"] == compact.seq - 1
     # 画面与任务跟着改号，否则指回源会话的编号。
-    assert task.type == "user" and task.screen == snapshot.seq
+    assert task.type == "user/message"
+    assert task.data["lls"]["screen_seq"] == snapshot.seq
     assert forked.history()[-1].content == task_message("新任务", "$ echo hi\nhi")
     source.close()
     forked.close()

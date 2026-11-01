@@ -1272,7 +1272,7 @@ def test_slash_compact_stops_on_ctrl_c(tmp_path) -> None:
 
     assert result is agent_cmd._CANCEL
     assert services.messages[-1].endswith("历史没有改动")
-    assert not [event for event in session.events() if event.type == "compact"]
+    assert not [event for event in session.events() if event.type == "lls/compact"]
     session.close()
 
 
@@ -1301,7 +1301,7 @@ def test_force_compacts_though_little_would_be_dropped(tmp_path) -> None:
     asyncio.run(worker._slash_compact(""))
 
     assert services.messages[-1].startswith("已压缩")
-    assert [event for event in session.events() if event.type == "compact"]
+    assert [event for event in session.events() if event.type == "lls/compact"]
     session.close()
 
 
@@ -1317,7 +1317,7 @@ def test_auto_compaction_still_leaves_a_short_history_alone(tmp_path) -> None:
     assert asyncio.run(worker._compact(window)) is False
     # 自动压缩的跳过是静默的：没人在这一刻问「为什么没压」，也就不必记原因。
     assert worker._compact_skip == ""
-    assert not [event for event in session.events() if event.type == "compact"]
+    assert not [event for event in session.events() if event.type == "lls/compact"]
     session.close()
 
 
@@ -1543,7 +1543,7 @@ def test_slash_undo_takes_back_the_last_turn_and_retypes_it(
     assert session.meta.turns == 0
     # 原文还在事件流里，只是被抹掉了。
     assert any(
-        event.type == "user" and event.content == "任务一"
+        event.type == "user/message" and event.data["content"][0]["text"] == "任务一"
         for event in session.events()
     )
     assert "已撤销上一轮" in services.messages[-1]
@@ -1851,7 +1851,7 @@ def test_the_child_going_away_during_a_turn_ends_the_turn_cleanly(
     )
 
     session = keeper.current()
-    statuses = [event.status for event in session.events() if event.type == "turn_end"]
+    statuses = [event.data["lls"]["status"] for event in session.events() if event.type == "turn/end"]
     assert statuses == ["aborted"]
     session.close()
 

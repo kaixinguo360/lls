@@ -17,6 +17,7 @@ import contextlib
 import hashlib
 import json
 import os
+import copy
 import re
 import secrets
 import shutil
@@ -29,8 +30,21 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from ...edit import forget_session
 from ..types import Message, ToolCall
-from .events import Event, decode, encode, fold, log_entries
+from .events import (
+    META_TYPES,
+    Event,
+    decode,
+    encode,
+    fold,
+    log_entries,
+    reasoning_part,
+    text_part,
+    tool_call_part,
+)
 from .window import Window, fit
+
+#: 事件 schema 的版本。旧版本会话不再读取，直接当作遗留数据。
+SCHEMA_VERSION = 2
 
 try:  # 只有 POSIX 有；没有就退化成无锁，单人使用仍能跑。
     import fcntl
@@ -41,6 +55,8 @@ __all__ = [
     "ARCHIVE_DIR",
     "BLOB_BYTES",
     "MAX_SESSIONS",
+    "LegacySession",
+    "SCHEMA_VERSION",
     "Session",
     "SessionBusy",
     "SessionError",
@@ -76,6 +92,18 @@ PathLike = Union[str, os.PathLike]
 
 class SessionError(Exception):
     """会话不存在、无法解析或状态不对。"""
+
+
+class LegacySession(SessionError):
+    """会话写的是旧版事件 schema；运行时不再读取，也不做原地转换。"""
+
+    def __init__(self, session_id: str, version: int) -> None:
+        self.session_id = session_id
+        self.version = version
+        super().__init__(
+            "会话 {} 使用旧版事件 schema（version {}），当前只支持 version {}；"
+            "旧数据不迁移、不打开".format(session_id, version, SCHEMA_VERSION)
+        )
 
 
 class SessionBusy(SessionError):
@@ -128,7 +156,7 @@ class SessionMeta:
 
     def to_json(self) -> dict:
         return {
-            "version": 1,
+            "version": SCHEMA_VERSION,
             "id": self.id,
             "provider_id": self.provider_id,
             "model_id": self.model_id,
@@ -149,6 +177,11 @@ def _meta_from_json(raw: Any, session_id: str) -> SessionMeta:
         raise ValueError("meta is not an object")
     if raw.get("id") not in (None, session_id):
         raise ValueError("meta id mismatch")
+    version = raw.get("version", 1)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValueError("meta version is not an integer")
+    if version != SCHEMA_VERSION:
+        raise LegacySession(session_id, version)
     return SessionMeta(
         id=session_id,
         provider_id=_text(raw.get("provider_id")),
@@ -197,19 +230,103 @@ def _write_all(fd: int, payload: bytes) -> None:
         view = view[os.write(fd, view):]
 
 
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _message_id() -> str:
+    return secrets.token_hex(16)
+
+
+def _model_id(model: str) -> str:
+    return model.partition("/")[2] or model
+
+
+def _parts_text(parts: Any) -> str:
+    if not isinstance(parts, (list, tuple)):
+        return ""
+    return "".join(
+        str(part.get("text") or "")
+        for part in parts
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and isinstance(part.get("text"), str)
+    )
+
+
+def _ds_usage(usage: Optional[dict]) -> Dict[str, int]:
+    """OpenAI 风格的 usage → DSH 的字段名；认不出的字段就丢弃。"""
+    if not isinstance(usage, dict):
+        return {}
+    prompt = usage.get("prompt", usage.get("prompt_tokens", 0))
+    completion = usage.get("completion", usage.get("completion_tokens", 0))
+    if not isinstance(prompt, int) or isinstance(prompt, bool):
+        prompt = 0
+    if not isinstance(completion, int) or isinstance(completion, bool):
+        completion = 0
+    return {
+        "inputTokens": prompt,
+        "outputTokens": completion,
+        "cacheReadTokens": 0,
+        "reasoningTokens": 0,
+        "totalTokens": prompt + completion,
+    }
+
+
 def _title_of(text: str) -> str:
     """首条 user 消息的开头做标题：压缩空白、截断。"""
     flat = " ".join(text.split())
     return flat[:TITLE_CHARS]
 
 
-def _dropped(seq: int, ranges: List[Tuple[int, int]]) -> bool:
-    """``seq`` 落在某次撤销抹掉的区间里吗：``drop_from < seq < undo.seq``。
+def _blob_digests(value: Any) -> Iterable[str]:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "blob" and isinstance(item, str) and item:
+                yield item
+            else:
+                for digest in _blob_digests(item):
+                    yield digest
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            for digest in _blob_digests(item):
+                yield digest
 
+
+def _copy_event_blobs(source: Path, target: Path, event: Event) -> None:
+    """把事件里引用到的 blobs 一起复制过去；指针跟着事件走。"""
+    digests = set(_blob_digests(dict(event.data)))
+    if not digests:
+        return
+    target_dir = target / BLOB_DIR
+    for digest in digests:
+        path = source / BLOB_DIR / digest
+        if not path.is_file():
+            continue
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(path), str(target_dir / digest))
+        except OSError:
+            continue
+
+
+def _upto(event: Event) -> int:
+    value = event.data.get("upto_seq")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return 0
+
+
+def _dropped(event: Event, ranges: List[Tuple[int, int]]) -> bool:
+    """``event`` 落在某次撤销抹掉的区间里吗：``drop_from < seq < undo.seq``。
+
+    元数据（请求快照、系统消息）不跟着撤销：它们是重建请求的依据。
     undo 自己那条不在区间内（上界是开区间），所以它仍然可读、可继续叠加。
     """
+    if event.type in META_TYPES or event.type == "lls/undo":
+        return False
     for low, high in ranges:
-        if low < seq < high:
+        if low < event.seq < high:
             return True
     return False
 
@@ -253,14 +370,32 @@ class Session:
 
     # ---- 追加 ----
 
-    def append(self, kind: str, **fields: Any) -> Optional[Event]:
+    def append(
+        self,
+        kind: str,
+        data: Optional[Dict[str, Any]] = None,
+        *,
+        surface_op: str = "",
+        source_event_seqs: Iterable[int] = (),
+    ) -> Optional[Event]:
         """追加一条事件；写失败只记 ``last_error``，不打断本轮。
 
-        失败时不推进 ``seq``，下次写入会补上同一个序号。
+        ``session`` 没有 ``seq`` / ``time``；其余事件失败时不推进 ``seq``，
+        下次写入会补上同一个序号。
         """
         if self._closed:
             raise SessionError("会话 {} 已关闭".format(self.id))
-        event = Event(type=kind, seq=self.meta.last_seq + 1, ts=time.time(), **fields)
+        if kind == "session":
+            event = Event(type=kind, data=dict(data or {}))
+        else:
+            event = Event(
+                type=kind,
+                seq=self.meta.last_seq + 1,
+                time=_now_ms(),
+                data=dict(data or {}),
+                surface_op=surface_op,
+                source_event_seqs=tuple(source_event_seqs),
+            )
         line = (encode(event) + "\n").encode("utf-8")
         try:
             _write_all(self._events_fd, line)
@@ -268,72 +403,207 @@ class Session:
             self.last_error = "{}: {}".format(self.path / EVENTS_NAME, e)
             self._store.last_error = self.last_error
             return None
-        self.meta.last_seq = event.seq
+        if kind != "session":
+            self.meta.last_seq = event.seq
         self.meta.size += len(line)
-        self.meta.updated_at = event.ts
-        if kind == "turn_end":
+        self.meta.updated_at = time.time()
+        if kind == "turn/end":
             self.meta.turns += 1
-        if kind == "user" and not self.meta.title:
-            self.meta.title = _title_of(event.content)
+        if kind == "user/message" and not self.meta.title:
+            self.meta.title = _title_of(_parts_text(event.data.get("content")))
         self._store.write_meta(self.meta)
         return event
 
-    def append_screen(self, text: str) -> Optional[Event]:
+    def append_screen(self, text: str, turn: int = 0) -> Optional[Event]:
         """记下这一轮随任务发出去的画面；大的画面落 blobs，与工具输出同一套。"""
-        return self.append("screen", **self._spill(text))
+        data: Dict[str, Any] = {"turn": turn}
+        payload = text.encode("utf-8")
+        if len(payload) <= BLOB_BYTES:
+            data["content"] = text
+        else:
+            blob = self._write_blob(text)
+            if blob:
+                data.update({"content": "", "blob": blob, "size": len(payload)})
+            else:
+                data["content"] = text
+        return self.append("lls/screen", data)
 
     def append_user(
         self, text: str, screen: int = 0, source: str = "typed"
     ) -> Optional[Event]:
         """记下这一轮的任务。``screen`` 是随它发出的那条画面事件的 seq。"""
-        return self.append("user", content=text, screen=screen, source=source)
+        data: Dict[str, Any] = {
+            "content": [text_part(text)],
+            "source": {"kind": "user", "lls": {"source": source}},
+            "role": "user",
+            "id": _message_id(),
+        }
+        if screen:
+            data["lls"] = {"screen_seq": screen}
+        return self.append("user/message", data, surface_op="append")
+
+    def append_system(
+        self, text: str, turn: int = 0, step: int = 1, render_id: str = ""
+    ) -> Optional[Event]:
+        return self.append(
+            "system/message",
+            {
+                "turn": turn,
+                "step": step,
+                "message": {
+                    "role": "system",
+                    "content": self._spill_parts([text_part(text)]),
+                },
+                "lls": {"render_id": render_id},
+            },
+        )
+
+    def append_request_header(
+        self, header: Dict[str, Any], render_id: str = ""
+    ) -> Optional[Event]:
+        return self.append(
+            "request/header",
+            {"header": header, "lls": {"render_id": render_id}},
+        )
+
+    def append_request_context(
+        self,
+        provider: str,
+        model: str,
+        context_window: int,
+        budget: int,
+        render_id: str = "",
+    ) -> Optional[Event]:
+        return self.append(
+            "request/context",
+            {
+                "provider": provider,
+                "model": model,
+                "contextWindow": context_window,
+                "lls": {"budget": budget, "render_id": render_id},
+            },
+        )
 
     def append_assistant(
         self,
         content: str,
         calls: Iterable[ToolCall] = (),
+        reasoning: str = "",
         model: str = "",
         usage: Optional[dict] = None,
+        turn: int = 0,
+        step: int = 0,
     ) -> Optional[Event]:
+        parts: List[dict] = []
+        if reasoning:
+            parts.append(reasoning_part(reasoning))
+        if content:
+            parts.append(text_part(content))
+        for call in calls:
+            parts.append(tool_call_part(call))
+        data: Dict[str, Any] = {
+            "turn": turn,
+            "step": step,
+            "message": {
+                "role": "assistant",
+                "content": self._spill_parts(parts),
+                "source": {
+                    "kind": "model",
+                    "provider": self.meta.provider_id,
+                    "model": _model_id(model),
+                },
+                "id": _message_id(),
+            },
+        }
+        usage_payload = _ds_usage(usage)
+        if usage_payload:
+            data["usage"] = usage_payload
+            if usage:
+                data["lls"] = {"usage": dict(usage)}
+        return self.append("assistant/message", data)
+
+    def append_tool_call(self, call: ToolCall, turn: int = 0, step: int = 0) -> Optional[Event]:
         return self.append(
-            "assistant",
-            content=content,
-            tool_calls=tuple(calls),
-            model=model,
-            usage=usage,
+            "tool/call",
+            {
+                "turn": turn,
+                "step": step,
+                "callId": call.id,
+                "name": call.name,
+                "arguments": call.arguments,
+            },
         )
 
-    def append_tool(self, call_id: str, text: str, status: str = "ok") -> Optional[Event]:
+    def append_tool_result(
+        self,
+        call: ToolCall,
+        text: str,
+        status: str = "ok",
+        turn: int = 0,
+        step: int = 0,
+        source_seq: int = 0,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Event]:
         """记录一次工具输出；大的正文落 blobs，事件里只留指针。"""
+        data: Dict[str, Any] = {
+            "turn": turn,
+            "step": step,
+            "message": {
+                "role": "tool",
+                "source": {"kind": "tool", "callId": call.id},
+                "toolCallId": call.id,
+                "content": self._spill_parts([text_part(text)]),
+                "isError": status == "error",
+                "id": _message_id(),
+            },
+            "meta": dict(meta or {}),
+        }
         return self.append(
-            "tool", tool_call_id=call_id, status=status, **self._spill(text)
+            "tool/result",
+            data,
+            surface_op="append",
+            source_event_seqs=(source_seq,) if source_seq else (),
         )
 
-    def _spill(self, text: str) -> dict:
-        """正文超过阈值就落 blobs，返回事件字段；写不了盘就留在行里。"""
-        data = text.encode("utf-8")
-        if len(data) <= BLOB_BYTES:
-            return {"content": text}
-        blob = self._write_blob(text)
-        if not blob:
-            return {"content": text}
-        return {"content": "", "blob": blob, "size": len(data)}
+    def append_turn_start(self, turn: int) -> Optional[Event]:
+        return self.append("turn/start", {"turn": turn})
 
-    def append_turn_end(self, status: str = "ok", note: str = "", **extra: Any) -> None:
-        self.append("turn_end", status=status, note=note, **extra)
+    def append_step_start(self, turn: int, step: int) -> Optional[Event]:
+        return self.append("step/start", {"turn": turn, "step": step})
+
+    def append_step_end(self, turn: int, step: int) -> Optional[Event]:
+        return self.append("step/end", {"turn": turn, "step": step})
+
+    def append_turn_end(
+        self,
+        status: str = "ok",
+        note: str = "",
+        usage: Optional[dict] = None,
+        turn: int = 0,
+    ) -> Optional[Event]:
+        kind = {"ok": "completed", "aborted": "aborted", "error": "error"}.get(
+            status, status
+        )
+        data: Dict[str, Any] = {
+            "turn": turn,
+            "reason": {"kind": kind},
+            "lls": {"status": status},
+        }
+        if note:
+            data["lls"]["note"] = note
+        if usage:
+            data["lls"]["usage"] = dict(usage)
+        return self.append("turn/end", data)
 
     def append_compact(self, summary: str, upto_seq: int) -> None:
-        self.append("compact", content=summary, upto_seq=upto_seq)
+        self.append("lls/compact", {"summary": summary, "upto_seq": upto_seq})
 
     def append_undo(self, drop_from: int) -> Optional[Event]:
         """抹掉 ``seq > drop_from`` 的那一段：撤销上一轮。
 
         区间上界是这条 undo 自己的 seq，所以撤销之后重打一句再发出去的
         轮次照常可见。落盘的原文一个字不删 —— 撤销只改视图（见
-        :meth:`visible_events`），将来要做 /redo 也还有数据。
-
-        一起减掉 ``meta.turns``：那一段里的 ``turn_end`` 已经不算数了，
-        ``/sessions`` 与 ``/status`` 上的轮次才和看到的历史对得上。
+        :meth:`visible_events`）。
         """
         tail = (
             self._from_end(lambda event: event.seq <= drop_from)
@@ -341,9 +611,9 @@ class Session:
             else self.visible_events()
         )
         turns = sum(
-            1 for event in tail if event.seq > drop_from and event.type == "turn_end"
+            1 for event in tail if event.seq > drop_from and event.type == "turn/end"
         )
-        event = self.append("undo", drop_from=drop_from)
+        event = self.append("lls/undo", {"drop_from": drop_from})
         if event is None:
             return None
         if self._undos is not None:
@@ -354,10 +624,24 @@ class Session:
         return event
 
     def append_model_switch(self, model: str) -> None:
-        self.append("model_switch", model=model)
+        self.append("lls/model-switch", {"model": model})
 
-    def append_fork(self, parent_id: str, upto_seq: int) -> None:
-        self.append("fork", parent_id=parent_id, upto_seq=upto_seq)
+    def _spill_parts(self, parts: Iterable[Dict[str, Any]]) -> List[dict]:
+        """把超长的文本 / 推理 part 落 blobs，事件里只留指针。"""
+        out: List[dict] = []
+        for part in parts:
+            item = dict(part)
+            text = item.get("text")
+            if item.get("type") in ("text", "reasoning") and isinstance(text, str):
+                payload = text.encode("utf-8")
+                if len(payload) > BLOB_BYTES:
+                    blob = self._write_blob(text)
+                    if blob:
+                        item["text"] = ""
+                        item["blob"] = blob
+                        item["size"] = len(payload)
+            out.append(item)
+        return out
 
     # ---- 读取 ----
 
@@ -382,12 +666,12 @@ class Session:
         compact: Optional[Event] = None
         for raw in reversed(self._lines()):
             event = self._decode(raw)
-            if event is None or _dropped(event.seq, ranges):
+            if event is None or _dropped(event, ranges):
                 continue
-            if compact is not None and event.seq <= compact.upto_seq:
+            if compact is not None and event.seq <= _upto(compact):
                 break
             events.append(event)
-            if compact is None and event.type == "compact" and event.upto_seq > 0:
+            if compact is None and event.type == "lls/compact" and _upto(event) > 0:
                 compact = event
         events.reverse()
         return events
@@ -397,41 +681,48 @@ class Session:
         ranges = self._undo_ranges()
         if not ranges:
             return self.events()
-        return [event for event in self.events() if not _dropped(event.seq, ranges)]
+        return [event for event in self.events() if not _dropped(event, ranges)]
 
     def undo_point(self) -> Optional[Tuple[int, str]]:
         """上一轮从哪一条起、它说的什么；没有可撤销的轮次返回 ``None``。
 
-        锚在 ``user`` 上：它每轮必写（``/retry`` 续跑的那一段没有它，本来
-        就属于上一轮），要放回输入区的原文也只在它身上。``screen`` 由
-        ``_submit`` 紧随其前写下，正常就一起带走；号对不上（没留、是 0、
+        锚在 ``user/message`` 上：它每轮必写（``/retry`` 续跑的那一段没有
+        它，本来就属于上一轮），要放回输入区的原文也只在它身上。``lls/screen``
+        由 ``_submit`` 紧随其前写下，正常就一起带走；号对不上（没留、是 0、
         或比 user 还大）就只从 user 那一条起算，不跟着坏指针走。紧挨着它
-        之前写的 ``compact`` 也算这一轮的：自动压缩在提交任务之前发生，它
+        之前写的 ``lls/compact`` 也算这一轮的：自动压缩在提交任务之前发生，它
         只覆盖更早的历史，撤了这一轮却留着摘要，旧轮次就再也回不来了。
         """
-        tail = self._from_end(lambda event: event.type == "user")
-        if not tail or tail[0].type != "user":
+        tail = self._from_end(lambda event: event.type == "user/message")
+        if not tail or tail[0].type != "user/message":
             return None
         event = tail[0]
-        start = event.screen if 0 < event.screen < event.seq else event.seq
-        # 紧挨在这一轮之前的压缩也算它的：自动压缩发生在提交任务之前
-        # （见 ``_turn``），它覆盖的只是更早的历史，撤销就该一起退掉，
-        # 否则摘要还顶着，被它抹掉的旧轮次回不来。
+        screen = 0
+        lls = event.data.get("lls")
+        if isinstance(lls, dict):
+            value = lls.get("screen_seq")
+            if isinstance(value, int) and not isinstance(value, bool):
+                screen = value
+        start = screen if 0 < screen < event.seq else event.seq
         while start > 1:
             before = self._from_end(lambda item: item.seq < start)
-            # _from_end 交回来的是正序：命中的那条在最前面。
-            if not before or before[0].type != "compact":
+            if not before or before[0].type != "lls/compact":
                 break
             start = before[0].seq
-        return start, event.content
+        text = "".join(
+            str(part.get("text") or "")
+            for part in event.data.get("content", [])
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+        return start, text
 
     def _undo_ranges(self) -> List[Tuple[int, int]]:
         """撤销抹掉的区间 ``(drop_from, undo 的 seq)``，按写入顺序。"""
         if self._undos is None:
             self._undos = [
-                (event.drop_from, event.seq)
+                (int(event.data.get("drop_from", 0)), event.seq)
                 for event in self.events()
-                if event.type == "undo"
+                if event.type == "lls/undo"
             ]
         return self._undos
 
@@ -463,7 +754,7 @@ class Session:
         events: List[Event] = []
         for raw in reversed(self._lines()):
             event = self._decode(raw)
-            if event is None or _dropped(event.seq, ranges):
+            if event is None or _dropped(event, ranges):
                 continue
             events.append(event)
             if stop(event):
@@ -482,11 +773,11 @@ class Session:
 
         def enough(event: Event) -> bool:
             nonlocal tasks
-            if event.type == "user":
+            if event.type == "user/message":
                 tasks += 1
             return tasks > wanted
 
-        return log_entries(self._from_end(enough), keep)
+        return log_entries(self._from_end(enough), keep, self._read_blob)
 
     def history_marks(self) -> tuple:
         """消息 + 每条来自的 ``seq``；压缩时按它算裁到哪一条。"""
@@ -496,31 +787,34 @@ class Session:
 
     def compacted_upto(self) -> int:
         """最近一次压缩覆盖到哪一条 seq。"""
-        tail = self._from_end(lambda event: event.type == "compact")
-        if tail and tail[0].type == "compact":
-            return tail[0].upto_seq
+        tail = self._from_end(lambda event: event.type == "lls/compact")
+        if tail and tail[0].type == "lls/compact":
+            return _upto(tail[0])
         return 0
 
     def window(self, budget: int) -> Window:
         return fit(self.history(), budget)
 
     def usage(self) -> Optional[dict]:
-        """最近一次 ``assistant`` 记下的 usage。"""
+        """最近一次 ``assistant/message`` 记下的 usage。"""
         tail = self._from_end(
-            lambda event: event.type == "assistant" and bool(event.usage)
+            lambda event: event.type == "assistant/message"
+            and bool(event.data.get("usage") or event.data.get("lls"))
         )
-        if tail and tail[0].type == "assistant":
-            return dict(tail[0].usage or {})
+        if tail and tail[0].type == "assistant/message":
+            data = tail[0].data
+            lls = data.get("lls")
+            if isinstance(lls, dict) and isinstance(lls.get("usage"), dict):
+                return dict(lls["usage"])
+            raw = data.get("usage")
+            if isinstance(raw, dict):
+                return dict(raw)
         return None
 
     def last_turn_end(self) -> Optional[Event]:
-        """最近一条收尾记录。
-
-        ``_from_end`` 找不到时会把整份日志倒着读完，它的第一条是
-        ``session_start`` —— 不是收尾记录，不能拿 ``note`` 当「最近一轮」。
-        """
-        tail = self._from_end(lambda event: event.type == "turn_end")
-        if tail and tail[0].type == "turn_end":
+        """最近一条收尾记录。"""
+        tail = self._from_end(lambda event: event.type == "turn/end")
+        if tail and tail[0].type == "turn/end":
             return tail[0]
         return None
 
@@ -547,8 +841,8 @@ class Session:
             return ""
         return digest
 
-    def _read_blob(self, event: Event) -> Optional[str]:
-        path = self.path / BLOB_DIR / event.blob
+    def _read_blob(self, digest: str) -> Optional[str]:
+        path = self.path / BLOB_DIR / digest
         try:
             return path.read_text(encoding="utf-8")
         except OSError:
@@ -623,10 +917,17 @@ class SessionStore:
         self.write_meta(meta)
         session = self._open_dir(path, meta)
         session.append(
-            "session_start",
-            model=meta.model,
-            content="lls {}".format(_version()),
-            note=meta.cwd,
+            "session",
+            {
+                "version": SCHEMA_VERSION,
+                "id": session_id,
+                "createdAt": int(meta.created_at * 1000),
+                "cwd": meta.cwd,
+                "isSeeded": False,
+                "delegationDepth": 0,
+                "agentPreset": "standard",
+                "lls": {"app": _version(), "model": meta.model},
+            },
         )
         self.set_current(session_id)
         # 建完再归档：先归档的话，刚建好的这一条会把列表撑到 keep + 1。
@@ -792,51 +1093,37 @@ class SessionStore:
             event
             for event in source.visible_events()
             if event.seq <= cutoff
-            and event.type
-            in ("user", "screen", "assistant", "tool", "turn_end", "compact")
+            and event.type not in ("session", "lls/undo")
         ]
         new = self.create(
             source.meta.provider_id, source.meta.model_id, parent_id=source.id
         )
-        new.append_fork(source.id, cutoff)
-        # 指针跟着事件走：正文留在源会话的 blobs 里，读的历史就只剩占位。
-        target_blobs = new.path / BLOB_DIR
-        for event in keep:
-            if not event.blob:
-                continue
-            blob = source.path / BLOB_DIR / event.blob
-            try:
-                if blob.is_file():
-                    target_blobs.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(str(blob), str(target_blobs / event.blob))
-            except OSError as e:
-                self.last_error = "{}: {}".format(blob, e)
-        # seq 在新会话里重排，引用它们的字段跟着改号：画面的 seq 指回源会话
-        # 就是空号，摘要覆盖到的位置在新会话里也不一样。摘要的 cutoff 取它
-        # 覆盖到的那些事件在新会话里的最后一条：直接写它自己的 seq 会把压缩
-        # 之后、它之前那些留下来的轮次一起丢掉。
         moved: Dict[int, int] = {}
         for event in keep:
-            upto = event.upto_seq
-            if event.type == "compact":
-                covered = [
-                    new_seq for old, new_seq in moved.items() if old <= event.upto_seq
-                ]
-                upto = max(covered) if covered else new.meta.last_seq
+            _copy_event_blobs(source.path, new.path, event)
+            data = copy.deepcopy(dict(event.data))
+            lls = data.get("lls")
+            if event.type == "user/message" and isinstance(lls, dict):
+                screen = lls.get("screen_seq")
+                if isinstance(screen, int) and not isinstance(screen, bool):
+                    lls["screen_seq"] = moved.get(screen, 0)
+            if event.type == "lls/compact":
+                upto = data.get("upto_seq")
+                if isinstance(upto, int) and not isinstance(upto, bool):
+                    covered = [
+                        current for old, current in moved.items() if old <= upto
+                    ]
+                    data["upto_seq"] = max(covered) if covered else new.meta.last_seq
+            sources = []
+            for item in event.source_event_seqs:
+                mapped = moved.get(item)
+                if mapped:
+                    sources.append(mapped)
             copied = new.append(
                 event.type,
-                content=event.content,
-                tool_calls=event.tool_calls,
-                tool_call_id=event.tool_call_id,
-                status=event.status,
-                note=event.note,
-                model=event.model,
-                usage=event.usage,
-                source=event.source,
-                screen=moved.get(event.screen, 0),
-                blob=event.blob,
-                size=event.size,
-                upto_seq=upto,
+                data,
+                surface_op=event.surface_op,
+                source_event_seqs=sources,
             )
             if copied is not None:
                 moved[event.seq] = copied.seq
@@ -890,7 +1177,7 @@ class SessionStore:
             return None
         try:
             meta = _meta_from_json(raw, path.name)
-        except (TypeError, ValueError):
+        except (LegacySession, TypeError, ValueError):
             return None
         meta.archived = archived
         return meta

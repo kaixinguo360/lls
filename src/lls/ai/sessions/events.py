@@ -3,52 +3,69 @@
 事件是**唯一事实来源**。读侧不缓存、不改写：``fold`` 折出送模型的消息，
 ``log_entries`` 折出覆盖层用的「任务/答复」两行。截断、压缩都发生在派生
 视图上，磁盘上永远留着原文。
+
+存储形状与 DSH 的会话日志一致：除 ``session`` 外，一行是
+``{"type", "seq", "time", "data"}``；消息内容用 parts 数组
+（``text`` / ``reasoning`` / ``tool-call``），``time`` 是毫秒时间戳。
+LLS 自己的东西放在 ``lls`` 命名空间里（``lls/screen`` 之类的事件类型、
+``data.lls`` 里的附加字段），不往 DSH 的字段名里塞别的语义。
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ..types import Message, ToolCall
 
 __all__ = [
-    "Event",
     "CONTEXT_TYPES",
     "EVENT_TYPES",
     "INTERRUPT_MARKER",
+    "META_TYPES",
     "MISSING_BLOB",
     "SUMMARY_PREFIX",
+    "Event",
     "decode",
     "encode",
     "fold",
     "log_entries",
+    "message_from_parts",
+    "reasoning_part",
     "task_message",
+    "text_part",
+    "tool_call_part",
+    "turn_status",
 ]
 
-#: 事件类型。``session_start`` / ``turn_end`` / ``model_switch`` / ``fork``
-#: 是过程记录，不进上下文；``compact`` 替换某段区间；``undo`` 把紧挨着的
-#: 前一段从视图里抹掉（原文仍在磁盘上）。``screen`` 是某一轮
-#: 随任务一起发出去的终端画面，由那条 ``user`` 的 ``screen`` 指过来 —— 它自己
-#: 不是消息，只是那条消息的一部分。
+#: 事件类型。``session`` 的字段在顶层，其余事件都装进 ``data``。
 EVENT_TYPES = frozenset(
     {
-        "session_start",
-        "user",
-        "screen",
-        "assistant",
-        "tool",
-        "turn_end",
-        "compact",
-        "undo",
-        "model_switch",
-        "fork",
+        "session",
+        "turn/start",
+        "turn/end",
+        "step/start",
+        "step/end",
+        "system/message",
+        "request/header",
+        "request/context",
+        "user/message",
+        "assistant/message",
+        "tool/call",
+        "tool/result",
+        "lls/screen",
+        "lls/compact",
+        "lls/undo",
+        "lls/model-switch",
     }
 )
 
 #: 折叠成消息的类型。
-CONTEXT_TYPES = frozenset({"user", "assistant", "tool"})
+CONTEXT_TYPES = frozenset({"user/message", "assistant/message", "tool/result"})
+
+#: 只用于重建请求、不进入上下文的元数据；撤销不隐藏它们。
+META_TYPES = frozenset({"session", "system/message", "request/header", "request/context"})
 
 #: 摘要顶在上下文最前面时用的提示，避免模型把它当成用户新提的任务。
 SUMMARY_PREFIX = "（以下是更早对话的摘要，原文已压缩；需要细节时请问用户）\n"
@@ -67,69 +84,64 @@ INTERRUPT_MARKER = "（上一轮被用户中断，任务没做完；需要时接
 class Event:
     """一条会话事件。
 
-    字段都是可选的：每种类型只用其中几项，编码时只写非默认的部分，
-    一行因此能保持很短。
+    ``session`` 没有 ``seq`` / ``time``：它和 DSH 一样把字段放在顶层。
+    其余事件一行一个，``data`` 是 JSON 对象。``surface_op`` 与
+    ``source_event_seqs`` 是 DSH 的顶层字段，只出现在需要的地方。
     """
 
     type: str
     seq: int = 0
-    ts: float = 0.0
-    # user / assistant：正文；tool：工具输出（大块的正文改存 blobs/）
-    content: str = ""
-    tool_calls: Tuple[ToolCall, ...] = ()
-    tool_call_id: str = ""
-    # turn_end：ok / aborted / error；tool：ok / error
-    status: str = ""
-    note: str = ""
-    # assistant / session_start / model_switch：``provider/model``
-    model: str = ""
-    usage: Optional[dict] = None
-    # user：typed / piped
-    source: str = ""
-    # user：随任务发出去的那条画面事件的 seq（0 = 没留）
-    screen: int = 0
-    # tool / screen：正文落在 blobs/ 时记摘要与字节数
-    blob: str = ""
-    size: int = 0
-    # compact：摘要覆盖到哪一条 seq
-    upto_seq: int = 0
-    # undo：丢掉 seq 在 (drop_from, 这条 undo 的 seq) 之间的事件
-    drop_from: int = 0
-    # fork：来源会话
-    parent_id: str = ""
+    time: int = 0
+    data: Mapping[str, Any] = field(default_factory=dict)
+    surface_op: str = ""
+    source_event_seqs: Tuple[int, ...] = ()
 
 
-_TEXT_FIELDS = (
-    "content",
-    "tool_call_id",
-    "status",
-    "note",
-    "model",
-    "source",
-    "blob",
-    "parent_id",
-)
-_INT_FIELDS = ("screen", "size", "upto_seq", "drop_from")
+def text_part(text: str) -> dict:
+    return {"type": "text", "text": text}
+
+
+def reasoning_part(text: str) -> dict:
+    return {"type": "reasoning", "text": text}
+
+
+def tool_call_part(call: ToolCall) -> dict:
+    return {
+        "type": "tool-call",
+        "id": call.id,
+        "name": call.name,
+        "arguments": call.arguments,
+    }
+
+
+def _int(value: Any, where: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("{} must be an integer".format(where))
+    return value
+
+
+def _dict(value: Any, where: str) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("{} must be an object".format(where))
+    return {str(key): item for key, item in value.items()}
 
 
 def encode(event: Event) -> str:
     """编码成一行 JSON（不含换行）。"""
-    payload: dict = {"type": event.type, "seq": event.seq, "ts": event.ts}
-    for name in _TEXT_FIELDS:
-        value = getattr(event, name)
-        if value:
-            payload[name] = value
-    for name in _INT_FIELDS:
-        value = getattr(event, name)
-        if value:
-            payload[name] = value
-    if event.tool_calls:
-        payload["tool_calls"] = [
-            {"id": call.id, "name": call.name, "arguments": call.arguments}
-            for call in event.tool_calls
-        ]
-    if event.usage:
-        payload["usage"] = dict(event.usage)
+    if event.type == "session":
+        payload: Dict[str, Any] = {"type": "session"}
+        payload.update(dict(event.data))
+    else:
+        payload = {
+            "type": event.type,
+            "seq": event.seq,
+            "time": event.time,
+            "data": dict(event.data),
+        }
+        if event.surface_op:
+            payload["surfaceOp"] = event.surface_op
+        if event.source_event_seqs:
+            payload["sourceEventSeqs"] = list(event.source_event_seqs)
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -140,76 +152,136 @@ def decode(raw: Any) -> Event:
     kind = raw.get("type")
     if kind not in EVENT_TYPES:
         raise ValueError("unknown event type: {!r}".format(kind))
-    seq = raw.get("seq")
-    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
-        raise ValueError("event has no seq")
-    values = {"type": kind, "seq": seq, "ts": _float(raw.get("ts"))}
-    for name in _TEXT_FIELDS:
-        value = raw.get(name, "")
-        if not isinstance(value, str):
-            raise ValueError("field {} is not a string".format(name))
-        values[name] = value
-    for name in _INT_FIELDS:
-        value = raw.get(name, 0)
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ValueError("field {} is not an int".format(name))
-        values[name] = value
-    values["tool_calls"] = tuple(_tool_call(item) for item in raw.get("tool_calls", ()))
-    usage = raw.get("usage")
-    if usage is not None and not isinstance(usage, dict):
-        raise ValueError("usage is not an object")
-    values["usage"] = usage
-    return Event(**values)
+    if kind == "session":
+        data = {str(key): value for key, value in raw.items() if key != "type"}
+        version = data.get("version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise ValueError("session has no version")
+        if not isinstance(data.get("id"), str):
+            raise ValueError("session has no id")
+        return Event("session", data=data)
+
+    seq = _int(raw.get("seq"), "seq")
+    if seq < 1:
+        raise ValueError("seq must be positive")
+    time = _int(raw.get("time"), "time")
+    if time < 0:
+        raise ValueError("time must be non-negative")
+    data = _dict(raw.get("data"), "data")
+    surface_op = raw.get("surfaceOp", "")
+    if not isinstance(surface_op, str):
+        raise ValueError("surfaceOp must be a string")
+    raw_sources = raw.get("sourceEventSeqs", ())
+    if not isinstance(raw_sources, (list, tuple)):
+        raise ValueError("sourceEventSeqs must be a list")
+    sources = tuple(_int(item, "sourceEventSeqs") for item in raw_sources)
+    return Event(
+        type=kind,
+        seq=seq,
+        time=time,
+        data=data,
+        surface_op=surface_op,
+        source_event_seqs=sources,
+    )
 
 
-def _tool_call(raw: Any) -> ToolCall:
-    if not isinstance(raw, dict):
-        raise ValueError("tool call is not an object")
-    call_id = raw.get("id")
-    name = raw.get("name")
-    arguments = raw.get("arguments", "")
-    if not isinstance(call_id, str) or not isinstance(name, str):
-        raise ValueError("tool call has no id/name")
-    if not isinstance(arguments, str):
-        raise ValueError("tool call arguments is not a string")
-    return ToolCall(id=call_id, name=name, arguments=arguments)
+def _part_text(
+    part: Mapping[str, Any],
+    blobs: Optional[Callable[[str], Optional[str]]],
+) -> str:
+    if not isinstance(part, Mapping):
+        return ""
+    blob = part.get("blob")
+    if isinstance(blob, str) and blob:
+        text = blobs(blob) if blobs is not None else None
+        return text if text is not None else MISSING_BLOB
+    text = part.get("text")
+    return text if isinstance(text, str) else ""
 
 
-def _float(value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0.0
-    return float(value)
+def message_from_parts(
+    parts: Any,
+    *,
+    role: str,
+    blobs: Optional[Callable[[str], Optional[str]]] = None,
+) -> Message:
+    """把 DSH 的 parts 还原成 :class:`Message`。"""
+    if not isinstance(parts, (list, tuple)):
+        parts = []
+    texts: List[str] = []
+    calls: List[ToolCall] = []
+    for part in parts:
+        if not isinstance(part, Mapping):
+            continue
+        kind = part.get("type")
+        if kind == "text":
+            texts.append(_part_text(part, blobs))
+        elif kind == "tool-call":
+            call_id = part.get("id")
+            name = part.get("name")
+            arguments = part.get("arguments", "")
+            if isinstance(call_id, str) and isinstance(name, str):
+                if not isinstance(arguments, str):
+                    arguments = json.dumps(arguments, ensure_ascii=False)
+                calls.append(ToolCall(call_id, name, arguments))
+    content = "".join(texts)
+    if role == "assistant" and not content and calls:
+        content = None
+    return Message(role, content, tool_calls=tuple(calls))
+
+
+def _message_data(event: Event) -> Mapping[str, Any]:
+    data = event.data.get("message")
+    return data if isinstance(data, Mapping) else {}
+
+
+def _turn_status(event: Event) -> str:
+    reason = event.data.get("reason")
+    kind = reason.get("kind") if isinstance(reason, Mapping) else ""
+    if kind == "completed":
+        return "ok"
+    if kind in ("aborted", "error"):
+        return kind
+    lls = event.data.get("lls")
+    status = lls.get("status") if isinstance(lls, Mapping) else ""
+    return status if isinstance(status, str) else ""
+
+
+def turn_status(event: Event) -> str:
+    """一条 ``turn/end`` 对 LLS 的 status：ok / aborted / error。"""
+    return _turn_status(event)
 
 
 def fold(
     events: Iterable[Event],
-    blobs: Optional[Callable[[Event], Optional[str]]] = None,
+    blobs: Optional[Callable[[str], Optional[str]]] = None,
     marks: Optional[List[int]] = None,
 ) -> List[Message]:
     """把事件折成 ``Message`` 序列（不含 system）。
 
-    ``compact`` 事件把 ``seq <= upto_seq`` 的区间换成一段摘要；工具输出
+    ``lls/compact`` 把 ``seq <= upto_seq`` 的区间换成一段摘要；工具输出
     落在 blobs 里时由 ``blobs`` 读回，读不到就用占位文本 —— 但绝不跳过
     消息，否则 tool_calls 会失去配对。
 
-    中断和出错的轮次仍然进上下文：用户看见屏幕上做到哪一步，模型也该看见，
+    中断和出错的轮次照样进上下文：用户看见屏幕上做到哪一步，模型也该看见，
     否则下一轮它只记得一句重述的任务，会把做过的事情再做一遍。缺的是收尾：
     没等到结果的工具调用补一条回复，中断的轮次补一行 :data:`INTERRUPT_MARKER`。
 
-    每一轮 ``user`` 带上当时发出去的画面（:func:`task_message`）：重放出来的
-    正文与当时的请求逐字相同，前面的历史才是稳定的前缀。
-
-    给了 ``marks`` 时，同步记下每条消息来自哪一条 ``seq``（摘要那条记 0），
-    压缩时据此算出「裁到哪一条」。
+    每一轮 ``user/message`` 带上当时发出去的画面（:func:`task_message`）：
+    重放出来的正文与当时的请求逐字相同，前面的历史才是稳定的前缀。
     """
     events = list(events)
     cutoff = 0
     summary = ""
     for event in events:
-        if event.type == "compact" and event.upto_seq >= cutoff:
-            cutoff, summary = event.upto_seq, event.content
-    screens = {event.seq: event for event in events if event.type == "screen"}
+        if event.type == "lls/compact":
+            data = event.data
+            upto = data.get("upto_seq")
+            if isinstance(upto, int) and not isinstance(upto, bool) and upto >= cutoff:
+                cutoff = upto
+                summary = str(data.get("summary") or "")
 
+    screens = {event.seq: event for event in events if event.type == "lls/screen"}
     messages: List[Message] = []
     if marks is not None:
         marks.clear()
@@ -217,16 +289,10 @@ def fold(
         messages.append(Message("user", SUMMARY_PREFIX + summary))
         if marks is not None:
             marks.append(0)
-    # 发出去、还等结果的工具调用：(发起它的 seq, 调用 id)。中断和崩溃都会让
-    # 它们永远等不到回复，而缺了配对的请求会被 API 拒掉。
+
     pending: List[Tuple[int, str]] = []
 
     def close(status: str = "") -> None:
-        """给还在等结果的调用补一条回复。
-
-        ``marks`` 记发起调用的那条 seq：合成出来的回复没有自己的事件，
-        压缩时才不会把它和调用切开。
-        """
         for seq, call_id in pending:
             messages.append(
                 Message("tool", _cancelled_result(status), tool_call_id=call_id)
@@ -235,99 +301,89 @@ def fold(
                 marks.append(seq)
         pending.clear()
 
-    # 压缩会把一轮的消息整段带走，它的 ``turn_end`` 却可能落在 cutoff 之后
-    # （收尾不是消息，marks 指不到它）。这之前没有见过任何消息时，这条收尾
-    # 属于已经压掉的那一轮，不能再把「被中断」的标记补到摘要后面。
     started = False
     for event in events:
-        if event.seq <= cutoff:
+        if event.seq and event.seq <= cutoff:
             continue
-        if event.type == "user":
+        if event.type == "user/message":
             close()
             started = True
-            messages.append(Message("user", _turn_text(event, screens, blobs)))
+            text = "".join(
+                _part_text(part, blobs)
+                for part in event.data.get("content", [])
+                if isinstance(part, Mapping) and part.get("type") == "text"
+            )
+            screen_seq = 0
+            lls = event.data.get("lls")
+            if isinstance(lls, Mapping):
+                value = lls.get("screen_seq")
+                if isinstance(value, int) and not isinstance(value, bool):
+                    screen_seq = value
+            snapshot = screens.get(screen_seq)
+            if snapshot is not None:
+                screen_data = snapshot.data
+                blob = screen_data.get("blob")
+                if isinstance(blob, str) and blob:
+                    screen = blobs(blob) if blobs is not None else None
+                    screen = screen if screen is not None else ""
+                else:
+                    value = screen_data.get("content")
+                    screen = value if isinstance(value, str) else ""
+                if screen.strip():
+                    text = task_message(text, screen)
+            messages.append(Message("user", text))
             if marks is not None:
                 marks.append(event.seq)
-        elif event.type == "assistant":
+        elif event.type == "assistant/message":
             started = True
-            messages.append(
-                Message(
-                    "assistant",
-                    event.content or None,
-                    tool_calls=tuple(event.tool_calls),
-                )
+            message = message_from_parts(
+                _message_data(event).get("content", []),
+                role="assistant",
+                blobs=blobs,
             )
+            messages.append(message)
             if marks is not None:
                 marks.append(event.seq)
             pending.clear()
-            pending.extend((event.seq, call.id) for call in event.tool_calls)
-        elif event.type == "tool":
+            pending.extend((event.seq, call.id) for call in message.tool_calls)
+        elif event.type == "tool/result":
             started = True
-            text = event.content
-            if event.blob:
-                text = (blobs(event) if blobs is not None else None) or MISSING_BLOB
-            messages.append(Message("tool", text, tool_call_id=event.tool_call_id))
+            message = message_from_parts(
+                _message_data(event).get("content", []),
+                role="tool",
+                blobs=blobs,
+            )
+            text = message.content or ""
+            call_id = _tool_call_id(event)
+            messages.append(Message("tool", text, tool_call_id=call_id))
             if marks is not None:
                 marks.append(event.seq)
-            # 这条调用已经有结果，不用再补。
-            pending[:] = [item for item in pending if item[1] != event.tool_call_id]
-        elif event.type == "turn_end":
+            pending[:] = [item for item in pending if item[1] != call_id]
+        elif event.type == "turn/end":
             if not started:
                 continue
-            close(event.status or "")
-            if event.status == "aborted":
+            status = _turn_status(event)
+            close(status)
+            if status == "aborted":
                 messages.append(Message("user", INTERRUPT_MARKER))
                 if marks is not None:
                     marks.append(event.seq)
-    # 没有 turn_end 的残尾（进程被杀）也要收：新的一轮不该带着半截调用发出。
     close()
     return _drop_unpaired(messages)
 
 
-def task_message(task: str, screen: str) -> str:
-    """一轮交给模型的正文：先画面，后任务。
-
-    写事件时由它拼请求，``fold`` 也由它重建 —— 模板只有这一份，重放才会
-    与当时的请求逐字相同。
-    """
-    body = screen if screen.strip() else "（屏幕为空）"
-    return (
-        "<terminal_state>\n"
-        + body
-        + "\n</terminal_state>\n\n"
-        + "<task>\n"
-        + task
-        + "\n</task>"
-    )
-
-
-def _turn_text(
-    event: Event,
-    screens: dict,
-    blobs: Optional[Callable[[Event], Optional[str]]],
-) -> str:
-    """一条 ``user`` 在请求里的正文。
-
-    画面取不到（没留、被压缩带走、blob 丢了）就退回任务原文：少一段输入
-    只会让这一轮薄一点，不该变成另一条消息。
-    """
-    snapshot = screens.get(event.screen) if event.screen else None
-    if snapshot is None:
-        return event.content
-    text = snapshot.content
-    if snapshot.blob:
-        text = blobs(snapshot) if blobs is not None else None
-        if text is None:
-            return event.content
-    return task_message(event.content, text)
+def _tool_call_id(event: Event) -> str:
+    message = _message_data(event)
+    value = message.get("toolCallId")
+    if isinstance(value, str):
+        return value
+    source = message.get("source")
+    if isinstance(source, Mapping) and isinstance(source.get("callId"), str):
+        return source["callId"]
+    return ""
 
 
 def _cancelled_result(status: str) -> str:
-    """补在没等到结果的工具调用上的回复。
-
-    分开写中断与出错：被中断的那次多半要接着做，出错的那次多半要重试，
-    模型看到的理由不一样，下一步才不一样。
-    """
     if status == "aborted":
         return "error: 这次调用被用户中断，没有结果"
     if status == "error":
@@ -336,12 +392,7 @@ def _cancelled_result(status: str) -> str:
 
 
 def _drop_unpaired(messages: List[Message]) -> List[Message]:
-    """丢掉配对不全的 tool_calls 与其回复。
-
-    ``fold`` 已经给没等到结果的调用补了回复，这里只兜底残破的日志：压缩把调用
-    那一侧切掉了，或者回复比调用先出现。原样送进 API 会被 400 拒掉，所以整组
-    一起丢，不留下半截。
-    """
+    """丢掉配对不全的 tool_calls 与其回复。"""
     out: List[Message] = []
     index = 0
     total = len(messages)
@@ -361,47 +412,82 @@ def _drop_unpaired(messages: List[Message]) -> List[Message]:
             index = cursor
             continue
         if message.role == "tool":
-            index += 1  # 没有对应调用的孤立回复
+            index += 1
             continue
         out.append(message)
         index += 1
     return out
 
 
-def log_entries(events: Iterable[Event], keep: int = 2) -> List[Tuple[str, str, str]]:
-    """折出覆盖层用的 ``(任务, 答复, 备注)``，只留最近 ``keep`` 条。
+def _entry_text(
+    event: Event,
+    blobs: Optional[Callable[[str], Optional[str]]],
+) -> str:
+    return "".join(
+        _part_text(part, blobs)
+        for part in event.data.get("content", [])
+        if isinstance(part, Mapping) and part.get("type") == "text"
+    )
 
-    一轮可以分几段写：``/retry`` 接着跑的那一轮没有新的 ``user`` 事件，答复
-    与 ``turn_end`` 直接跟在上一轮后面。这一段既不能丢（旧写法只认「有任务
-    在手」，接着跑的那段全军覆没，覆盖层停在中断前的样子），也不能并进上一
-    轮（``/status`` 要翻得到中断前已经写下的答复）：同名的任务另开一条。
-    """
+
+def log_entries(
+    events: Iterable[Event],
+    keep: int = 2,
+    blobs: Optional[Callable[[str], Optional[str]]] = None,
+) -> List[Tuple[str, str, str]]:
+    """折出覆盖层用的 ``(任务, 答复, 备注)``，只留最近 ``keep`` 条。"""
     entries: List[List[str]] = []
-    task: Optional[str] = None     # 最近一条用户任务；续写的那一段沿用
-    current: Optional[List[str]] = None  # 正在写的那一条；收尾后置空
+    task: Optional[str] = None
+    current: Optional[List[str]] = None
     for event in events:
-        if event.type == "user":
-            task = event.content
+        if event.type == "user/message":
+            task = _entry_text(event, blobs)
             current = [task, "", ""]
             entries.append(current)
             continue
-        if event.type == "assistant":
-            if not event.content:
+        if event.type == "assistant/message":
+            message = message_from_parts(
+                _message_data(event).get("content", []),
+                role="assistant",
+                blobs=blobs,
+            )
+            text = message.content or ""
+            if not text:
                 continue
-            if current is None:
-                if task is None:
-                    continue    # 切片开头的零散事件：没有可归的轮次
-                current = [task, "", ""]
-                entries.append(current)
-            current[1] = event.content
-        elif event.type == "turn_end":
             if current is None:
                 if task is None:
                     continue
                 current = [task, "", ""]
                 entries.append(current)
-            current[2] = event.note or ("" if event.status == "ok" else event.status)
+            current[1] = text
+        elif event.type == "turn/end":
+            if current is None:
+                if task is None:
+                    continue
+                current = [task, "", ""]
+                entries.append(current)
+            lls = event.data.get("lls")
+            note = lls.get("note") if isinstance(lls, Mapping) else ""
+            status = _turn_status(event)
+            current[2] = str(note or ("" if status == "ok" else status))
             current = None
     if current is not None:
         current[2] = "未完成"
     return [(task, reply, note) for task, reply, note in entries][-max(1, keep):]
+
+
+def task_message(task: str, screen: str) -> str:
+    """一轮交给模型的正文：先画面，后任务。
+
+    写事件时由它拼请求，``fold`` 也由它重建 —— 模板只有这一份，重放才会
+    与当时的请求逐字相同。
+    """
+    body = screen if screen.strip() else "（屏幕为空）"
+    return (
+        "<terminal_state>\n"
+        + body
+        + "\n</terminal_state>\n\n"
+        + "<task>\n"
+        + task
+        + "\n</task>"
+    )

@@ -22,6 +22,7 @@ dev = ["pytest>=7.0", "ruff>=0.1", "mypy>=1.0"]
 
 [project.scripts]
 lls = "lls.cli:main"
+lls-learn = "lls.learn.cli:main"
 
 # 版本号只在 lls/__init__.py 里写一次
 [tool.hatch.version]
