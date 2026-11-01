@@ -100,6 +100,7 @@ class AppConfig:
     paths: PathsConfig
     input_history: InputHistoryConfig
     input_completion: InputCompletionConfig
+    learning: Any = None
     ai: Any = None
     ai_error: str | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
@@ -389,13 +390,21 @@ def load(path: str | None = None, *, emit_warnings: bool = True) -> AppConfig:
     raw = _apply_overrides(raw, _CLI_OVERRIDES)
     _unknown(
         raw,
-        {"paths", "input_history", "input_completion", "ai"},
+        {"paths", "input_history", "input_completion", "learning", "ai"},
         "",
         notes,
     )
     paths = _parse_paths(raw, target, notes)
     input_history = _parse_input_history(raw, notes)
     input_completion = _parse_input_completion(raw, notes)
+    from .learn.config import parse_learning
+
+    learning = parse_learning(
+        raw.get("learning"),
+        base_dir=target.parent,
+        default_root=paths.root / "learning",
+        notes=notes,
+    )
     ai = None
     if ai_error is None:
         try:
@@ -416,6 +425,7 @@ def load(path: str | None = None, *, emit_warnings: bool = True) -> AppConfig:
         paths=paths,
         input_history=input_history,
         input_completion=input_completion,
+        learning=learning,
         ai=ai,
         ai_error=ai_error,
         warnings=tuple(notes),
@@ -433,7 +443,7 @@ def load_ai(path: str | None = None, *, emit_warnings: bool = True) -> Any:
     raw = _apply_overrides(raw, _CLI_OVERRIDES)
     _unknown(
         raw,
-        {"paths", "input_history", "input_completion", "ai"},
+        {"paths", "input_history", "input_completion", "learning", "ai"},
         "",
         notes,
     )

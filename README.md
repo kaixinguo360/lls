@@ -177,17 +177,37 @@ ai:
 
 ### 离线学习
 
-`lls-learn` 只读 v2 会话，导出可训练的 SFT 数据：
+`lls-learn` 把 v2 会话导出为 SFT，再按配置调用外部训练器和评测器，最后
+通过门禁才晋升 adapter。主仓库不依赖 torch，训练/评测命令自己带环境。
+
+```yaml
+learning:
+  root: ~/.local/lls/learning
+  train:
+    command: ["python", "-m", "trainer.sft"]
+    timeout: 3600
+  eval:
+    command: ["python", "-m", "trainer.eval"]
+    tasks: learning/eval/tasks.jsonl
+    timeout: 1800
+  baseline: 0.55
+  min_delta: 0.01
+```
 
 ```bash
 lls-learn doctor
 lls-learn export --out learning/data/iter0
-lls-learn --sessions ~/.local/lls/sessions export --out learning/data/iter0
+lls-learn train --run learning/runs/<id>
+lls-learn eval --run learning/runs/<id>
+lls-learn promote --run learning/runs/<id>
+lls-learn cycle          # 导出 → 训练 → 评测 → 晋升
 ```
 
-只取成功的轮次；`ask_teacher` 的调用与结果会被删除，学生自己的反思保留。
-输出 `sft.jsonl` 与 `manifest.json`。训练、评测和 adapter 晋升不在主仓库，
-由独立训练流程读取这两个文件。详见
+只取成功轮次；`ask_teacher` 的调用与结果会被删除，学生自己的反思保留。
+训练器在 `{adapter}` 写出非空 adapter；评测器在 `{metrics}` 写
+`{"score": 0..1, "passed": n, "total": n}`。只有
+`score >= max(baseline, current.score) + min_delta` 才会更新
+`adapters/current.json`；任何一步失败都不动线上指针。详见
 [离线学习](docs/design/offline-learning.md)。
 
 ## 输入历史

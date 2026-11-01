@@ -6,4 +6,4 @@
 
 from __future__ import annotations
 
-__all__ = ["cli", "dataset"]
+__all__ = ["cli", "config", "dataset", "pipeline"]
