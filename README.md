@@ -175,6 +175,21 @@ ai:
 
 不配置就没有这个工具；会话上下文会原样作为问题的一部分发给教师。
 
+### 离线学习
+
+`lls-learn` 只读 v2 会话，导出可训练的 SFT 数据：
+
+```bash
+lls-learn doctor
+lls-learn export --out learning/data/iter0
+lls-learn --sessions ~/.local/lls/sessions export --out learning/data/iter0
+```
+
+只取成功的轮次；`ask_teacher` 的调用与结果会被删除，学生自己的反思保留。
+输出 `sft.jsonl` 与 `manifest.json`。训练、评测和 adapter 晋升不在主仓库，
+由独立训练流程读取这两个文件。详见
+[离线学习](docs/design/offline-learning.md)。
+
 ## 输入历史
 
 提示行里按 `↑`/`↓` 可以召回以前输入的内容，重启后仍在。历史是 JSONL，
@@ -287,6 +302,8 @@ Windows 原生没有这些模块，请使用 WSL；`lls --doctor` 会给出结�
 
 - [会话事件 v2](docs/design/event-schema-v2.md)：事件形状、parts、版本与
   旧数据策略。
+- [离线学习](docs/design/offline-learning.md)：从 v2 会话导出 SFT、
+  去掉求助痕迹的范围与边界。
 
 ## 开发
 
@@ -294,6 +311,7 @@ Windows 原生没有这些模块，请使用 WSL；`lls --doctor` 会给出结�
 pip install -e ".[dev]"
 
 python -m pytest        # 测试
+lls-learn doctor        # 离线数据自检
 ruff check src tests    # 静态检查
 mypy                    # 类型检查（term 与 edit 两个包为严格模式）
 ```

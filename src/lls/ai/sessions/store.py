@@ -429,10 +429,11 @@ class Session:
         return self.append("lls/screen", data)
 
     def append_user(
-        self, text: str, screen: int = 0, source: str = "typed"
+        self, text: str, screen: int = 0, source: str = "typed", turn: int = 0
     ) -> Optional[Event]:
         """记下这一轮的任务。``screen`` 是随它发出的那条画面事件的 seq。"""
         data: Dict[str, Any] = {
+            "turn": turn,
             "content": [text_part(text)],
             "source": {"kind": "user", "lls": {"source": source}},
             "role": "user",
@@ -847,6 +848,10 @@ class Session:
             return path.read_text(encoding="utf-8")
         except OSError:
             return None
+
+    def read_blob(self, digest: str) -> Optional[str]:
+        """读一个 blob；离线导出等只读调用方走这个公开入口。"""
+        return self._read_blob(digest)
 
     def close(self) -> None:
         if self._closed:

@@ -28,7 +28,7 @@
 | `system/message` | `{turn, step, message:{role:"system", content:[text]}, lls:{render_id}}` |
 | `request/header` | `{header:{config, adapterDefaults, tools}, lls:{render_id}}` |
 | `request/context` | `{provider, model, contextWindow, lls:{budget, render_id}}` |
-| `user/message` | `{content:[text], source, role:"user", id, lls?:{screen_seq}}` |
+| `user/message` | `{turn, content:[text], source, role:"user", id, lls?:{screen_seq}}` |
 | `assistant/message` | `{turn, step, message:{role:"assistant", content:[parts], source, id}, usage?, lls?:{usage}}` |
 | `tool/call` | `{turn, step, callId, name, arguments}` |
 | `tool/result` | `{turn, step, message:{role:"tool", source:{kind:"tool",callId}, toolCallId, content:[text], isError, id}, meta}` |

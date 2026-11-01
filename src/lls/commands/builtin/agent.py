@@ -1551,7 +1551,10 @@ class _Session:
             return
         snapshot = self._session.append_screen(screen, self._turn_no)
         self._session.append_user(
-            task, screen=snapshot.seq if snapshot is not None else 0, source="typed"
+            task,
+            screen=snapshot.seq if snapshot is not None else 0,
+            source="typed",
+            turn=self._turn_no,
         )
 
     def _on_agent_event(self, event: AgentEvent, painter: "_Painter") -> None:
