@@ -787,7 +787,7 @@ def test_painter_says_what_it_is_doing_at_each_phase() -> None:
     assert shown == [
         "(agent) preparing...",
         "(agent) compacting...",
-        "(agent) 等待回复…",
+        "(agent) awaiting reply...",
         "(agent) replying...",
         "(agent) replying...",      # 再来一段正文不再换相
     ]
@@ -834,7 +834,7 @@ def test_painter_forgets_the_previous_step() -> None:
 
     painter.on_event(agent_cmd.AgentEvent(agent_cmd.AgentEventKind.STEP, step=2))
 
-    assert painter.line == "({} 2) 等待回复…".format(agent_cmd.NAME)
+    assert painter.line == "({} 2) awaiting reply...".format(agent_cmd.NAME)
 
 
 # ---- 提示词与显示预算一致 ----

@@ -249,12 +249,12 @@ async def _stream_payload(
         nonlocal tail
         if event.kind is AgentEventKind.CALL_DELTA:
             tail = (tail + event.text)[-200:]
-            _paint(s, "gen-cmd", (event.name + " " + tail).strip() or "等待回复…")
+            _paint(s, "gen-cmd", (event.name + " " + tail).strip() or "awaiting reply...")
         elif event.kind is AgentEventKind.REASONING:
             think.append(event.text)
             _paint_thinking(s, "".join(think))
 
-    _paint(s, "gen-cmd", "等待回复…")
+    _paint(s, "gen-cmd", "awaiting reply...")
     try:
         _text, calls, _usage = await stream_reply(
             provider,
@@ -326,7 +326,7 @@ async def _produce(
         if not payload:
             return _Outcome(note="`#` 后面没有内容")
 
-    hint = "，确认？"
+    hint = ", confirm?"
     while True:
         if payload is None:
             try:
@@ -348,7 +348,7 @@ async def _produce(
             return _Outcome(note="会话已结束")
 
         key = answer.strip().lower()
-        hint = "，确认？"
+        hint = ", confirm?"
 
         if key == "" or key in ("y", "yes", "u", "use"):
             return _Outcome(payload, True, None, call)
@@ -367,7 +367,7 @@ async def _produce(
             payload = None
             continue
 
-        hint = "，请输入 y 或 n："
+        hint = ", please input 'y' or 'n':"
 
 
 async def run_generate(s: Services, request: str | None = None) -> bool:

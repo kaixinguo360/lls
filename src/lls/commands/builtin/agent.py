@@ -431,7 +431,7 @@ def _reply_rows(text: str, columns: int, bold: bool = False) -> list[str]:
 # 第一行没有具体动作时说的话：每一句都对应一个能核对的时刻。
 PREPARING = "preparing..."      # 快照、拼上下文：此刻没有请求在路上
 COMPACTING = "compacting..."    # 把旧历史压成摘要，一次网络请求
-AWAITING = "等待回复…"  # 请求已发出，模型第一个字节还没到
+AWAITING = "awaiting reply..."  # 请求已发出，模型第一个字节还没到
 REPLYING = "replying..."        # 正文在流里
 REASONING = "reasoning..."      # 只有推理在流里，正文还没开始
 PLANNING = "planning a call..." # 工具调用的参数在流里，还没拼完
