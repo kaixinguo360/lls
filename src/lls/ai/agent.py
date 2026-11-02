@@ -30,7 +30,7 @@ from typing import Any, Awaitable, Callable, Sequence
 
 from .provider import Provider
 from .toolcalls import ToolCallMerger
-from .types import ChunkKind, Message, Tool, ToolCall
+from .types import ChunkKind, Message, Tool, ToolCall, ToolResult
 
 __all__ = [
     "Agent",
@@ -60,7 +60,7 @@ class AgentTool:
     """
 
     tool: Tool
-    run: Callable[[dict[str, Any]], Awaitable[str]]
+    run: Callable[[dict[str, Any]], Awaitable[str | ToolResult]]
 
 
 class AgentEventKind(str, Enum):
@@ -286,7 +286,14 @@ class Agent:
                 )
                 result = await self._execute(step, call)
                 self._push(
-                    conversation, Message("tool", result, tool_call_id=call.id), None
+                    conversation,
+                    Message(
+                        "tool",
+                        result.content,
+                        tool_call_id=call.id,
+                        meta=result.meta,
+                    ),
+                    None,
                 )
             self._emit(AgentEvent(AgentEventKind.STEP_END, step=step))
 
@@ -337,33 +344,38 @@ class Agent:
 
     # ---- 工具执行 ----
 
-    async def _execute(self, step: int, call: ToolCall) -> str:
+    async def _execute(self, step: int, call: ToolCall) -> ToolResult:
         entry = self._by_name.get(call.name)
         if entry is None:
-            return "error: unknown tool {!r} (available: {})".format(
-                call.name,
-                ", ".join(sorted(self._by_name)) or "<none>",
+            return ToolResult(
+                "error: unknown tool {!r} (available: {})".format(
+                    call.name,
+                    ", ".join(sorted(self._by_name)) or "<none>",
+                )
             )
 
         try:
             arguments = json.loads(call.arguments or "{}")
         except (TypeError, ValueError) as e:
-            return f"error: invalid tool arguments: {e}"
+            return ToolResult("error: invalid tool arguments: {}".format(e))
         if not isinstance(arguments, dict):
-            return "error: tool arguments must be a JSON object"
+            return ToolResult("error: tool arguments must be a JSON object")
 
         try:
             result = await entry.run(arguments)
         except AgentCancelled:
             raise
         except Exception as e:  # noqa: BLE001
-            return f"error: {e}"
+            return ToolResult("error: {}".format(e))
 
-        if not isinstance(result, str):
-            result = str(result)
+        if not isinstance(result, ToolResult):
+            result = ToolResult(result if isinstance(result, str) else str(result))
         self._emit(
             AgentEvent(
-                AgentEventKind.RESULT, step=step, name=call.name, text=result
+                AgentEventKind.RESULT,
+                step=step,
+                name=call.name,
+                text=result.content,
             )
         )
         return result

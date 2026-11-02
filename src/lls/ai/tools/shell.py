@@ -23,7 +23,8 @@ import time
 from typing import Any
 
 from ..agent import AgentTool
-from ..types import Tool
+from ..types import Tool, ToolResult
+from ...recording import TerminalRecorder, TerminalRef
 from .args import as_float
 
 __all__ = ["BASH_TOOL", "SHELL_BIN", "Shell", "shared", "shell_tools"]
@@ -80,8 +81,14 @@ SHELL_BIN = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
 class Shell:
     """一条「另开的 shell」：只有一个当前目录。"""
 
-    def __init__(self, cwd: str | None = None) -> None:
+    def __init__(
+        self,
+        cwd: str | None = None,
+        recorder: TerminalRecorder | None = None,
+    ) -> None:
         self.cwd = cwd or os.getcwd()
+        self.recorder = recorder
+        self.last_ref: TerminalRef | None = None
 
     def target(self, raw: Any) -> str:
         """把 ``cwd`` 参数解析成绝对路径；空串表示沿用当前目录。"""
@@ -102,6 +109,7 @@ class Shell:
             return 125, "", "没有这个目录：{}".format(cwd), 0.0, False
         if not os.path.exists(SHELL_BIN):
             return 127, "", "找不到可用的 shell：{}".format(SHELL_BIN), 0.0, False
+        self.last_ref = None
         work = tempfile.mkdtemp(prefix="lls-bash-")
         try:
             script = os.path.join(work, "cmd.sh")
@@ -109,6 +117,8 @@ class Shell:
             out_path = os.path.join(work, "out")
             err_path = os.path.join(work, "err")
             text = command if command.endswith("\n") else command + "\n"
+            if self.recorder is not None:
+                self.recorder.record("i", text)
             # 记下命令自己的退出码；pwd 用位置参数传，省得给路径加引号。
             text += 'status=$?\npwd -P > "$1" 2>/dev/null\nexit $status\n'
             with open(script, "w", encoding="utf-8") as handle:
@@ -154,7 +164,20 @@ class Shell:
                 left = ""
             if left and os.path.isdir(left):
                 self.cwd = left
-            return code, _capture(out_path), _capture(err_path), elapsed, timed_out
+            out_raw = _read_bytes(out_path)
+            err_raw = _read_bytes(err_path)
+            if self.recorder is not None:
+                if out_raw:
+                    self.last_ref = self.recorder.record("o", out_raw)
+                if err_raw:
+                    self.last_ref = self.recorder.record("o", err_raw)
+            return (
+                code,
+                _clip_bytes(out_raw),
+                _clip_bytes(err_raw),
+                elapsed,
+                timed_out,
+            )
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -182,13 +205,15 @@ def _clip_output(text: str, budget: int) -> tuple[str, bool]:
     return text[:head] + cut + text[-tail:], True
 
 
-def _capture(path: str) -> str:
-    """读一段捕获下来的输出（临时文件），按字符预算裁一刀。"""
+def _read_bytes(path: str) -> bytes:
     try:
         with open(path, "rb") as handle:
-            data = handle.read(MAX_BASH_CHARS * 4 + 1)
+            return handle.read()
     except OSError:
-        return ""
+        return b""
+
+
+def _clip_bytes(data: bytes) -> str:
     return _clip_output(data.decode("utf-8", "replace"), MAX_BASH_CHARS)[0]
 
 
@@ -206,7 +231,7 @@ def _kill_group(proc: Any) -> None:
             pass
 
 
-async def bash(args: dict[str, Any], shell: Shell) -> str:
+async def bash(args: dict[str, Any], shell: Shell) -> ToolResult:
     """观察文本 = 一句抬头（退出码、耗时、当前位置）+ 两段输出。"""
     command = args.get("command")
     if not isinstance(command, str) or not command.strip():
@@ -217,6 +242,11 @@ async def bash(args: dict[str, Any], shell: Shell) -> str:
         min(as_float(args.get("timeout"), DEFAULT_BASH_TIMEOUT), MAX_BASH_TIMEOUT),
     )
     code, out, err, elapsed, timed_out = await shell.run(command, cwd, timeout)
+    meta = (
+        {"terminal_ref": str(shell.last_ref)}
+        if shell.last_ref is not None
+        else {}
+    )
     if timed_out:
         head = "（已中止：超过 {:g}s，进程组已杀掉）退出码 {}，用时 {:.2f}s，cwd {}".format(
             timeout, code, elapsed, shell.cwd
@@ -230,13 +260,13 @@ async def bash(args: dict[str, Any], shell: Shell) -> str:
         parts.append("--- stderr ---\n" + err.rstrip("\n"))
     if len(parts) == 1:
         parts.append("（没有输出）")
-    return "\n".join(parts)
+    return ToolResult("\n".join(parts), meta)
 
 
 def shell_tools(shell: Shell) -> list[AgentTool]:
     """shell 这一族：只依赖操作系统，与终端、会话无关。"""
 
-    async def run(args: dict[str, Any]) -> str:
+    async def run(args: dict[str, Any]):
         return await bash(args, shell)
 
     return [AgentTool(BASH_TOOL, run)]
