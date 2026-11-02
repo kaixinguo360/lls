@@ -841,6 +841,10 @@ class Session:
             return ""
         return digest
 
+    def read_blob(self, digest: str) -> Optional[str]:
+        """读回一个内容块；供导出、回放等只读消费者使用。"""
+        return self._read_blob(digest)
+
     def _read_blob(self, digest: str) -> Optional[str]:
         path = self.path / BLOB_DIR / digest
         try:
