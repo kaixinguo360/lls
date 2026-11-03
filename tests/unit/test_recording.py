@@ -31,8 +31,8 @@ def test_compression_removes_plain_stream(tmp_path) -> None:
     recorder = TerminalRecorder(tmp_path, recording_id="r1", compress=True)
     recorder.record("o", b"hello\n")
     recorder.close()
-    assert not (tmp_path / "r1" / "stream.cast").exists()
-    assert (tmp_path / "r1" / "stream.cast.gz").is_file()
+    assert not (tmp_path / "r1" / "segment-000001.cast").exists()
+    assert (tmp_path / "r1" / "segment-000001.cast.gz").is_file()
     assert list(recorder.iter_events())[0]["data"] == b"hello\n"
 
 
@@ -45,8 +45,10 @@ def test_recording_rolls_at_single_file_limit(tmp_path) -> None:
         max_total_bytes=0,
     )
     recorder.record("o", b"x" * 3000)
-    assert recorder.recording_id != "r1"
-    assert len([path for path in tmp_path.iterdir() if path.is_dir()]) >= 2
+    assert recorder.recording_id == "r1"
+    segments = list((tmp_path / "r1").glob("segment-*.cast"))
+    assert 1 <= len(segments) < 6
+    assert sum(path.stat().st_size for path in segments) <= 2048
     recorder.close()
 
 

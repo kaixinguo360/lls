@@ -1,7 +1,7 @@
 """终端录制：原始终端 I/O 的单一事实来源。
 
-录制格式接近 asciinema：时间、通道、原始字节。索引把 ``recording:frame``
-映射到未压缩流里的字节位置；关闭录制时可选 gzip，减少长期占用。
+一次启动对应一个 recording id；录制内部按大小分段。达到单次上限时丢弃
+本次最早的分段，保留最新内容；关闭或分段结束时可选 gzip 压缩。
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def parse_ref(value: str) -> TerminalRef:
 
 
 class TerminalRecorder:
-    """把终端 I/O 写成可滚动、可压缩的 ``stream.cast`` + ``index.jsonl``。"""
+    """把一次终端启动写成同一 recording 下的多个分段。"""
 
     def __init__(
         self,
@@ -61,118 +61,120 @@ class TerminalRecorder:
         max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
     ) -> None:
         self.root = Path(root)
-        self._base_id = recording_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        self.recording_id = recording_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         if recording_id is None:
-            self._base_id += "-" + secrets.token_hex(4)
+            self.recording_id += "-" + secrets.token_hex(4)
         self._compress = compress
         self._max_recording_bytes = max(1024, int(max_recording_bytes))
         self._max_total_bytes = max(0, int(max_total_bytes))
         self._lock = threading.RLock()
         self._closed = False
-        self._part = 0
-        self.recording_id = ""
-        self.dir: Path
         self._frame = 0
-        self._started = 0.0
-        self._stream = None
-        self._index = None
-        self._open_part()
-
-    # ---- 生命周期 ----
-
-    def _open_part(self) -> None:
-        self._part += 1
-        self.recording_id = (
-            self._base_id if self._part == 1 else "{}-{}".format(self._base_id, self._part)
-        )
+        self._segment_no = 0
+        self._segments: list[str] = []
+        self._created_at = time.time()
         self.dir = self.root / self.recording_id
         self.dir.mkdir(parents=True, exist_ok=True)
-        self._stream = (self.dir / "stream.cast").open("a", encoding="utf-8", newline="\n")
         self._index = (self.dir / "index.jsonl").open("a", encoding="utf-8", newline="\n")
-        self._frame = 0
+        self._open_segment()
+
+    # ---- 分段 ----
+
+    def _segment_name(self, no: int) -> str:
+        return "segment-{:06d}.cast".format(no)
+
+    def _segment_path(self, name: str) -> Path:
+        return self.dir / name
+
+    def _open_segment(self) -> None:
+        self._segment_no += 1
+        name = self._segment_name(self._segment_no)
+        self._stream_name = name
+        self._stream = (self.dir / name).open("a", encoding="utf-8", newline="\n")
         self._started = time.monotonic()
-        created = time.time()
-        self._write_meta({"version": 1, "id": self.recording_id, "created_at": created})
+        self._segments.append(name)
         self._append_line(
             self._stream,
-            {"version": 1, "id": self.recording_id, "created_at": created},
-        )
-
-    def _write_meta(self, extra: dict) -> None:
-        (self.dir / "meta.json").write_text(
-            json.dumps(extra, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-
-    def close(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._finish_part()
-            self._prune()
-
-    def _finish_part(self) -> None:
-        if self._stream is None or self._index is None:
-            return
-        size = self._stream.tell()
-        self._stream.close()
-        self._index.close()
-        self._stream = None
-        self._index = None
-        if self._compress:
-            source = self.dir / "stream.cast"
-            target = self.dir / "stream.cast.gz"
-            with source.open(encoding="utf-8") as reader, gzip.open(
-                target, "wt", encoding="utf-8", compresslevel=6
-            ) as writer:
-                shutil.copyfileobj(reader, writer)
-            source.unlink()
-        self._write_meta(
             {
                 "version": 1,
                 "id": self.recording_id,
-                "created_at": self._created_at(),
-                "bytes": size,
-                "compressed": self._compress,
-                "frames": self._frame,
-            }
+                "segment": name,
+                "created_at": self._created_at,
+            },
+        )
+        self._write_meta()
+
+    def _close_segment(self) -> None:
+        if self._stream is None:
+            return
+        self._stream.close()
+        self._stream = None
+        path = self._segment_path(self._stream_name)
+        final = path
+        if self._compress:
+            final = path.with_suffix(".cast.gz")
+            with path.open(encoding="utf-8") as reader, gzip.open(
+                final, "wt", encoding="utf-8", compresslevel=6
+            ) as writer:
+                shutil.copyfileobj(reader, writer)
+            path.unlink()
+            self._segments = [
+                final.name if item == self._stream_name else item for item in self._segments
+            ]
+        self._write_meta()
+
+    def _drop_segment(self, name: str) -> None:
+        path = self._segment_path(name)
+        path.unlink(missing_ok=True)
+        self._segments.remove(name)
+        self._index.flush()
+        self._index.close()
+        kept = []
+        for line in (self.dir / "index.jsonl").read_text(encoding="utf-8").splitlines():
+            item = json.loads(line)
+            if item.get("segment") != name:
+                kept.append(line)
+        (self.dir / "index.jsonl").write_text(
+            "\n".join(kept) + ("\n" if kept else ""), encoding="utf-8"
+        )
+        self._index = (self.dir / "index.jsonl").open("a", encoding="utf-8", newline="\n")
+        self._write_meta()
+
+    def _segment_bytes(self) -> int:
+        return sum(
+            self._segment_path(name).stat().st_size
+            for name in self._segments
+            if self._segment_path(name).is_file()
         )
 
-    def _created_at(self) -> float:
-        try:
-            return float(
-                json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))["created_at"]
-            )
-        except (OSError, ValueError, KeyError):
-            return time.time()
+    def _prune_segments(self) -> None:
+        while len(self._segments) > 1 and self._segment_bytes() > self._max_recording_bytes:
+            self._drop_segment(self._segments[0])
 
     def _rotate(self) -> None:
-        self._finish_part()
-        self._prune()
-        self._open_part()
+        self._close_segment()
+        self._prune_segments()
+        self._open_segment()
 
-    def _prune(self) -> None:
-        if self._max_total_bytes <= 0:
-            return
-        entries = []
-        for path in self.root.iterdir():
-            if not path.is_dir():
-                continue
-            try:
-                meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
-                created = float(meta["created_at"])
-            except (OSError, ValueError, KeyError):
-                continue
-            size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
-            entries.append((created, size, path))
-        total = sum(item[1] for item in entries)
-        for _, size, path in sorted(entries):
-            if total <= self._max_total_bytes:
-                break
-            if path == self.dir:
-                continue
-            shutil.rmtree(path, ignore_errors=True)
-            total -= size
+    # ---- 元数据 ----
+
+    def _write_meta(self) -> None:
+        (self.dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "id": self.recording_id,
+                    "created_at": self._created_at,
+                    "compressed": self._compress,
+                    "frames": self._frame,
+                    "segments": list(self._segments),
+                    "bytes": self._segment_bytes(),
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     # ---- 写入 ----
 
@@ -182,7 +184,7 @@ class TerminalRecorder:
             return TerminalRef(self.recording_id, self._frame)
 
     def record(self, channel: str, data: bytes | str) -> TerminalRef:
-        """写入一帧；大块输入按单次上限切帧，避免单帧突破上限。"""
+        """写入一帧；大块输入按单次上限切帧。"""
         if channel not in ("i", "o"):
             raise ValueError("channel must be 'i' or 'o'")
         payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
@@ -210,6 +212,7 @@ class TerminalRecorder:
             self._index,
             {
                 "frame": self._frame,
+                "segment": self._stream_name,
                 "time": event[0],
                 "offset": offset,
                 "channel": channel,
@@ -220,26 +223,63 @@ class TerminalRecorder:
         self._index.flush()
         return TerminalRef(self.recording_id, self._frame)
 
+    # ---- 生命周期 ----
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._close_segment()
+            self._prune_segments()
+            self._index.close()
+            self._prune_root()
+
+    def _prune_root(self) -> None:
+        if self._max_total_bytes <= 0:
+            return
+        entries = []
+        for path in self.root.iterdir():
+            if not path.is_dir():
+                continue
+            try:
+                meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
+                created = float(meta["created_at"])
+            except (OSError, ValueError, KeyError):
+                continue
+            size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+            entries.append((created, size, path))
+        total = sum(item[1] for item in entries)
+        for _, size, path in sorted(entries):
+            if total <= self._max_total_bytes:
+                break
+            if path == self.dir:
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            total -= size
+
     # ---- 读取 ----
 
     def iter_events(self) -> Iterator[dict]:
-        """按顺序读回当前分段，兼容未压缩与 gzip。"""
-        plain = self.dir / "stream.cast"
-        packed = self.dir / "stream.cast.gz"
-        if packed.is_file():
-            handle_cm = gzip.open(packed, "rt", encoding="utf-8")
-        else:
-            handle_cm = plain.open(encoding="utf-8")
-        with handle_cm as handle:
-            for line in handle:
-                item = json.loads(line)
-                if isinstance(item, dict):
-                    continue
-                yield {
-                    "time": item[0],
-                    "channel": item[1],
-                    "data": base64.b64decode(item[2]),
-                }
+        """按分段顺序读回事件，兼容未压缩与 gzip。"""
+        for name in list(self._segments):
+            path = self._segment_path(name)
+            if not path.is_file():
+                continue
+            if path.suffix == ".gz":
+                handle_cm = gzip.open(path, "rt", encoding="utf-8")
+            else:
+                handle_cm = path.open(encoding="utf-8")
+            with handle_cm as handle:
+                for line in handle:
+                    item = json.loads(line)
+                    if isinstance(item, dict):
+                        continue
+                    yield {
+                        "time": item[0],
+                        "channel": item[1],
+                        "data": base64.b64decode(item[2]),
+                    }
 
     @staticmethod
     def _append_line(handle, value: object) -> None:

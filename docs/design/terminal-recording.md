@@ -79,10 +79,13 @@ PTY 写入/读取时实时记录：
 `paths.recordings_dir` 与 `paths.sessions_dir` 平级，默认是
 `paths.root / "recordings"`；相对路径按配置文件所在目录解析。
 
-`max_recording_bytes` 是单个录制分段的上限；超过时自动滚动到
-`<id>-2`、`<id>-3`。`max_total_bytes` 是整个 `recordings_dir` 的上限；
-关闭或滚动时按 `created_at` 从旧到新删除，当前活动分段不删。
-`compress: true` 在分段关闭时把 `stream.cast` 压成 `stream.cast.gz`。
+`max_recording_bytes` 是**一次启动的录制目录**上限；目录内按大小写成
+`segment-000001.cast` 等分段，超过上限时删除本次最早的分段，只保留最新
+内容。`recording_id` 始终不变，`terminal_cursor` 不会因为滚动换 id。
+
+`max_total_bytes` 是整个 `recordings_dir` 的上限；关闭或滚动时按
+`created_at` 从旧到新删除整个旧录制目录，当前活动录制不删。
+`compress: true` 在分段关闭时把 `.cast` 压成 `.cast.gz`。
 
 ## 边界
 
