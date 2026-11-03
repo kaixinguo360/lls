@@ -299,8 +299,22 @@ class TerminalRecorder:
                 break
             if path == self.dir:
                 continue
+            self._tombstone(path.name)
             shutil.rmtree(path, ignore_errors=True)
             total -= size
+
+    def _tombstone(self, recording_id: str) -> None:
+        path = self.root / "tombstones.jsonl"
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                json.dumps(
+                    {"recording_id": recording_id, "deleted_at": time.time()},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
 
     # ---- 读取 ----
 

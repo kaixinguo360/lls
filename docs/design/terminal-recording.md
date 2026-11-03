@@ -104,3 +104,5 @@ PTY 写入/读取时实时记录：
 - 崩溃恢复：启动时清掉 `.tmp`，校验并丢弃半份 gzip，保留完整明文或完整 gzip。
 - 读取时会跳过损坏的尾行；不把半帧当成成功事件。
 - `meta.retained_from` 表示当前录制仍保留的最小 frame；更早引用已不可解析。
+- 整个录制被总量上限删除时，`recordings_dir/tombstones.jsonl` 留下
+  `recording_id` 与删除时间，供引用解析器判断“已删除”而不是“文件丢失”。
