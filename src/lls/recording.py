@@ -142,10 +142,29 @@ class TerminalRecorder:
                 shutil.copyfileobj(reader, writer)
             os.replace(temp, final)
             path.unlink(missing_ok=True)
+            self._rewrite_index(self._stream_name, final.name)
             self._segments = [
                 final.name if item == self._stream_name else item for item in self._segments
             ]
         self._write_meta()
+
+    def _rewrite_index(self, old: str, new: str) -> None:
+        self._index.flush()
+        self._index.close()
+        index = self.dir / "index.jsonl"
+        kept = []
+        for line in index.read_text(encoding="utf-8").splitlines():
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if item.get("segment") == old:
+                item["segment"] = new
+            kept.append(json.dumps(item, ensure_ascii=False))
+        temp = index.with_name(index.name + ".tmp")
+        temp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        os.replace(temp, index)
+        self._index = index.open("a", encoding="utf-8", newline="\n")
 
     def _drop_segment(self, name: str) -> None:
         path = self._segment_path(name)
