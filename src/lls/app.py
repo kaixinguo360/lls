@@ -72,7 +72,12 @@ def run_interactive(command: list[str]) -> int:
         from .ai.sessions import store
         from .recording import TerminalRecorder
 
-        recorder = TerminalRecorder(config.paths.recordings_dir)
+        recorder = TerminalRecorder(
+            config.paths.recordings_dir,
+            compress=config.recording.compress,
+            max_recording_bytes=config.recording.max_recording_bytes,
+            max_total_bytes=config.recording.max_total_bytes,
+        )
         store().set_terminal(lambda: recorder.current_ref)
     backend = make_backend()
     engine = Engine(

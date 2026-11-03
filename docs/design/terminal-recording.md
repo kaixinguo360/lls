@@ -62,6 +62,9 @@ paths:
 
 recording:
   enabled: false
+  compress: true
+  max_recording_bytes: 67108864
+  max_total_bytes: 1073741824
 ```
 
 默认关闭。开启后由 `run_interactive` 创建 `TerminalRecorder`，引擎在每次
@@ -75,6 +78,11 @@ PTY 写入/读取时实时记录：
 这是真实子进程字节，不是屏幕重绘，也不是 bash 工具临时目录里的输出。
 `paths.recordings_dir` 与 `paths.sessions_dir` 平级，默认是
 `paths.root / "recordings"`；相对路径按配置文件所在目录解析。
+
+`max_recording_bytes` 是单个录制分段的上限；超过时自动滚动到
+`<id>-2`、`<id>-3`。`max_total_bytes` 是整个 `recordings_dir` 的上限；
+关闭或滚动时按 `created_at` 从旧到新删除，当前活动分段不删。
+`compress: true` 在分段关闭时把 `stream.cast` 压成 `stream.cast.gz`。
 
 ## 边界
 

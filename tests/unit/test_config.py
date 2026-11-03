@@ -160,3 +160,15 @@ def test_recording_can_be_enabled(tmp_path: Path) -> None:
     cfg = load(path, emit_warnings=False)
     assert cfg.recording.enabled is True
     assert cfg.paths.recordings_dir == tmp_path / "tapes"
+
+
+def test_recording_limits_are_parsed(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "recording:\n  enabled: true\n  compress: false\n"
+        "  max_recording_bytes: 1024\n  max_total_bytes: 4096\n",
+    )
+    cfg = load(path, emit_warnings=False)
+    assert cfg.recording.compress is False
+    assert cfg.recording.max_recording_bytes == 1024
+    assert cfg.recording.max_total_bytes == 4096

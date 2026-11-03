@@ -1,17 +1,15 @@
-"""终端录制与 bash 工具引用。"""
+"""终端录制、压缩、滚动与事件引用。"""
 
 from __future__ import annotations
 
-import asyncio
 import json
 
-from lls.ai.tools.shell import Shell, bash
 from lls.ai.sessions import SessionStore
 from lls.recording import TerminalRecorder, TerminalRef, parse_ref
 
 
 def test_recording_roundtrip(tmp_path) -> None:
-    recorder = TerminalRecorder(tmp_path, recording_id="r1")
+    recorder = TerminalRecorder(tmp_path, recording_id="r1", compress=False)
     first = recorder.record("i", "echo hi\n")
     second = recorder.record("o", b"hi\n")
     recorder.close()
@@ -28,6 +26,51 @@ def test_recording_roundtrip(tmp_path) -> None:
     index = (tmp_path / "r1" / "index.jsonl").read_text(encoding="utf-8").splitlines()
     assert json.loads(index[1])["frame"] == 2
 
+
+def test_compression_removes_plain_stream(tmp_path) -> None:
+    recorder = TerminalRecorder(tmp_path, recording_id="r1", compress=True)
+    recorder.record("o", b"hello\n")
+    recorder.close()
+    assert not (tmp_path / "r1" / "stream.cast").exists()
+    assert (tmp_path / "r1" / "stream.cast.gz").is_file()
+    assert list(recorder.iter_events())[0]["data"] == b"hello\n"
+
+
+def test_recording_rolls_at_single_file_limit(tmp_path) -> None:
+    recorder = TerminalRecorder(
+        tmp_path,
+        recording_id="r1",
+        compress=False,
+        max_recording_bytes=1024,
+        max_total_bytes=0,
+    )
+    recorder.record("o", b"x" * 3000)
+    assert recorder.recording_id != "r1"
+    assert len([path for path in tmp_path.iterdir() if path.is_dir()]) >= 2
+    recorder.close()
+
+
+def test_total_limit_prunes_old_recordings(tmp_path) -> None:
+    first = TerminalRecorder(
+        tmp_path,
+        recording_id="old",
+        compress=False,
+        max_recording_bytes=10_000,
+        max_total_bytes=1,
+    )
+    first.record("o", b"x" * 100)
+    first.close()
+    second = TerminalRecorder(
+        tmp_path,
+        recording_id="new",
+        compress=False,
+        max_recording_bytes=10_000,
+        max_total_bytes=1,
+    )
+    second.record("o", b"x" * 100)
+    second.close()
+    assert not (tmp_path / "old").exists()
+    assert (tmp_path / "new").is_dir()
 
 
 def test_every_event_carries_current_terminal_cursor(tmp_path) -> None:

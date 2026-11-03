@@ -90,9 +90,12 @@ class InputCompletionConfig:
 
 @dataclass(frozen=True)
 class RecordingConfig:
-    """``recording`` 段：是否录制真实 PTY 的输入输出。"""
+    """``recording`` 段：PTY 录制开关与磁盘上限。"""
 
     enabled: bool = False
+    compress: bool = True
+    max_recording_bytes: int = 64 * 1024 * 1024
+    max_total_bytes: int = 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -346,9 +349,29 @@ def _parse_paths(
 
 def _parse_recording(raw: Mapping[str, Any], notes: list[str]) -> RecordingConfig:
     section = _mapping(raw, "recording", notes)
-    _unknown(section, {"enabled"}, "recording.", notes)
+    _unknown(
+        section,
+        {"enabled", "compress", "max_recording_bytes", "max_total_bytes"},
+        "recording.",
+        notes,
+    )
     return RecordingConfig(
-        enabled=_bool_value(section.get("enabled"), "recording.enabled", False, notes)
+        enabled=_bool_value(section.get("enabled"), "recording.enabled", False, notes),
+        compress=_bool_value(
+            section.get("compress"), "recording.compress", True, notes
+        ),
+        max_recording_bytes=_positive_int(
+            section.get("max_recording_bytes"),
+            "recording.max_recording_bytes",
+            64 * 1024 * 1024,
+            notes,
+        ),
+        max_total_bytes=_positive_int(
+            section.get("max_total_bytes"),
+            "recording.max_total_bytes",
+            1024 * 1024 * 1024,
+            notes,
+        ),
     )
 
 
