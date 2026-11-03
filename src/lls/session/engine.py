@@ -180,8 +180,10 @@ class Engine:
         initial_handler: str,
         history: HistoryStore | None = None,
         completion_style: str = "ghost",
+        recorder: TerminalRecorder | None = None,
     ) -> None:
         self._backend = backend
+        self._recorder = recorder
         self._argv = argv
         self.screen = screen
         self._handlers = handlers
@@ -413,6 +415,8 @@ class Engine:
         if not data:
             self._on_child_exit()
             return
+        if self._recorder is not None:
+            self._recorder.record("o", data)
         if self._console is None:
             self.screen.feed(data)
             return
@@ -840,6 +844,8 @@ class Engine:
             return
         try:
             self._pty.write(data)
+            if self._recorder is not None:
+                self._recorder.record("i", data)
         except OSError as e:
             if e.errno == errno.EIO:
                 self._on_child_exit()

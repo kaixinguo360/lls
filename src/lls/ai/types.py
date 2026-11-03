@@ -18,7 +18,6 @@ __all__ = [
     "Tool",
     "ToolCall",
     "ToolCallDelta",
-    "ToolResult",
 ]
 
 
@@ -73,14 +72,6 @@ class Tool:
 
 
 @dataclass(frozen=True)
-class ToolResult:
-    """工具执行结果：给模型的正文 + 只写入会话的元数据。"""
-
-    content: str
-    meta: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
 class Message:
     """一条 chat 消息。"""
 
@@ -95,9 +86,6 @@ class Message:
 
     tool_call_id: str | None = None
     """tool 消息回应的那次调用。"""
-
-    meta: dict[str, Any] = field(default_factory=dict)
-    """工具结果附带的会话元数据；不进入模型请求。"""
 
     def to_payload(self) -> dict[str, Any]:
         """转成请求体里的一条消息。"""

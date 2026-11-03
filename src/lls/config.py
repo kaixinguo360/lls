@@ -25,6 +25,7 @@ __all__ = [
     "InputHistoryConfig",
     "MINIMAL_EXAMPLE",
     "PathsConfig",
+    "RecordingConfig",
     "configure",
     "load",
     "load_ai",
@@ -64,6 +65,7 @@ class PathsConfig:
     root: Path
     sessions_dir: Path
     history_dir: Path
+    recordings_dir: Path
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,13 @@ class InputCompletionConfig:
 
 
 @dataclass(frozen=True)
+class RecordingConfig:
+    """``recording`` 段：是否录制真实 PTY 的输入输出。"""
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """一次配置读取的结果。
 
@@ -100,6 +109,7 @@ class AppConfig:
     paths: PathsConfig
     input_history: InputHistoryConfig
     input_completion: InputCompletionConfig
+    recording: RecordingConfig = RecordingConfig()
     ai: Any = None
     ai_error: str | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
@@ -291,7 +301,12 @@ def _parse_paths(
 ) -> PathsConfig:
     """三个路径共用同一个 base（配置文件所在目录），别各解各的相对路径。"""
     section = _mapping(raw, "paths", notes)
-    _unknown(section, {"root", "sessions_dir", "history_dir"}, "paths.", notes)
+    _unknown(
+        section,
+        {"root", "sessions_dir", "history_dir", "recordings_dir"},
+        "paths.",
+        notes,
+    )
     base = target.parent
     root = _path_value(
         section.get("root"),
@@ -314,7 +329,27 @@ def _parse_paths(
         base,
         notes,
     )
-    return PathsConfig(root=root, sessions_dir=sessions_dir, history_dir=history_dir)
+    recordings_dir = _path_value(
+        section.get("recordings_dir"),
+        "paths.recordings_dir",
+        root / "recordings",
+        base,
+        notes,
+    )
+    return PathsConfig(
+        root=root,
+        sessions_dir=sessions_dir,
+        history_dir=history_dir,
+        recordings_dir=recordings_dir,
+    )
+
+
+def _parse_recording(raw: Mapping[str, Any], notes: list[str]) -> RecordingConfig:
+    section = _mapping(raw, "recording", notes)
+    _unknown(section, {"enabled"}, "recording.", notes)
+    return RecordingConfig(
+        enabled=_bool_value(section.get("enabled"), "recording.enabled", False, notes)
+    )
 
 
 def _parse_input_history(
@@ -389,13 +424,14 @@ def load(path: str | None = None, *, emit_warnings: bool = True) -> AppConfig:
     raw = _apply_overrides(raw, _CLI_OVERRIDES)
     _unknown(
         raw,
-        {"paths", "input_history", "input_completion", "ai"},
+        {"paths", "input_history", "input_completion", "recording", "ai"},
         "",
         notes,
     )
     paths = _parse_paths(raw, target, notes)
     input_history = _parse_input_history(raw, notes)
     input_completion = _parse_input_completion(raw, notes)
+    recording = _parse_recording(raw, notes)
     ai = None
     if ai_error is None:
         try:
@@ -416,6 +452,7 @@ def load(path: str | None = None, *, emit_warnings: bool = True) -> AppConfig:
         paths=paths,
         input_history=input_history,
         input_completion=input_completion,
+        recording=recording,
         ai=ai,
         ai_error=ai_error,
         warnings=tuple(notes),
@@ -433,7 +470,7 @@ def load_ai(path: str | None = None, *, emit_warnings: bool = True) -> Any:
     raw = _apply_overrides(raw, _CLI_OVERRIDES)
     _unknown(
         raw,
-        {"paths", "input_history", "input_completion", "ai"},
+        {"paths", "input_history", "input_completion", "recording", "ai"},
         "",
         notes,
     )

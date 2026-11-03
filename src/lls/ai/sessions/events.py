@@ -355,15 +355,7 @@ def fold(
             )
             text = message.content or ""
             call_id = _tool_call_id(event)
-            meta = event.data.get("meta") if isinstance(event.data, dict) else None
-            messages.append(
-                Message(
-                    "tool",
-                    text,
-                    tool_call_id=call_id,
-                    meta=dict(meta) if isinstance(meta, dict) else {},
-                )
-            )
+            messages.append(Message("tool", text, tool_call_id=call_id))
             if marks is not None:
                 marks.append(event.seq)
             pending[:] = [item for item in pending if item[1] != call_id]

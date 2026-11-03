@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from lls.ai.tools.shell import Shell, bash
+from lls.ai.sessions import SessionStore
 from lls.recording import TerminalRecorder, TerminalRef, parse_ref
 
 
@@ -28,21 +29,19 @@ def test_recording_roundtrip(tmp_path) -> None:
     assert json.loads(index[1])["frame"] == 2
 
 
-def test_bash_records_and_returns_ref(tmp_path) -> None:
-    recorder = TerminalRecorder(tmp_path, recording_id="r2")
-    shell = Shell(str(tmp_path), recorder=recorder)
-    result = asyncio.run(bash({"command": "printf hi", "cwd": "", "timeout": 10}, shell))
-    recorder.close()
 
-    assert result.content.startswith("（退出码 0")
-    assert result.meta["terminal_ref"].startswith("r2:")
-    assert shell.last_ref is not None
-    assert events_have(recorder, "i", b"printf hi\n")
-    assert events_have(recorder, "o", b"hi")
-
-
-def events_have(recorder: TerminalRecorder, channel: str, data: bytes) -> bool:
-    return any(
-        event["channel"] == channel and data in event["data"]
-        for event in recorder.iter_events()
-    )
+def test_every_event_carries_current_terminal_cursor(tmp_path) -> None:
+    store = SessionStore(root=tmp_path)
+    store.set_terminal(lambda: TerminalRef("r", 7))
+    session = store.create("p", "m")
+    session.append_user("hello")
+    refs = [
+        event.data["lls"]["terminal_cursor"]
+        for event in session.events()
+        if isinstance(event.data.get("lls"), dict)
+        and "terminal_cursor" in event.data["lls"]
+    ]
+    assert refs
+    assert refs[0] == {"recording_id": "r", "frame": 7}
+    session.close()
+    store.set_terminal(None)

@@ -71,6 +71,12 @@ class TerminalRecorder:
             {"version": 1, "id": self.recording_id, "created_at": time.time()},
         )
 
+    @property
+    def current_ref(self) -> TerminalRef:
+        """当前写到的帧；没有帧时是 0，便于每个事件都有引用。"""
+        with self._lock:
+            return TerminalRef(self.recording_id, self._frame)
+
     def record(self, channel: str, data: bytes | str) -> TerminalRef:
         """写入一帧；``channel`` 只用 ``i``（输入）和 ``o``（输出）。"""
         if channel not in ("i", "o"):

@@ -145,3 +145,18 @@ def test_completion_style_accepts_redis_and_rejects_typos(tmp_path: Path) -> Non
     cfg = load(bad, emit_warnings=False)
     assert cfg.input_completion.style == "ghost"
     assert any("input_completion.style" in note for note in cfg.warnings)
+
+def test_recording_is_off_by_default(tmp_path: Path) -> None:
+    cfg = load(tmp_path / "missing.yaml", emit_warnings=False)
+    assert cfg.recording.enabled is False
+    assert cfg.paths.recordings_dir == cfg.paths.root / "recordings"
+
+
+def test_recording_can_be_enabled(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "recording:\n  enabled: true\npaths:\n  recordings_dir: tapes\n",
+    )
+    cfg = load(path, emit_warnings=False)
+    assert cfg.recording.enabled is True
+    assert cfg.paths.recordings_dir == tmp_path / "tapes"

@@ -1797,7 +1797,6 @@ class _Session:
                 self._turn_no,
                 self._step,
                 self._call_seqs.get(call_id, 0),
-                message.meta,
             )
 
     def _finish_turn(self, status: str, note: str, window: Any, usage: Any) -> None:

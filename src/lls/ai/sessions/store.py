@@ -370,6 +370,21 @@ class Session:
 
     # ---- 追加 ----
 
+    def _with_terminal(self, data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        provider = self._store.terminal
+        if provider is None:
+            return data
+        ref = provider()
+        if ref is None:
+            return data
+        out = dict(data or {})
+        lls = out.get("lls")
+        if not isinstance(lls, dict):
+            lls = {}
+            out["lls"] = lls
+        lls["terminal_cursor"] = {"recording_id": ref.recording, "frame": ref.frame}
+        return out
+
     def append(
         self,
         kind: str,
@@ -385,6 +400,7 @@ class Session:
         """
         if self._closed:
             raise SessionError("会话 {} 已关闭".format(self.id))
+        data = self._with_terminal(data)
         if kind == "session":
             event = Event(type=kind, data=dict(data or {}))
         else:
@@ -764,7 +780,7 @@ class Session:
 
     def history(self) -> List[Message]:
         """折成送模型的消息；配对不全的 tool_calls 已由 fold 清理。"""
-        return fold(self.recent(), self._read_blob)
+        return fold(self.recent(), self.read_blob)
 
     def log(self, keep: int = 2) -> List[tuple]:
         """覆盖层的最近 ``keep`` 条：从尾部往回找到够数的轮次为止。"""
@@ -777,12 +793,12 @@ class Session:
                 tasks += 1
             return tasks > wanted
 
-        return log_entries(self._from_end(enough), keep, self._read_blob)
+        return log_entries(self._from_end(enough), keep, self.read_blob)
 
     def history_marks(self) -> tuple:
         """消息 + 每条来自的 ``seq``；压缩时按它算裁到哪一条。"""
         marks: List[int] = []
-        messages = fold(self.recent(), self._read_blob, marks)
+        messages = fold(self.recent(), self.read_blob, marks)
         return messages, marks
 
     def compacted_upto(self) -> int:
@@ -843,9 +859,6 @@ class Session:
 
     def read_blob(self, digest: str) -> Optional[str]:
         """读回一个内容块；供导出、回放等只读消费者使用。"""
-        return self._read_blob(digest)
-
-    def _read_blob(self, digest: str) -> Optional[str]:
         path = self.path / BLOB_DIR / digest
         try:
             return path.read_text(encoding="utf-8")
@@ -884,6 +897,7 @@ class SessionStore:
             self.temporary = False
         self._keep = max(1, int(keep))
         self._open: Dict[str, Session] = {}
+        self.terminal: Optional[Callable[[], Any]] = None
         self.last_error: Optional[str] = None
         self._index: Dict[str, Any] = {}
         self._read_index()
@@ -893,6 +907,9 @@ class SessionStore:
         return self._root
 
     # ---- 打开与创建 ----
+
+    def set_terminal(self, provider: Optional[Callable[[], Any]]) -> None:
+        self.terminal = provider
 
     def create(
         self,

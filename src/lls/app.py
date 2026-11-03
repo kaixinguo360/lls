@@ -66,6 +66,14 @@ def run_interactive(command: list[str]) -> int:
         size = os.terminal_size((80, 24))
     screen = PyteScreenModel(rows=size.lines, columns=size.columns)
 
+    config = load_config()
+    recorder = None
+    if config.recording.enabled:
+        from .ai.sessions import store
+        from .recording import TerminalRecorder
+
+        recorder = TerminalRecorder(config.paths.recordings_dir)
+        store().set_terminal(lambda: recorder.current_ref)
     backend = make_backend()
     engine = Engine(
         backend,
@@ -74,7 +82,8 @@ def run_interactive(command: list[str]) -> int:
         build_handlers(),
         "default",
         history=history_from_config(_current_session_id),
-        completion_style=load_config().input_completion.style,
+        completion_style=config.input_completion.style,
+        recorder=recorder,
     )
 
     try:
@@ -82,3 +91,9 @@ def run_interactive(command: list[str]) -> int:
     except RuntimeError as e:
         print(f"lls: {e}", file=sys.stderr)
         return 1
+    finally:
+        if recorder is not None:
+            from .ai.sessions import store
+
+            store().set_terminal(None)
+            recorder.close()

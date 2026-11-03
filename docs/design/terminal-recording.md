@@ -5,7 +5,7 @@
 - 复现一次终端会话；
 - 给离线训练提供 `(历史, 输入, 输出)` 样本。
 
-录制与 LLS 会话解耦：录制层有自己的 ID 和索引，会话事件只存一个引用字符串。
+录制与 LLS 会话解耦：录制层有自己的 ID 和索引，会话事件只存当前帧引用。
 
 ## 目录
 
@@ -39,30 +39,50 @@ o  输出
 
 ## 引用
 
-会话事件只存一个字符串：
+每个事件在 `lls.terminal_cursor` 记录事件发生时的录制位置：
 
 ```json
-"meta": {"terminal_ref": "20261103T010203Z-7f3a:1"}
+{"recording_id": "20261103T010203Z-7f3a", "frame": 1}
 ```
 
-解析规则是最后一个冒号之前为 recording id，之后为 frame。  
-引用不存 offset、hash、起止区间；这些由录制层维护。
+`frame` 是单调递增的录制帧号；`index.jsonl` 把它映射到时间、字节偏移和通道。
+引用不是内容区间，也不保存正文、offset 或 hash。
 
-## Shell 集成
+## 事件覆盖
 
-`Shell` 可选接收 `TerminalRecorder`。开启后：
+开启录制后，`Session.append` 在写入事件前读取 `TerminalRecorder.current_ref`，
+所有事件都带同一个结构：`session`、`turn/*`、`step/*`、`system/message`、
+`user/message`、`assistant/message`、`tool/call`、`tool/result`、`lls/*`。
 
-- 执行前记录一条 `i`；
-- 结束后记录 stdout、stderr 的原始字节为 `o`；
-- 工具结果通过 `ToolResult.meta["terminal_ref"]` 返回最后一个输出帧；
-- 工具正文仍按原有预算裁剪，录制内容不受裁剪影响。
+## 配置
 
-`Agent` 把 `ToolResult.meta` 写入 `Message.meta`，会话层落到
-`tool/result.data.meta`；历史回放时再带回 `Message.meta`。
+```yaml
+paths:
+  recordings_dir: ~/.local/lls/recordings
+
+recording:
+  enabled: false
+```
+
+默认关闭。开启后由 `run_interactive` 创建 `TerminalRecorder`，引擎在每次
+PTY 写入/读取时实时记录：
+
+```text
+写子进程 → i
+读子进程 → o
+```
+
+这是真实子进程字节，不是屏幕重绘，也不是 bash 工具临时目录里的输出。
+`paths.recordings_dir` 与 `paths.sessions_dir` 平级，默认是
+`paths.root / "recordings"`；相对路径按配置文件所在目录解析。
 
 ## 边界
 
 - 只记录终端字节，不记录文件系统、任务或模型上下文。
 - 录制内容不进入模型请求。
-- 录制默认关闭；调用方显式传入 `TerminalRecorder` 才启用。
+- 录制默认关闭；只有 `recording.enabled: true` 才创建录制器。
+- 每个 session 事件在 `lls.terminal_cursor` 记录当前帧引用：
+  `{"recording_id": "<id>", "frame": <n>}`。
+- 引用是“事件发生时的录制位置”，不是内容区间。
+- 录制不归属 session；删除 session 不删除录制。
 - 压缩、快照、反事实分支不在当前实现内。
