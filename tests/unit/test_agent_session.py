@@ -788,8 +788,8 @@ def test_painter_says_what_it_is_doing_at_each_phase() -> None:
         "(agent) preparing...",
         "(agent) compacting...",
         "(agent) awaiting reply...",
-        "(agent) replying...",
-        "(agent) replying...",      # 再来一段正文不再换相
+        "(agent) replying... 好",
+        "(agent) replying... 好好",  # 正文持续追加，不换相
     ]
 
 

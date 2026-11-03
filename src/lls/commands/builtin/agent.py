@@ -457,6 +457,7 @@ class _Painter:
         self._phase = PREPARING
         self._action = ""
         self._think = ""
+        self._reply = ""
         self._call = ""
         self._call_name = ""
         self._started = 0.0
@@ -500,15 +501,19 @@ class _Painter:
             self._call = ""
             self._call_name = ""
             self._think = ""
+            self._reply = ""
             self._phase = AWAITING
             self._calling = False
             self.refresh(force=True)
         elif event.kind is AgentEventKind.TEXT:
-            # 正文开始了，推理是过去式：别让它继续占那一行。
+            # 正文开始了，推理是过去式；正文本身也要像推理一样跟着流走。
             self._think = ""
+            self._reply = (self._reply + event.text)[-400:]
             if self._phase != REPLYING:
                 self._phase = REPLYING
                 self.refresh(force=True)
+            else:
+                self.refresh()
         elif event.kind is AgentEventKind.REASONING:
             self._think = (self._think + event.text)[-400:]
             if self._phase == AWAITING:
@@ -558,6 +563,9 @@ class _Painter:
             action = "{} · {:.1f}s".format(action, now - self._started)
         if action:
             line = _line(prefix, action, columns)
+        elif self._reply:
+            # 正文流和推理一样贴着状态词滚动；只保留最后一段，避免一行太长。
+            line = _tail_line(prefix + self._phase + " ", self._reply, columns)
         elif self._think:
             # 推理不另占一行：接在当前这一相后面，超宽时留末尾 —— 读的人关心
             # 最新想到哪。状态词短，让它留在前头，否则这行只剩没头没尾的碎字。
