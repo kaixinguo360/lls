@@ -65,6 +65,7 @@ recording:
   compress: true
   max_recording_bytes: 67108864
   max_total_bytes: 1073741824
+  fsync: true
 ```
 
 默认关闭。开启后由 `run_interactive` 创建 `TerminalRecorder`，引擎在每次
@@ -87,6 +88,9 @@ PTY 写入/读取时实时记录：
 `created_at` 从旧到新删除整个旧录制目录，当前活动录制不删。
 `compress: true` 在分段关闭时把 `.cast` 压成 `.cast.gz`。
 
+`fsync: true` 在每帧写完后同步 `stream` 与 `index`；这是崩溃安全与吞吐的
+取舍，默认开启。关闭压缩或 fsync 后性能更好，但断电/崩溃窗口更大。
+
 ## 边界
 
 - 只记录终端字节，不记录文件系统、任务或模型上下文。
@@ -96,4 +100,7 @@ PTY 写入/读取时实时记录：
   `{"recording_id": "<id>", "frame": <n>}`。
 - 引用是“事件发生时的录制位置”，不是内容区间。
 - 录制不归属 session；删除 session 不删除录制。
-- 压缩、快照、反事实分支不在当前实现内。
+- 压缩、滚动、留存上限已实现；快照、反事实分支不在当前实现内。
+- 崩溃恢复：启动时清掉 `.tmp`，校验并丢弃半份 gzip，保留完整明文或完整 gzip。
+- 读取时会跳过损坏的尾行；不把半帧当成成功事件。
+- `meta.retained_from` 表示当前录制仍保留的最小 frame；更早引用已不可解析。

@@ -59,6 +59,7 @@ class TerminalRecorder:
         compress: bool = True,
         max_recording_bytes: int = DEFAULT_MAX_RECORDING_BYTES,
         max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+        fsync: bool = True,
     ) -> None:
         self.root = Path(root)
         self.recording_id = recording_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -67,6 +68,7 @@ class TerminalRecorder:
         self._compress = compress
         self._max_recording_bytes = max(1024, int(max_recording_bytes))
         self._max_total_bytes = max(0, int(max_total_bytes))
+        self._fsync = fsync
         self._lock = threading.RLock()
         self._closed = False
         self._frame = 0
@@ -75,8 +77,25 @@ class TerminalRecorder:
         self._created_at = time.time()
         self.dir = self.root / self.recording_id
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._recover()
         self._index = (self.dir / "index.jsonl").open("a", encoding="utf-8", newline="\n")
         self._open_segment()
+
+    def _recover(self) -> None:
+        """清理崩溃残留：临时文件、半份压缩包。"""
+        for tmp in self.dir.glob("*.tmp"):
+            tmp.unlink(missing_ok=True)
+        for source in self.dir.glob("segment-*.cast"):
+            packed = source.with_suffix(".cast.gz")
+            if not packed.is_file():
+                continue
+            try:
+                with gzip.open(packed, "rt", encoding="utf-8") as handle:
+                    next(handle)
+            except (OSError, EOFError):
+                packed.unlink(missing_ok=True)
+                continue
+            source.unlink(missing_ok=True)
 
     # ---- 分段 ----
 
@@ -107,17 +126,22 @@ class TerminalRecorder:
     def _close_segment(self) -> None:
         if self._stream is None:
             return
+        self._stream.flush()
+        if self._fsync:
+            os.fsync(self._stream.fileno())
         self._stream.close()
         self._stream = None
         path = self._segment_path(self._stream_name)
         final = path
         if self._compress:
             final = path.with_suffix(".cast.gz")
+            temp = final.with_name(final.name + ".tmp")
             with path.open(encoding="utf-8") as reader, gzip.open(
-                final, "wt", encoding="utf-8", compresslevel=6
+                temp, "wt", encoding="utf-8", compresslevel=6
             ) as writer:
                 shutil.copyfileobj(reader, writer)
-            path.unlink()
+            os.replace(temp, final)
+            path.unlink(missing_ok=True)
             self._segments = [
                 final.name if item == self._stream_name else item for item in self._segments
             ]
@@ -125,19 +149,23 @@ class TerminalRecorder:
 
     def _drop_segment(self, name: str) -> None:
         path = self._segment_path(name)
-        path.unlink(missing_ok=True)
         self._segments.remove(name)
         self._index.flush()
         self._index.close()
         kept = []
         for line in (self.dir / "index.jsonl").read_text(encoding="utf-8").splitlines():
-            item = json.loads(line)
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
             if item.get("segment") != name:
                 kept.append(line)
-        (self.dir / "index.jsonl").write_text(
-            "\n".join(kept) + ("\n" if kept else ""), encoding="utf-8"
-        )
-        self._index = (self.dir / "index.jsonl").open("a", encoding="utf-8", newline="\n")
+        index = self.dir / "index.jsonl"
+        temp = index.with_name(index.name + ".tmp")
+        temp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+        os.replace(temp, index)
+        self._index = index.open("a", encoding="utf-8", newline="\n")
+        path.unlink(missing_ok=True)
         self._write_meta()
 
     def _segment_bytes(self) -> int:
@@ -159,7 +187,8 @@ class TerminalRecorder:
     # ---- 元数据 ----
 
     def _write_meta(self) -> None:
-        (self.dir / "meta.json").write_text(
+        temp = self.dir / "meta.json.tmp"
+        temp.write_text(
             json.dumps(
                 {
                     "version": 1,
@@ -167,6 +196,7 @@ class TerminalRecorder:
                     "created_at": self._created_at,
                     "compressed": self._compress,
                     "frames": self._frame,
+                    "retained_from": self._retained_from(),
                     "segments": list(self._segments),
                     "bytes": self._segment_bytes(),
                 },
@@ -175,6 +205,17 @@ class TerminalRecorder:
             + "\n",
             encoding="utf-8",
         )
+        os.replace(temp, self.dir / "meta.json")
+
+    def _retained_from(self) -> int:
+        first = None
+        for line in (self.dir / "index.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                frame = int(json.loads(line)["frame"])
+            except (ValueError, KeyError):
+                continue
+            first = frame if first is None else min(first, frame)
+        return first or 1
 
     # ---- 写入 ----
 
@@ -221,6 +262,9 @@ class TerminalRecorder:
         )
         self._stream.flush()
         self._index.flush()
+        if self._fsync:
+            os.fsync(self._stream.fileno())
+            os.fsync(self._index.fileno())
         return TerminalRef(self.recording_id, self._frame)
 
     # ---- 生命周期 ----
@@ -272,7 +316,10 @@ class TerminalRecorder:
                 handle_cm = path.open(encoding="utf-8")
             with handle_cm as handle:
                 for line in handle:
-                    item = json.loads(line)
+                    try:
+                        item = json.loads(line)
+                    except ValueError:
+                        continue
                     if isinstance(item, dict):
                         continue
                     yield {

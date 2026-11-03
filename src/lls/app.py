@@ -77,6 +77,7 @@ def run_interactive(command: list[str]) -> int:
             compress=config.recording.compress,
             max_recording_bytes=config.recording.max_recording_bytes,
             max_total_bytes=config.recording.max_total_bytes,
+            fsync=config.recording.fsync,
         )
         store().set_terminal(lambda: recorder.current_ref)
     backend = make_backend()

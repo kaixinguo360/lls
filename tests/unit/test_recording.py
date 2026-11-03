@@ -90,3 +90,27 @@ def test_every_event_carries_current_terminal_cursor(tmp_path) -> None:
     assert refs[0] == {"recording_id": "r", "frame": 7}
     session.close()
     store.set_terminal(None)
+
+
+def test_truncated_tail_is_ignored(tmp_path) -> None:
+    recorder = TerminalRecorder(tmp_path, recording_id="r1", compress=False, fsync=False)
+    recorder.record("o", b"ok\n")
+    recorder.close()
+    cast = tmp_path / "r1" / "segment-000001.cast"
+    cast.write_text(cast.read_text(encoding="utf-8") + '{"broken"\n', encoding="utf-8")
+    assert [event["data"] for event in recorder.iter_events()] == [b"ok\n"]
+
+
+def test_recover_keeps_valid_gzip_and_drops_plain(tmp_path) -> None:
+    recorder = TerminalRecorder(tmp_path, recording_id="r1", compress=False, fsync=False)
+    recorder.record("o", b"ok\n")
+    recorder.close()
+    plain = tmp_path / "r1" / "segment-000009.cast"
+    plain.write_text('{"version": 1}\n', encoding="utf-8")
+    packed = plain.with_suffix(".cast.gz")
+    import gzip
+    with gzip.open(packed, "wt", encoding="utf-8") as handle:
+        handle.write(plain.read_text(encoding="utf-8"))
+    TerminalRecorder(tmp_path, recording_id="r1", compress=True, fsync=False)
+    assert packed.is_file()
+    assert not plain.exists()

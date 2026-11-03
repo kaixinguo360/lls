@@ -96,6 +96,7 @@ class RecordingConfig:
     compress: bool = True
     max_recording_bytes: int = 64 * 1024 * 1024
     max_total_bytes: int = 1024 * 1024 * 1024
+    fsync: bool = True
 
 
 @dataclass(frozen=True)
@@ -351,7 +352,7 @@ def _parse_recording(raw: Mapping[str, Any], notes: list[str]) -> RecordingConfi
     section = _mapping(raw, "recording", notes)
     _unknown(
         section,
-        {"enabled", "compress", "max_recording_bytes", "max_total_bytes"},
+        {"enabled", "compress", "max_recording_bytes", "max_total_bytes", "fsync"},
         "recording.",
         notes,
     )
@@ -372,6 +373,7 @@ def _parse_recording(raw: Mapping[str, Any], notes: list[str]) -> RecordingConfi
             1024 * 1024 * 1024,
             notes,
         ),
+        fsync=_bool_value(section.get("fsync"), "recording.fsync", True, notes),
     )
 
 
