@@ -16,6 +16,7 @@ from typing import Any
 from ..agent import AgentTool
 from ..types import Tool
 from .args import as_int
+from .observation import Observation
 
 __all__ = [
     "EDIT_FILE_TOOL",
@@ -183,14 +184,33 @@ async def read_file(args: dict[str, Any]) -> str:
         raise ValueError(f"cannot read {path}: {e.strerror or e}") from e
 
     if not lines:
-        return f"{path}（共 {total if total is not None else 0} 行；第 {start} 行之后没有内容）"
+        return Observation(
+            f"{path}（共 {total if total is not None else 0} 行；第 {start} 行之后没有内容）",
+            {
+                "path": path,
+                "start": start,
+                "end": start - 1,
+                "total": total,
+                "lines": 0,
+                "truncated": False,
+            },
+        )
     first, last = lines[0][0], lines[-1][0]
     body = "\n".join(f"{number}: {text}" for number, text in lines)
+    facts = {
+        "path": path,
+        "start": first,
+        "end": last,
+        "total": total,
+        "lines": len(lines),
+        "truncated": total is None,
+    }
     if total is not None:
-        return f"{path}（第 {first}-{last} 行，共 {total} 行）\n{body}"
-    return (
+        return Observation(f"{path}（第 {first}-{last} 行，共 {total} 行）\n{body}", facts)
+    return Observation(
         f"{path}（第 {first}-{last} 行，后面还有）\n"
-        f"{body}\n\n（用 start_line={last + 1} 接着读）"
+        f"{body}\n\n（用 start_line={last + 1} 接着读）",
+        facts,
     )
 
 
@@ -214,8 +234,11 @@ async def write_file(args: dict[str, Any]) -> str:
     except OSError as e:
         raise ValueError(f"cannot write {path}: {e.strerror or e}") from e
     rows = len(content.splitlines())
-    return "已{} {} 行 / {} 字节：{}".format(
-        "追加到" if append else "写入", rows, len(data), path
+    return Observation(
+        "已{} {} 行 / {} 字节：{}".format(
+            "追加到" if append else "写入", rows, len(data), path
+        ),
+        {"path": path, "bytes": len(data), "lines": rows, "append": append},
     )
 
 
@@ -261,8 +284,12 @@ async def edit_file(args: dict[str, Any]) -> str:
         _write_atomic(path, updated.encode("utf-8"))
     except OSError as e:
         raise ValueError(f"cannot write {path}: {e.strerror or e}") from e
-    return "已替换 {} 处：{}（{} 行）".format(
-        count if replace_all else 1, path, len(updated.splitlines())
+    replaced = count if replace_all else 1
+    return Observation(
+        "已替换 {} 处：{}（{} 行）".format(
+            replaced, path, len(updated.splitlines())
+        ),
+        {"path": path, "replacements": replaced, "lines": len(updated.splitlines())},
     )
 
 

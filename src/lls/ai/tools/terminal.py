@@ -22,6 +22,7 @@ from ...tty import encode_keys
 from ..agent import AgentTool
 from ..types import Tool
 from .args import as_float, as_int
+from .observation import Observation
 
 __all__ = [
     "DEFAULT_READ_LINES",
@@ -177,11 +178,14 @@ class ScreenView:
             ):
                 return text, "matched"
 
-    def observe(self, text: str, status: str) -> str:
+    def observe(self, text: str, status: str) -> Observation:
         """把一次读取包成观察块；与上次相同则省略正文。
 
         抬头那四个属性是「我在看什么」：窗口多大、光标在第几行第几列（1-based）、
         当前是主屏还是备用屏。没有它们，模型驱动全屏程序只能靠画面差分猜位置。
+
+        同一份几何也进 ``data``：文本是给模型的，事实是给记录与统计的 ——
+        从一句抬头里再把它解析出来容易出错。
         """
         if text == self._last:
             body = "（与上次读取相同）"
@@ -192,21 +196,29 @@ class ScreenView:
             body = "（屏幕为空）"
         screen = self._port.screen
         cursor = screen.cursor
+        buffer = "alternate" if screen.alternate else "main"
         head = '<terminal_state rows="{}" cols="{}" cursor="{},{}" buffer="{}">'.format(
             screen.rows,
             screen.columns,
             cursor.y + 1,
             cursor.x + 1,
-            "alternate" if screen.alternate else "main",
+            buffer,
         )
-        return (
+        return Observation(
             head
             + "\n"
             + body
             + "\n</terminal_state>\n"
             + "<status>"
             + status
-            + "</status>"
+            + "</status>",
+            {
+                "status": status,
+                "rows": screen.rows,
+                "cols": screen.columns,
+                "cursor": [cursor.y + 1, cursor.x + 1],
+                "buffer": buffer,
+            },
         )
 
 
@@ -423,10 +435,11 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
             data = PASTE_OPEN + data + PASTE_CLOSE
         port.write(data, enter=enter)
         appended = bool(enter and not data.endswith(b"\n"))
-        return (
+        return Observation(
             f"已写入 {written + (1 if appended else 0)} 字节"
             f"{'（括号粘贴）' if pasted else ''}"
-            f"{'（末尾已回车）' if appended else ''}。用 read_terminal 查看结果。"
+            f"{'（末尾已回车）' if appended else ''}。用 read_terminal 查看结果。",
+            {"bytes": written + (1 if appended else 0), "paste": pasted},
         )
 
     async def send_keys(args: dict[str, Any]) -> str:
@@ -437,7 +450,10 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
         cleaned = [str(name) for name in names]
         data = encode_keys(cleaned)
         port.write(data)
-        return f"已发送 {len(cleaned)} 个按键（{len(data)} 字节）：{' '.join(cleaned)}"
+        return Observation(
+            f"已发送 {len(cleaned)} 个按键（{len(data)} 字节）：{' '.join(cleaned)}",
+            {"bytes": len(data), "keys": cleaned},
+        )
 
     async def send_raw(args: dict[str, Any]) -> str:
         encoded = args.get("data")
@@ -459,7 +475,10 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
             raise ValueError("decoded data is empty")
 
         port.write(data)
-        return f"已发送 {len(data)} 字节（{encoding}）"
+        return Observation(
+            f"已发送 {len(data)} 字节（{encoding}）",
+            {"bytes": len(data), "encoding": encoding},
+        )
 
     async def wait_for(args: dict[str, Any]) -> str:
         pattern = args.get("pattern", "")
@@ -483,13 +502,14 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
 
         actual_rows, actual_columns = port.resize(rows, columns)
         clamped = (actual_rows, actual_columns) != (rows, columns)
-        return (
+        return Observation(
             "终端已调整为 {}×{}{}，子进程收到 SIGWINCH。"
             "用 read_terminal 查看重排结果。".format(
                 actual_rows,
                 actual_columns,
                 "（宿主窗口更小，已按它收窄）" if clamped else "",
-            )
+            ),
+            {"rows": actual_rows, "cols": actual_columns, "clamped": clamped},
         )
 
     return [

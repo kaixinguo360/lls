@@ -31,7 +31,7 @@
 | `user/message` | `{content:[text], source, role:"user", id, lls?:{screen_seq}}` |
 | `assistant/message` | `{turn, step, message:{role:"assistant", content:[parts], source, id}, usage?, lls?:{usage}}` |
 | `tool/call` | `{turn, step, callId, name, arguments}` |
-| `tool/result` | `{turn, step, message:{role:"tool", source:{kind:"tool",callId}, toolCallId, content:[text], isError, id}, meta}` |
+| `tool/result` | `{turn, step, message:{role:"tool", source:{kind:"tool",callId}, toolCallId, content:[text], isError, id}, meta:{raw?}}` |
 | `lls/screen` | `{turn, content/blob, size?}` |
 | `lls/compact` | `{summary, upto_seq}` |
 | `lls/prune` | `{upto_seq, threshold, head, tail}` |
@@ -45,6 +45,21 @@
 - `{"type":"tool-call","id","name","arguments"}`
 
 超过 8KB 的文本 part 落 `blobs/`，part 里留 `blob` 与 `size`，`text` 置空。
+
+## 工具结果的事实层
+
+`tool/result` 的 `meta.raw` 是这次调用的结构化事实，**文本仍是唯一的重放来源**：
+
+```json
+"meta": {"raw": {"tool": "bash", "cwd": "/repo", "exit": 2, "elapsed": 37.4, "timed_out": false}}
+```
+
+- 只放**从文本里不好可靠取回来**的字段：退出码、耗时、光标、行范围、替换处数。
+  正文（屏幕、stdout、文件内容）不进 `raw` —— 它已经在 `content` 里，再存一份就是双倍体积。
+- `raw.tool` 是派生值，`tool/call.name` 才是权威；两者由同一次调用产出。
+- 旧事件没有 `meta.raw` 是合法的：它只对分析、统计、换一种渲染有用，缺了就退回文本。
+- 文本与 `raw` 由同一次工具返回（`Observation`）产出，所以不会各说各话；改格式时
+  两者一起改。
 
 ## 版本
 

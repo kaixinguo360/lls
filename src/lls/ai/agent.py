@@ -300,7 +300,14 @@ class Agent:
                 )
                 result = await self._execute(step, call)
                 self._push(
-                    conversation, Message("tool", result, tool_call_id=call.id), None
+                    conversation,
+                    Message(
+                        "tool",
+                        str(result),
+                        tool_call_id=call.id,
+                        meta=getattr(result, "data", {}),
+                    ),
+                    None,
                 )
             self._emit(AgentEvent(AgentEventKind.STEP_END, step=step))
 

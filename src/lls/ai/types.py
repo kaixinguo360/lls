@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 
 __all__ = [
     "Chunk",
@@ -86,6 +86,12 @@ class Message:
 
     tool_call_id: str | None = None
     """tool 消息回应的那次调用。"""
+
+    meta: Mapping[str, Any] = field(default_factory=dict)
+    """工具结果的结构化事实（不进请求体，只供会话记录与后续分析）。
+
+    正文仍在 ``content`` 里；这里只有从正文里不好可靠取回来的那些字段。
+    """
 
     def to_payload(self) -> dict[str, Any]:
         """转成请求体里的一条消息。"""

@@ -31,6 +31,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Iterator
 
 from ..agent import AgentTool
 from ..types import Tool
+from .observation import Observation
 
 __all__ = ["Middleware", "Next", "Toolbox", "Run"]
 
@@ -45,10 +46,25 @@ Middleware = Callable[[str, Dict[str, Any], Next], Awaitable[str]]
 
 
 def _bind(layer: Middleware, name: str, inner: Run) -> Run:
-    """把一层中间件套在 ``inner`` 外面。"""
+    """把一层中间件套在 ``inner`` 外面。
+
+    中间件的契约仍然只认文本（``next()`` 交回字符串），工具自带的事实（
+    :class:`~lls.ai.tools.observation.Observation` 上的 ``data``）在套层时会被
+    字符串拼接吃掉，所以这里把它接住、套完再挂回去 —— 中间件可以改写文本
+    （追加提醒、拒绝调用），但改不了工具报告的事实。
+    """
 
     async def run(arguments: Dict[str, Any]) -> str:
-        return await layer(name, arguments, lambda: inner(arguments))
+        seen: list[Any] = []
+
+        async def call() -> str:
+            value = await inner(arguments)
+            seen.append(value)
+            return value
+
+        text = await layer(name, arguments, call)
+        data = getattr(seen[0], "data", None) if seen else None
+        return Observation(str(text), data) if data else text
 
     return run
 

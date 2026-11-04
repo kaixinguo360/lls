@@ -29,6 +29,7 @@ from typing import Any
 from ..agent import AgentTool
 from ..types import Tool
 from .args import as_float
+from .observation import Observation
 
 __all__ = ["BASH_TOOL", "SHELL_BIN", "Shell", "shared", "shell_tools"]
 
@@ -247,7 +248,16 @@ async def bash(args: dict[str, Any], shell: Shell) -> str:
         parts.append("--- stderr ---\n" + err.rstrip("\n"))
     if len(parts) == 1:
         parts.append("（没有输出）")
-    return "\n".join(parts)
+    return Observation(
+        "\n".join(parts),
+        {
+            "command": command,
+            "cwd": shell.cwd,
+            "exit": code,
+            "elapsed": round(elapsed, 3),
+            "timed_out": timed_out,
+        },
+    )
 
 
 def shell_tools(shell: Shell) -> list[AgentTool]:

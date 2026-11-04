@@ -1987,6 +1987,11 @@ class _Session:
             call_id = message.tool_call_id or ""
             status = "error" if text.startswith("error:") else "ok"
             name = self._calls.get(call_id, "")
+            # 事实层：文本照旧（重放用它），另存一份"从文本里不好可靠取回来"的
+            # 字段。名字以 tool/call 为准，这里补进去让每条结果自描述。
+            raw = dict(getattr(message, "meta", None) or {})
+            if raw:
+                raw.setdefault("tool", name)
             self._session.append_tool_result(
                 ToolCall(call_id, name, ""),
                 text,
@@ -1994,6 +1999,7 @@ class _Session:
                 self._turn_no,
                 self._step,
                 self._call_seqs.get(call_id, 0),
+                meta={"raw": raw} if raw else None,
             )
 
     def _finish_turn(self, status: str, note: str, window: Any, usage: Any) -> None:
