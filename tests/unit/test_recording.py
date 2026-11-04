@@ -95,6 +95,24 @@ def test_every_event_carries_current_terminal_cursor(tmp_path) -> None:
     store.set_terminal(None)
 
 
+def test_the_cursor_stops_when_the_source_goes_quiet(tmp_path) -> None:
+    """录制停用后来源返回 None：事件宁可不带游标，也不带一个早就不动的帧号。"""
+    store = SessionStore(root=tmp_path)
+    alive = {"value": True}
+    store.set_terminal(lambda: TerminalRef("r", 3) if alive["value"] else None)
+    session = store.create("p", "m")
+
+    session.append_user("录着")
+    alive["value"] = False
+    session.append_user("停了")
+
+    users = [event for event in session.events() if event.type == "user/message"]
+    assert users[0].data["lls"]["terminal_cursor"] == {"recording_id": "r", "frame": 3}
+    assert "terminal_cursor" not in users[1].data.get("lls", {})
+    session.close()
+    store.set_terminal(None)
+
+
 def test_truncated_tail_is_ignored(tmp_path) -> None:
     recorder = TerminalRecorder(tmp_path, recording_id="r1", compress=False, fsync=False)
     recorder.record("o", b"ok\n")

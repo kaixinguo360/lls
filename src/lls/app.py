@@ -69,7 +69,6 @@ def run_interactive(command: list[str]) -> int:
     config = load_config()
     recorder = None
     if config.recording.enabled:
-        from .ai.sessions import store
         from .recording import TerminalRecorder
 
         recorder = TerminalRecorder(
@@ -79,7 +78,6 @@ def run_interactive(command: list[str]) -> int:
             max_total_bytes=config.recording.max_total_bytes,
             fsync=config.recording.fsync,
         )
-        store().set_terminal(lambda: recorder.current_ref)
     backend = make_backend()
     engine = Engine(
         backend,
@@ -91,6 +89,14 @@ def run_interactive(command: list[str]) -> int:
         completion_style=config.input_completion.style,
         recorder=recorder,
     )
+    if recorder is not None:
+        from .ai.sessions import store
+
+        # 引擎一旦因写失败停用录制，事件就不再挂游标：宁可没有，
+        # 也不要点着一个早就不动的帧号。
+        store().set_terminal(
+            lambda: None if engine.recorder_error else recorder.current_ref
+        )
 
     try:
         return asyncio.run(engine.run())
