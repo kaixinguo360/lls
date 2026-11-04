@@ -134,6 +134,21 @@ class ScreenModel(Protocol):
         ...
 
     @property
+    def title(self) -> str:
+        """子进程最近一次设置的窗口标题；没设过是空串。"""
+        ...
+
+    @property
+    def cursor_style(self) -> int | None:
+        """子进程最近一次要求的光标形状（DECSCUSR 的参数）；没设过是 ``None``。"""
+        ...
+
+    @property
+    def clipboard(self) -> str | None:
+        """子进程最近一次要写进剪贴板的内容（OSC 52 的 base64 载荷）。"""
+        ...
+
+    @property
     def dirty(self) -> DirtyRows:
         """尚未消费的变化行号。"""
         ...

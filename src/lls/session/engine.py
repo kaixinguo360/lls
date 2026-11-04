@@ -188,6 +188,7 @@ class Engine:
         history: HistoryStore | None = None,
         completion_style: str = "ghost",
         recorder: TerminalSink | None = None,
+        clipboard: bool = False,
     ) -> None:
         self._backend = backend
         self._recorder = recorder
@@ -206,6 +207,11 @@ class Engine:
         # 宿主终端此刻开着哪些上报模式（引擎对宿主的影子）。见 _sync_host_modes。
         self._host_modes: set[int] = set()
         self._cursor_shown = True
+        # 已经转给宿主的标题 / 光标形状 / 剪贴板：相同就不再写。
+        self._title_sent = ""
+        self._style_sent: int | None = None
+        self._clip_sent: str | None = None
+        self._clipboard = clipboard
 
         self._key_parser = KeyParser()
         self._key_buf: list[Key] = []
@@ -689,10 +695,10 @@ class Engine:
             dirty.update(range(top, min(top + ov.lines, rows)))
         self.screen.clear_dirty()
 
-        # 什么都没变：一笔都不用写（光标上一帧已经放到该去的地方）。
-        if not dirty:
-            return
+        # 标题、光标形状、剪贴板与画面无关，可能单独变化（比如命令只改标题），
+        # 所以放在「有没有脏行」之前。
         with self._out.frame():
+            self._sync_host_state()
             if dirty:
                 out: list[str] = []
                 for row in sorted(dirty):
@@ -705,7 +711,28 @@ class Engine:
                         out.append(_row_paint(self.screen.row_cells(row)))
                 if out:
                     self._out.write("".join(out).encode())
-            self._place_physical_cursor()
+                self._place_physical_cursor()
+
+    def _sync_host_state(self) -> None:
+        """把子进程设过的标题、光标形状、剪贴板同步给宿主。
+
+        只在渲染模式下做：透传时这些序列直达宿主，已经生效了。三者都是
+        「最近一次的值」，与上次发过的相同就一个字节都不写。
+        """
+        if self._passthrough():
+            return
+        title = self.screen.title
+        if title != self._title_sent:
+            self._title_sent = title
+            self._out.write("\x1b]0;{}\x07".format(title).encode("utf-8"))
+        style = self.screen.cursor_style
+        if style is not None and style != self._style_sent:
+            self._style_sent = style
+            self._out.write("\x1b[{} q".format(style).encode())
+        clip = self.screen.clipboard
+        if clip is not None and self._clipboard and clip != self._clip_sent:
+            self._clip_sent = clip
+            self._out.write("\x1b]52;c;{}\x07".format(clip).encode("ascii", "replace"))
 
     def _repaint_overlay(self) -> None:
         """把覆盖层补画在子进程刚画出来的画面上（只有透传时才需要）。

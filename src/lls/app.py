@@ -88,6 +88,7 @@ def run_interactive(command: list[str]) -> int:
         history=history_from_config(_current_session_id),
         completion_style=config.input_completion.style,
         recorder=recorder,
+        clipboard=config.terminal.clipboard,
     )
     if recorder is not None:
         from .ai.sessions import store

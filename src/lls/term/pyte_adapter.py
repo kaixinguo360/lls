@@ -34,6 +34,7 @@ import pyte
 from lls.ui.width import conservative_char_width
 
 from .model import BLANK, HOST_INPUT_MODES, Cell, Cursor
+from .host_sequences import HostSequences
 
 __all__ = ["PyteScreenModel"]
 
@@ -169,6 +170,9 @@ class PyteScreenModel:
         }
         self._stream = self._streams[id(self._main)]
         self._pending = b""  # 可能被块边界切断的开关序列前缀
+        # 标题、光标形状、剪贴板：pyte 只认 OSC 0/1/2 的标题，其余丢掉，
+        # 这三类又必须告诉宿主，于是自己扫一遍原始字节。
+        self._host = HostSequences()
 
     def _make(self, rows: int, columns: int, history: int) -> _Screen:
         # 注意参数顺序：Screen(columns, lines)
@@ -248,6 +252,18 @@ class PyteScreenModel:
         )
 
     @property
+    def title(self) -> str:
+        return self._host.title
+
+    @property
+    def cursor_style(self) -> int | None:
+        return self._host.cursor_style
+
+    @property
+    def clipboard(self) -> str | None:
+        return self._host.clipboard
+
+    @property
     def dirty(self) -> frozenset[int]:
         return frozenset(self._cur.dirty)
 
@@ -265,9 +281,11 @@ class PyteScreenModel:
         self._cur = self._main
         self._stream = self._streams[id(self._main)]
         self._pending = b""
+        self._host.reset()
 
     def feed(self, data: bytes) -> None:
         """喂入字节流；在开关序列处切换缓冲区（支持开关与内容同块）。"""
+        self._host.feed(data)
         buf = self._pending + data
         self._pending = b""
         while buf:

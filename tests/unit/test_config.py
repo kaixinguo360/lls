@@ -152,6 +152,23 @@ def test_recording_is_off_by_default(tmp_path: Path) -> None:
     assert cfg.paths.recordings_dir == cfg.paths.root / "recordings"
 
 
+def test_clipboard_is_off_by_default(tmp_path: Path) -> None:
+    """OSC 52 让子进程能改写系统剪贴板，默认不开。"""
+    cfg = load(tmp_path / "missing.yaml", emit_warnings=False)
+    assert cfg.terminal.clipboard is False
+
+
+def test_clipboard_can_be_enabled(tmp_path: Path) -> None:
+    path = _write(tmp_path, "terminal:\n  clipboard: true\n")
+    assert load(path, emit_warnings=False).terminal.clipboard is True
+
+
+def test_unknown_terminal_key_is_reported(tmp_path: Path) -> None:
+    path = _write(tmp_path, "terminal:\n  clipbord: true\n")
+    cfg = load(path, emit_warnings=False)
+    assert any("terminal.clipbord" in note for note in cfg.warnings)
+
+
 def test_recording_can_be_enabled(tmp_path: Path) -> None:
     path = _write(
         tmp_path,

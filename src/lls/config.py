@@ -100,6 +100,17 @@ class RecordingConfig:
 
 
 @dataclass(frozen=True)
+class TerminalConfig:
+    """``terminal`` 段：宿主终端上允许 LLS 代子进程做的事。
+
+    ``clipboard`` 默认关闭：OSC 52 让子进程能直接改写系统剪贴板，是一处
+    安全面。要用的时候自己打开。
+    """
+
+    clipboard: bool = False
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """一次配置读取的结果。
 
@@ -114,6 +125,7 @@ class AppConfig:
     input_history: InputHistoryConfig
     input_completion: InputCompletionConfig
     recording: RecordingConfig = RecordingConfig()
+    terminal: TerminalConfig = TerminalConfig()
     ai: Any = None
     ai_error: str | None = None
     warnings: tuple[str, ...] = field(default_factory=tuple)
@@ -377,6 +389,16 @@ def _parse_recording(raw: Mapping[str, Any], notes: list[str]) -> RecordingConfi
     )
 
 
+def _parse_terminal(raw: Mapping[str, Any], notes: list[str]) -> TerminalConfig:
+    section = _mapping(raw, "terminal", notes)
+    _unknown(section, {"clipboard"}, "terminal.", notes)
+    return TerminalConfig(
+        clipboard=_bool_value(
+            section.get("clipboard"), "terminal.clipboard", False, notes
+        )
+    )
+
+
 def _parse_input_history(
     raw: Mapping[str, Any], notes: list[str]
 ) -> InputHistoryConfig:
@@ -449,7 +471,7 @@ def load(path: str | None = None, *, emit_warnings: bool = True) -> AppConfig:
     raw = _apply_overrides(raw, _CLI_OVERRIDES)
     _unknown(
         raw,
-        {"paths", "input_history", "input_completion", "recording", "ai"},
+        {"paths", "input_history", "input_completion", "recording", "terminal", "ai"},
         "",
         notes,
     )
@@ -457,6 +479,7 @@ def load(path: str | None = None, *, emit_warnings: bool = True) -> AppConfig:
     input_history = _parse_input_history(raw, notes)
     input_completion = _parse_input_completion(raw, notes)
     recording = _parse_recording(raw, notes)
+    terminal = _parse_terminal(raw, notes)
     ai = None
     if ai_error is None:
         try:
@@ -478,6 +501,7 @@ def load(path: str | None = None, *, emit_warnings: bool = True) -> AppConfig:
         input_history=input_history,
         input_completion=input_completion,
         recording=recording,
+        terminal=terminal,
         ai=ai,
         ai_error=ai_error,
         warnings=tuple(notes),

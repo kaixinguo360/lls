@@ -1,4 +1,4 @@
-"""核心命令：退出、清屏、错误查看、帮助。"""
+"""核心命令：退出、清屏、错误查看、帮助、翻看终端历史。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ from lls.commands.spec import command
 from lls.session.services import Services
 
 __all__ = ["record_error"]
+
+# 一次最多翻多少行：模型只留 2000 行回滚，再多要也没有。
+MAX_SCROLL_LINES = 10_000
+DEFAULT_SCROLL_LINES = 2_000
 
 # 最近一次被捕获的错误（供 err 命令显示）。命令层自己维护，框架不参与。
 _last_error: list[str] = []
@@ -40,4 +44,28 @@ async def cmd_help(s: Services, args: str | None) -> CommandResult:
     from lls.commands.registry import command_help
 
     await s.show_message(command_help())
+    return CommandResult()
+
+
+@command("scroll", aliases=("hist",), category="core", usage="scroll [行数]")
+async def cmd_scroll(s: Services, args: str | None) -> CommandResult:
+    """翻看终端历史（回滚区 + 当前屏）"""
+    from lls.commands.builtin.agent_pager import page
+
+    limit = DEFAULT_SCROLL_LINES
+    raw = (args or "").strip()
+    if raw:
+        if not raw.isdigit():
+            await s.show_message("用法：scroll [行数]")
+            return CommandResult()
+        limit = max(1, min(int(raw), MAX_SCROLL_LINES))
+    lines = s.screen.text(limit=limit).split("\n")
+    if not lines or lines == [""]:
+        await s.show_message("终端里还没有内容")
+        return CommandResult()
+    await page(
+        s,
+        lines,
+        footer="↑↓/jk 翻动 · f/b 翻页 · g/G 首尾 · q 收起",
+    )
     return CommandResult()

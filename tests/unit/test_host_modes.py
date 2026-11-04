@@ -38,6 +38,9 @@ class FakeScreen:
         self.host_modes: frozenset[int] = frozenset()
         self.cursor = SimpleNamespace(x=0, y=0, hidden=False)
         self.dirty: set[int] = set()
+        self.title = ""
+        self.cursor_style = None
+        self.clipboard = None
 
     def feed(self, data: bytes) -> None:
         pass
