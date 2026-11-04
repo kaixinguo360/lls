@@ -1121,8 +1121,9 @@ def test_read_file_takes_a_line_slice(tmp_path) -> None:
         )
     )
 
-    assert "第 2-3 行，共 4 行" in result
-    assert "2\n3" in result
+    assert "第 2-3 行" in result
+    assert "2: 2" in result and "3: 3" in result
+    assert "start_line=4" in result
 
 
 def test_read_file_rejects_binary_and_missing_files(tmp_path) -> None:
@@ -1566,6 +1567,7 @@ def test_agent_tool_schemas_are_strict_and_required() -> None:
         "send_keys",
         "send_raw",
         "read_file",
+        "edit_file",
         "write_file",
     }
     for tool in definitions.values():

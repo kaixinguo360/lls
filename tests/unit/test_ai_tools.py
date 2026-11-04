@@ -78,6 +78,7 @@ def test_builtin_tools_are_strict_and_named() -> None:
 
     assert sorted(box.names()) == [
         "bash",
+        "edit_file",
         "read_file",
         "read_terminal",
         "resize_terminal",

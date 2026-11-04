@@ -375,8 +375,11 @@ SYSTEM_PROMPT = f"""\
   stdout 和 stderr。它不在用户的终端里：不显示、驱动不了 TUI，cwd 会留到
   下一次调用。git、跑测试、构建、批量看文件用它；要让用户看见或要交互，
   仍然用 send_text + read_terminal。
-- read_file(path, start_line, max_lines)：直接读文件（按行号取一段），比先
-  cat 再回读省钱，也不会滚出屏幕。
+- read_file(path, start_line, max_lines)：直接读文件（按行号取一段，正文带行号），
+  比先 cat 再回读省钱，也不会滚出屏幕；页脚会告诉你下一段从哪接着读。
+- edit_file(path, old_string, new_string, replace_all)：按字面替换。默认 old_string
+  必须恰好出现一次（零处或多处都报错并说明原因），replace_all=true 才全换；改
+  一两处用它，比整篇重写省 token、也不会碰坏别的部分。
 - write_file(path, content, append)：直接写文件（append=false 覆盖写），适合
   改配置、写脚本这类动作；内容多时比 send_text 输入到编辑器可靠。
 
