@@ -194,3 +194,45 @@ def test_random_chunk_invariance() -> None:
             m.feed(data[offset : offset + step])
             offset += step
         assert _state(m) == expected
+
+
+# ---- 宿主状态：上报模式、标题、光标形状、剪贴板 ----
+
+
+def test_host_modes_decode_the_private_mode_codes() -> None:
+    """pyte 把 ``?n`` 左移 5 位存在 ``screen.mode`` 里，模型对外报原始编号。"""
+    m = _model()
+    m.feed(b"\x1b[?2004h\x1b[?1006h\x1b[?25l")
+
+    assert m.host_modes == frozenset({2004, 1006})
+
+
+def test_host_modes_survive_the_alternate_buffer_switch() -> None:
+    """真终端里这些模式是全局的：「先开鼠标再进 vim」不该把它弄丢。"""
+    m = _model()
+    m.feed(b"\x1b[?1000h\x1b[?1049h")
+
+    assert m.alternate is True
+    assert m.host_modes == frozenset({1000})
+
+    m.feed(b"\x1b[?1049l")
+    assert m.host_modes == frozenset({1000})
+
+
+def test_the_title_comes_through_even_when_split() -> None:
+    m = _model()
+    m.feed(b"\x1b]2;bu")
+    m.feed(b"ild\x07")
+
+    assert m.title == "build"
+
+
+def test_cursor_style_and_clipboard_are_reported() -> None:
+    m = _model()
+    m.feed(b"\x1b[5 q")
+
+    assert m.cursor_style == 5
+
+    m.feed(b"\x1b]52;c;YWJj\x07")
+    assert m.clipboard == "YWJj"
+

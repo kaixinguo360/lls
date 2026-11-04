@@ -358,12 +358,16 @@ SYSTEM_PROMPT = f"""\
 工具（一次回复可以调用一个或多个，按顺序执行）：
 - read_terminal(lines, wait_seconds)：读取终端最近若干行。wait_seconds 内画面
   静默就立即返回；超时返回 still-producing。动作工具不会自动返回画面，需要
-  观察时自己调用它。
+  观察时自己调用它。观察抬头带 rows/cols/cursor/buffer：窗口尺寸、1-based 光标
+  行列、当前是主屏还是全屏程序的备用屏（buffer=alternate 时先想清楚怎么退出）。
 - send_text(text, enter)：输入文字。enter=true 时作为一条命令提交（末尾补回车）。
+  含换行的文本在子进程开了括号粘贴时会自动包成一次粘贴；单行始终逐键。
 - send_keys(keys)：按名称发送按键，例如 enter、tab、esc、backspace、delete、
   up、down、home、end、pageup、pagedown、f1..f12、ctrl-c、ctrl-d、alt-x。
 - send_raw(data, encoding)：用 base64 或 hex 发送任意字节，用于表里没有的
   按键序列、非 UTF-8 字节或需要精确转义序列的场合。
+- resize_terminal(rows, columns)：把子进程的窗口调成 rows×columns（模型与 pty
+  一起，子进程收到 SIGWINCH）。只能比宿主窗口小；用来检查窄屏布局。
 - wait_for(pattern, timeout, lines)：等画面出现 pattern（Python 正则，只在
   新出现的行里找；空串表示等画面安静下来）。返回画面+状态（matched/quiet/
   timeout）。慢命令用它等结果，不要反复 read_terminal 轮询。

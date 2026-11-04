@@ -188,6 +188,9 @@ class PyteScreenModel:
         if entering:
             # 1049 语义：进入备用缓冲区即清屏
             target.reset()
+        # 上报模式（鼠标、粘贴、光标键）在真终端里是**全局**的，pyte 却按屏
+        # 各记一份。切换时两边带上，否则「先开鼠标再进全屏」的模式会凭空消失。
+        target.mode = set(self._cur.mode)
         self._cur = target
         self._stream = self._streams[id(target)]
         self._mark_all_dirty()

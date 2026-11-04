@@ -216,7 +216,11 @@ READ_TOOL = Tool(
     name="read_terminal",
     description=(
         "Read the most recent terminal lines. Waits up to wait_seconds for the "
-        "screen to stop changing, then returns the tail plus a status."
+        "screen to stop changing, then returns the tail plus a status. The "
+        "opening tag carries the geometry: rows/cols are the window size, "
+        "cursor is the 1-based 'row,col' caret position, and buffer is 'main' "
+        "or 'alternate' (alternate means a full-screen program such as vim or "
+        "less owns the screen)."
     ),
     parameters={
         "type": "object",
@@ -246,8 +250,10 @@ READ_TOOL = Tool(
 SEND_TEXT_TOOL = Tool(
     name="send_text",
     description=(
-        "Send literal text (UTF-8, may contain newlines). "
-        "enter=true appends a newline, submitting it as a command line."
+        "Send literal text (UTF-8, may contain newlines). enter=true appends a "
+        "newline, submitting it as a command line. Text containing newlines is "
+        "sent as a bracketed paste when the child has bracketed paste enabled; "
+        "single-line text is always typed key by key."
     ),
     parameters={
         "type": "object",
@@ -408,6 +414,7 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
             raise ValueError("'enter' must be a boolean")
 
         data = text.encode("utf-8")
+        written = len(data)  # 报给模型的字节数不含粘贴两端的协议包裹
         pasted = b"\n" in data and PASTE_MODE in port.screen.host_modes
         if pasted:
             # 多行文本必须走括号粘贴：逐键写进去会被 readline/vim 当成一次次
@@ -417,7 +424,7 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
         port.write(data, enter=enter)
         appended = bool(enter and not data.endswith(b"\n"))
         return (
-            f"已写入 {len(data) + (1 if appended else 0)} 字节"
+            f"已写入 {written + (1 if appended else 0)} 字节"
             f"{'（括号粘贴）' if pasted else ''}"
             f"{'（末尾已回车）' if appended else ''}。用 read_terminal 查看结果。"
         )
