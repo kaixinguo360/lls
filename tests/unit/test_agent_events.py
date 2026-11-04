@@ -6,7 +6,7 @@ import asyncio
 import json
 
 from lls.ai import Chunk, ChunkKind, ConfigError, ToolCall, ToolCallDelta
-from lls.ai.sessions import SessionBusy, SessionStore
+from lls.ai.sessions import COMPACT_TARGET_RATIO, SessionStore, default_budget
 from lls.ai.sessions.events import INTERRUPT_MARKER, SUMMARY_PREFIX
 from lls.commands.builtin import agent as agent_cmd
 from lls.session.errors import Interrupted
@@ -804,10 +804,7 @@ def _prefill_sized(keeper, turns: int = 17, chars: int = 700) -> object:
 
 
 def test_the_watermark_compacts_before_anything_is_dropped(monkeypatch, tmp_path) -> None:
-    """到 85% 就压，不必等到装不下：等到装不下，窗口就永远贴着上限。
-
-    预算 12000（窗口 20000），水位 10200，目标 7200。
-    """
+    """到 85% 就压，不必等到装不下：等到装不下，窗口就永远贴着上限。"""
     keeper = SessionStore(root=tmp_path)
     _prefill_sized(keeper).close()
     provider = ScriptedProvider([_text("摘要：旧任务都做完了"), _text("新答复")])
@@ -824,10 +821,9 @@ def test_the_watermark_compacts_before_anything_is_dropped(monkeypatch, tmp_path
     session = keeper.current()
     compacts = [event for event in session.events() if event.type == "lls/compact"]
     assert len(compacts) == 1
-    # 压完停在目标水位以下，而不是刚好够这一次请求。
-    window = session.window(12000)
-    assert window.dropped == 0
-    assert window.used <= 7200
+    # 压完停在目标水位以内，而不是刚好够这一次请求。
+    target = int(default_budget(20_000) * COMPACT_TARGET_RATIO)
+    assert session.window(target).dropped == 0
     # 留下的还是最近几轮旧历史 + 这一轮，不是只留一条摘要。
     assert sum(1 for m in session.history() if m.role == "user") >= 10
     # 这一轮真压过，才在覆盖层留一句话。

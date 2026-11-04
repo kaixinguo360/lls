@@ -727,6 +727,10 @@ class Session:
         或比 user 还大）就只从 user 那一条起算，不跟着坏指针走。紧挨着它
         之前写的 ``lls/compact`` 也算这一轮的：自动压缩在提交任务之前发生，它
         只覆盖更早的历史，撤了这一轮却留着摘要，旧轮次就再也回不来了。
+
+        紧挨着的 ``lls/prune`` 反过来要留着：它只把工具输出剪短，原文还在
+        blobs 里，撤不撤都不丢东西；撤回去反倒把窗口重新撑大，下一轮又得
+        再剪一次。
         """
         tail = self._from_end(lambda event: event.type == "user/message")
         if not tail or tail[0].type != "user/message":

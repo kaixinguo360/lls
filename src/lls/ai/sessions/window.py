@@ -23,7 +23,6 @@ __all__ = [
     "BUDGET_RATIO",
     "COMPACT_TARGET_RATIO",
     "COMPACT_TRIGGER_RATIO",
-    "HEADROOM",
     "NON_ASCII_TOKENS",
     "OUTPUT_RESERVE",
     "Window",
@@ -41,10 +40,9 @@ NON_ASCII_TOKENS = 1.0
 #: 预算占 context window 的比例，留给输出与工具定义。
 BUDGET_RATIO = 0.6
 
-#: 从窗口里先扣掉的两块：回复与工具定义要占的输出预留，以及压力余量。
-#: 比例本身是拍的；这两个数是「按比例算出来的预算仍然太大」时的兜底。
+#: 回复与工具定义要占的位置。比例已经留了四成，这里是一道硬底：小窗口上
+#: 0.6 可能仍然装不下一次长回复（16k 窗口的六成是 9.6k，回复可能是 8k）。
 OUTPUT_RESERVE = 8_192
-HEADROOM = 16_384
 
 #: 压缩的触发水位：用到预算的这个比例就压，不等装不下才压。等到装不下，
 #: 窗口会一直贴着上限：每轮只丢掉刚超出的那一点，于是每轮都要再压一次。
@@ -120,18 +118,17 @@ def message_tokens(message: Message) -> int:
 
 
 def default_budget(context_window: int, limit: int = 0) -> int:
-    """预算 = min(context window * 0.6, 窗口扣掉输出预留与余量)；上限 0 不设。
+    """预算 = min(窗口 * 0.6, 窗口 - 输出预留)；``limit`` 是配置里的硬上限。
 
-    只按比例算，小窗口会算出「装不下」的预算：32k 的模型拿 0.6 也有 19k，
-    可它还要留 8k 输出、还得给下一批工具结果腾地方。所以再拿
-    ``window - reserve`` 卡一道；窗口本来就比 reserve 还小（测试里的假窗口
-    就是这样）就只按比例算，免得算出 0。
+    0.6 已经把四成留给输出与工具定义，正常情况下它就是答案。再拿
+    ``窗口 - OUTPUT_RESERVE`` 卡一道是为了小窗口：16k 的模型按比例有 9.6k，
+    可一次长回复就可能要 8k，两者相加正好把请求顶爆。窗口本身比预留还小
+    （测试里的假窗口）时只按比例算，免得算出 0。
     """
     window = max(0, int(context_window or 0))
     budget = int(window * BUDGET_RATIO)
-    reserve = OUTPUT_RESERVE + HEADROOM
-    if window > reserve:
-        budget = min(budget, window - reserve)
+    if window > OUTPUT_RESERVE:
+        budget = min(budget, window - OUTPUT_RESERVE)
     if limit and limit > 0:
         budget = min(budget, int(limit))
     return max(0, budget)

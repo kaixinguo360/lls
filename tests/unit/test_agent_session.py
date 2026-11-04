@@ -1390,6 +1390,32 @@ def test_slash_compact_does_not_prune_first(tmp_path) -> None:
     session.close()
 
 
+def test_an_overflow_prunes_before_it_summarises(tmp_path) -> None:
+    """请求被拒时先剪：几条巨大的输出通常剪完就够，摘要不必再发。"""
+    store = SessionStore(root=tmp_path)
+    session = store.create("stub", "m")
+    call = ToolCall("c1", "bash", "{}")
+    session.append_user("旧任务")
+    session.append_assistant("", (call,))
+    session.append_tool_result(call, "输出" * 20_000)
+    session.append_assistant("旧答复")
+    session.append_turn_end("ok")
+    services = FakeServices([])
+    worker = _worker(services, session, store, budget=8000)
+
+    window = worker._prepare_window(())
+    recovered = asyncio.run(
+        worker._compact(window, (), mode=agent_cmd._CompactMode.OVERFLOW)
+    )
+
+    assert recovered is True
+    kinds = [event.type for event in session.events()]
+    assert kinds.count("lls/prune") == 1
+    assert kinds.count("lls/compact") == 0
+    assert worker._provider.requests == []      # 一次摘要请求都没发
+    session.close()
+
+
 # ---- 压缩：摘要的输入与长度跟着被丢量走 ----
 
 

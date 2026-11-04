@@ -124,7 +124,7 @@ sessions/
 
 送进模型的上下文是**按预算从事件里派生**的只读视图，与磁盘上留了多少无关：
 
-- 预算 = `min(context_window * 0.6, 窗口 - 输出预留 - 余量, ai.context_limit)`，
+- 预算 = `min(context_window * 0.6, 窗口 - 8k 输出预留, ai.context_limit)`，
   按 token 估算（ASCII 四字符一个、CJK 一个码点一个）；
 - 从尾部向前装，按**步**切分（`assistant` 连同它那批 `tool` 回复算一块），
   因此 `tool_calls` 与对应回复不拆；一轮几十步也裁得动；

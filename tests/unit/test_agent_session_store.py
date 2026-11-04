@@ -440,10 +440,12 @@ def test_estimate_counts_cjk_per_codepoint() -> None:
 
 
 def test_the_budget_leaves_room_for_the_reply() -> None:
-    """大窗口扣比例、也扣输出预留；小窗口不能算出「装不下」的预算。"""
+    """大窗口按比例；小窗口再扣掉输出预留，别把回复挤出去。"""
     assert default_budget(128_000) == 76_800
-    # 32000 扣掉 0.6 之后仍然太大：还得留输出与余量。
-    assert default_budget(32_000) < 32_000 - 8_192
+    # 32k 窗口：0.6 已经是安全的，预留不该再切一刀。
+    assert default_budget(32_000) == 19_200
+    # 16k 窗口：0.6 算出 9.6k，加上 8k 回复正好顶爆，所以按预留收窄。
+    assert default_budget(16_000) == 16_000 - 8_192
     assert default_budget(8_000) > 0
     assert default_budget(128_000, limit=20_000) == 20_000
 
