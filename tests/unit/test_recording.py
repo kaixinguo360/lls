@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from lls.ai.sessions import SessionStore
 from lls.recording import TerminalRecorder, TerminalRef, parse_ref
+from lls.session.engine import Engine
+from lls.term import PyteScreenModel
 
 
 def test_recording_roundtrip(tmp_path) -> None:
@@ -114,3 +117,63 @@ def test_recover_keeps_valid_gzip_and_drops_plain(tmp_path) -> None:
     TerminalRecorder(tmp_path, recording_id="r1", compress=True, fsync=False)
     assert packed.is_file()
     assert not plain.exists()
+
+
+# ---- 录制是旁路：它坏了只停用自己 ----
+
+class _Boom:
+    """写一帧就炸的录制器：模拟磁盘满。"""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def record(self, channel: str, data: object) -> object:
+        self.attempts += 1
+        raise OSError(28, "No space left on device")
+
+
+def test_a_failing_recorder_does_not_break_the_output_path() -> None:
+    """磁盘满不该让终端读不出东西：停用录制，画面照常喂给屏幕模型。"""
+    screen = PyteScreenModel(rows=4, columns=20)
+    recorder = _Boom()
+
+    async def scenario():
+        engine = Engine(None, [], screen, {}, "default", recorder=recorder)  # type: ignore[arg-type]
+        engine._exit_event = asyncio.Event()
+        engine._read_all_available = lambda: b"hello"
+        engine._on_master_readable()
+        engine._on_master_readable()
+        return engine
+
+    engine = asyncio.run(scenario())
+
+    assert "hello" in screen.text()
+    # 只试一次：停用之后每帧直接跳过，不反复失败。
+    assert recorder.attempts == 1
+    assert engine.recorder_error.startswith("录制已停用")
+
+
+def test_a_failing_recorder_does_not_block_typing() -> None:
+    """输入也一样：先写子进程，录制失败不影响这一笔已经送出去的字节。"""
+    screen = PyteScreenModel(rows=4, columns=20)
+    recorder = _Boom()
+
+    class Pty:
+        def __init__(self) -> None:
+            self.written = []
+
+        def write(self, data: bytes) -> None:
+            self.written.append(data)
+
+    async def scenario():
+        engine = Engine(None, [], screen, {}, "default", recorder=recorder)  # type: ignore[arg-type]
+        engine._exit_event = asyncio.Event()
+        engine._pty = Pty()  # type: ignore[assignment]
+        engine._pty_write(b"ls\n")
+        return engine
+
+    engine = asyncio.run(scenario())
+
+    assert engine._pty.written == [b"ls\n"]
+    assert recorder.attempts == 1
+    assert engine.recorder_error.startswith("录制已停用")

@@ -2,6 +2,9 @@
 
 一次启动对应一个 recording id；录制内部按大小分段。达到单次上限时丢弃
 本次最早的分段，保留最新内容；关闭或分段结束时可选 gzip 压缩。
+
+本模块只依赖标准库，不认识 LLS 的会话、模型或界面。别人要用它，只需要
+对上下面两个 Protocol：引擎往里写字节，会话事件记一个帧号。
 """
 
 from __future__ import annotations
@@ -16,18 +19,39 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Protocol
 
 __all__ = [
     "DEFAULT_MAX_RECORDING_BYTES",
     "DEFAULT_MAX_TOTAL_BYTES",
+    "TerminalCursor",
     "TerminalRecorder",
     "TerminalRef",
+    "TerminalSink",
     "parse_ref",
 ]
 
 DEFAULT_MAX_RECORDING_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
+
+
+class TerminalSink(Protocol):
+    """能接收终端字节的地方。
+
+    引擎只知道自己要「写一帧」：谁在落盘、落哪儿、要不要压缩，一概不管。
+    录制是可选旁路，因此写失败得由调用方就地兜住（见 ``Engine._record``）。
+    """
+
+    def record(self, channel: str, data: bytes | str) -> object:
+        """写入一帧；``channel`` 只有 ``"i"``（输入）与 ``"o"``（输出）。"""
+        ...
+
+
+class TerminalCursor(Protocol):
+    """一条事件要记的录制位置：录制 id 加单调递增的帧号。"""
+
+    recording: str
+    frame: int
 
 
 @dataclass(frozen=True)

@@ -26,7 +26,10 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:  # 只在类型检查时需要；会话层运行时不认识录制模块
+    from ...recording import TerminalCursor
 
 from ...edit import forget_session
 from ..types import Message, ToolCall
@@ -942,7 +945,7 @@ class SessionStore:
             self.temporary = False
         self._keep = max(1, int(keep))
         self._open: Dict[str, Session] = {}
-        self.terminal: Optional[Callable[[], Any]] = None
+        self.terminal: Optional[Callable[[], Optional[TerminalCursor]]] = None
         self.last_error: Optional[str] = None
         self._index: Dict[str, Any] = {}
         self._read_index()
@@ -953,7 +956,13 @@ class SessionStore:
 
     # ---- 打开与创建 ----
 
-    def set_terminal(self, provider: Optional[Callable[[], Any]]) -> None:
+    def set_terminal(
+        self, provider: Optional[Callable[[], Optional[TerminalCursor]]]
+    ) -> None:
+        """接上「当前终端时刻」的来源；``None`` 表示不记游标。
+
+        会话层只认这个形状（一个 id 加一个帧号），不认识谁在录制。
+        """
         self.terminal = provider
 
     def create(

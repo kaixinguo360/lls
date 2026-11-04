@@ -102,4 +102,10 @@ def run_interactive(command: list[str]) -> int:
             from .ai.sessions import store
 
             store().set_terminal(None)
-            recorder.close()
+            try:
+                recorder.close()
+            except OSError as e:
+                # 收尾失败只是少一份录制，别让它盖掉退出码。
+                print("lls: 录制收尾失败：{}".format(e), file=sys.stderr)
+        if engine.recorder_error:
+            print("lls: {}".format(engine.recorder_error), file=sys.stderr)

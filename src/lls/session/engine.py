@@ -22,7 +22,10 @@ import signal
 import sys
 import time
 from collections import deque
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:  # 只在类型检查时需要；运行时引擎不认识录制模块
+    from lls.recording import TerminalSink
 
 from lls.edit import HistoryStore, LineEditor
 from lls.edit.complete import (
@@ -180,10 +183,11 @@ class Engine:
         initial_handler: str,
         history: HistoryStore | None = None,
         completion_style: str = "ghost",
-        recorder: TerminalRecorder | None = None,
+        recorder: TerminalSink | None = None,
     ) -> None:
         self._backend = backend
         self._recorder = recorder
+        self._recorder_error = ""
         self._argv = argv
         self.screen = screen
         self._handlers = handlers
@@ -404,6 +408,28 @@ class Engine:
             self._pty.close()
         self._backend.close_console()
 
+    # ---- 录制（可选旁路） ----
+
+    @property
+    def recorder_error(self) -> str:
+        """录制被停用的原因；没停用过就是空串。"""
+        return self._recorder_error
+
+    def _record(self, channel: str, data: bytes) -> None:
+        """写一帧录制；失败就整个停掉，别让可选项把终端带下去。
+
+        录制是旁路：磁盘满、权限变了、gzip 写不动，都不该让终端读写报错。
+        停用只发生一次 —— 之后每帧都直接跳过，而不是反复失败、反复刷日志。
+        """
+        recorder = self._recorder
+        if recorder is None:
+            return
+        try:
+            recorder.record(channel, data)
+        except Exception as e:  # noqa: BLE001 - 录制失败不能影响终端
+            self._recorder = None
+            self._recorder_error = "录制已停用：{}".format(e)
+
     # ---- fd 回调 ----
 
     def _on_master_readable(self) -> None:
@@ -415,8 +441,7 @@ class Engine:
         if not data:
             self._on_child_exit()
             return
-        if self._recorder is not None:
-            self._recorder.record("o", data)
+        self._record("o", data)
         if self._console is None:
             self.screen.feed(data)
             return
@@ -844,11 +869,13 @@ class Engine:
             return
         try:
             self._pty.write(data)
-            if self._recorder is not None:
-                self._recorder.record("i", data)
         except OSError as e:
+            # 收尾（EIO）之外不该发生；真发生了也别记这一笔 ——
+            # 没送到子进程的东西，录制里不算数。
             if e.errno == errno.EIO:
                 self._on_child_exit()
+            return
+        self._record("i", data)
 
     async def show_message(self, text: str) -> None:
         """以覆盖层显示消息，等任意键后收起。不改变处理器。

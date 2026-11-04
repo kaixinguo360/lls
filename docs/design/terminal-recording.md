@@ -11,15 +11,16 @@
 
 ```text
 <recording-root>/<recording-id>/
-  meta.json      录制元数据
-  stream.cast    JSONL：时间、通道、base64 字节
-  index.jsonl    frame → 时间/字节偏移
+  meta.json                  录制元数据
+  segment-000001.cast        JSONL：时间、通道、base64 字节
+  segment-000002.cast.gz     超出单次上限时滚动；压缩开启时旧分段是 .gz
+  index.jsonl                frame → 分段/时间/字节偏移
 ```
 
-`stream.cast` 第一行是对象，后续每行是数组：
+每个分段第一行是对象，后续每行是数组：
 
 ```json
-{"version": 1, "id": "20261103T010203Z-7f3a", "created_at": 1793...}
+{"version": 1, "id": "20261103T010203Z-7f3a", "segment": "segment-000001.cast", "created_at": 1793...}
 [0.0, "i", "bHMK"]
 [0.12, "o", "YS50eHQK"]
 ```
@@ -34,7 +35,7 @@ o  输出
 索引每行：
 
 ```json
-{"frame": 1, "time": 0.0, "offset": 0, "channel": "i", "bytes": 4}
+{"frame": 1, "segment": "segment-000001.cast", "time": 0.0, "offset": 0, "channel": "i", "bytes": 4}
 ```
 
 ## 引用
@@ -96,6 +97,14 @@ PTY 写入/读取时实时记录：
 - 只记录终端字节，不记录文件系统、任务或模型上下文。
 - 录制内容不进入模型请求。
 - 录制默认关闭；只有 `recording.enabled: true` 才创建录制器。
+- 依赖是两个窄接口（`lls/recording.py` 里的 Protocol）：引擎只要
+  `TerminalSink.record(channel, bytes)`，会话只要
+  `TerminalCursor.recording` / `frame`。两侧都不 import 录制模块，换成
+  别的实现（内存录制、远端录制）只需要对上这两个形状。
+- 录制是旁路，**它坏了只停用它自己**：写失败（磁盘满、权限变化、压缩失败）
+  当场停用并记下原因，终端读写照常；原因在退出时由 `run_interactive` 打到
+  stderr。只停用一次，不会每帧重试。
+- 收尾失败（最后一次 fsync、压缩）同样只报一句，不改变退出码。
 - 每个 session 事件在 `lls.terminal_cursor` 记录当前帧引用：
   `{"recording_id": "<id>", "frame": <n>}`。
 - 引用是“事件发生时的录制位置”，不是内容区间。
