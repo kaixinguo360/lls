@@ -10,6 +10,7 @@ import asyncio
 import inspect
 import json
 import os
+import time
 
 import pytest
 
@@ -20,6 +21,7 @@ from lls.ui import strip_sgr
 from lls.ai.sessions import SessionStore
 from lls.ai.tools import RepeatReminder, ScreenView, builtin_tools
 from lls.ai.tools import shell as shell_mod
+from lls.ai.tools import terminal as terminal_mod
 from lls.ai.sessions.events import INTERRUPT_MARKER, SUMMARY_PREFIX
 from lls.session.errors import Interrupted, SessionEnded
 from lls.tty import KeyNameError
@@ -853,9 +855,18 @@ def test_system_prompt_matches_the_display_budget() -> None:
 
 
 def _tools(services):
-    """装配好的工具箱：与 ``_Session`` 里那一份同一条装配路径。"""
-    view = ScreenView(services, services.wait)
-    box = builtin_tools(services, services.wait, view=view)
+    """装配好的工具箱：与 ``_Session`` 里那一份同一条装配路径。
+
+    中断也走同一条翻译（``poll_keys``）：引擎说的是「用户中断 / 子进程退出」，
+    工具看到的是 ``Aborted`` / ``SessionClosed`` —— 少了这一层，测出来的
+    取消语义和线上不是一回事。
+    """
+
+    async def poll(timeout=None):
+        await keys.poll_keys(services, timeout)
+
+    view = ScreenView(services, poll)
+    box = builtin_tools(services, poll, view=view)
     box.add_middleware(RepeatReminder())
     tools = {entry.tool.name: entry for entry in box}
     return tools, view
@@ -955,8 +966,8 @@ def test_read_terminal_notes_an_unchanged_screen() -> None:
 
 
 def test_read_terminal_waits_for_quiet(monkeypatch) -> None:
-    monkeypatch.setattr(agent_cmd, "READ_POLL", 0.001)
-    monkeypatch.setattr(agent_cmd, "READ_QUIET", 0.005)
+    monkeypatch.setattr(terminal_mod, "READ_POLL", 0.001)
+    monkeypatch.setattr(terminal_mod, "READ_QUIET", 0.005)
     screen = FakeScreen(texts=["a", "b", "b", "b", "b"])
     services = FakeServices([], screen=screen)
     tools, _ = _tools(services)
@@ -970,8 +981,8 @@ def test_read_terminal_waits_for_quiet(monkeypatch) -> None:
 
 
 def test_read_terminal_reports_still_producing(monkeypatch) -> None:
-    monkeypatch.setattr(agent_cmd, "READ_POLL", 0.001)
-    monkeypatch.setattr(agent_cmd, "READ_QUIET", 10.0)
+    monkeypatch.setattr(terminal_mod, "READ_POLL", 0.001)
+    monkeypatch.setattr(terminal_mod, "READ_QUIET", 10.0)
     screen = FakeScreen(increment=True)
     services = FakeServices([], screen=screen)
     tools, _ = _tools(services)
@@ -1003,8 +1014,8 @@ def test_read_terminal_ends_on_child_exit() -> None:
 
 def test_keys_typed_while_reading_are_kept_for_the_next_prompt(monkeypatch) -> None:
     """读终端时敲下的字不算丢：它属于用户，等下一次读输入再交出去。"""
-    monkeypatch.setattr(agent_cmd, "READ_POLL", 0.001)
-    monkeypatch.setattr(agent_cmd, "READ_QUIET", 0.005)
+    monkeypatch.setattr(terminal_mod, "READ_POLL", 0.001)
+    monkeypatch.setattr(terminal_mod, "READ_QUIET", 0.005)
     services = FakeServices([], screen=FakeScreen(texts=["a", "a", "a", "a"]))
     services.queue_chars(b"x")
     tools, _ = _tools(services)
@@ -1018,7 +1029,7 @@ def test_keys_typed_while_reading_are_kept_for_the_next_prompt(monkeypatch) -> N
 
 
 def test_wait_for_returns_when_a_new_line_matches(monkeypatch) -> None:
-    monkeypatch.setattr(agent_cmd, "READ_POLL", 0.001)
+    monkeypatch.setattr(terminal_mod, "READ_POLL", 0.001)
     screen = FakeScreen(texts=["a\nb", "a\nb", "a\nb\ndone"])
     tools, _ = _tools(FakeServices([], screen=screen))
 
@@ -1032,7 +1043,7 @@ def test_wait_for_returns_when_a_new_line_matches(monkeypatch) -> None:
 
 def test_wait_for_ignores_a_match_that_was_already_on_screen(monkeypatch) -> None:
     """等「命令跑完」时，上一个提示符本来就在屏幕上，不能一进来就算数。"""
-    monkeypatch.setattr(agent_cmd, "READ_POLL", 0.001)
+    monkeypatch.setattr(terminal_mod, "READ_POLL", 0.001)
     screen = FakeScreen(texts=["done\n$ ", "done\n$ "])
     tools, _ = _tools(FakeServices([], screen=screen))
 
@@ -1044,8 +1055,8 @@ def test_wait_for_ignores_a_match_that_was_already_on_screen(monkeypatch) -> Non
 
 
 def test_wait_for_quiet_pattern_waits_for_the_screen_to_settle(monkeypatch) -> None:
-    monkeypatch.setattr(agent_cmd, "READ_POLL", 0.001)
-    monkeypatch.setattr(agent_cmd, "READ_QUIET", 0.005)
+    monkeypatch.setattr(terminal_mod, "READ_POLL", 0.001)
+    monkeypatch.setattr(terminal_mod, "READ_QUIET", 0.005)
     screen = FakeScreen(texts=["x", "x", "x", "x"])
     tools, _ = _tools(FakeServices([], screen=screen))
 
@@ -1198,8 +1209,27 @@ def test_bash_times_out_and_kills_the_group(tmp_path) -> None:
 
 
 @posix_only
+def test_bash_is_killed_when_the_call_is_cancelled(tmp_path) -> None:
+    """Ctrl-C 之后不能留一个还在跑的 make：取消要等进程真的停下。"""
+    shell = shell_mod.Shell(str(tmp_path))
+
+    async def run():
+        started = time.monotonic()
+        task = asyncio.ensure_future(shell.run("sleep 30", str(tmp_path), 60))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return time.monotonic() - started
+
+    elapsed = asyncio.run(run())
+
+    assert elapsed < 5
+
+
+@posix_only
 def test_bash_clips_a_huge_output(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(agent_cmd, "MAX_BASH_CHARS", 300)
+    monkeypatch.setattr(shell_mod, "MAX_BASH_CHARS", 300)
     tools, _ = _tools(FakeServices([]))
 
     result = asyncio.run(
@@ -1464,7 +1494,7 @@ def test_the_summary_budget_follows_what_is_dropped() -> None:
 # ---- 重复调用提醒 ----
 
 
-def _call(guard, name, args, result):
+def _guard_call(guard, name, args, result):
     """把一次工具调用送进中间件，拿回它给出的观察文本。"""
 
     async def inner():
@@ -1477,9 +1507,9 @@ def test_repeat_guard_reminds_on_the_third_identical_call() -> None:
     guard = RepeatReminder()
     args = {"text": "ls", "enter": True}
 
-    first = _call(guard, "send_text", args, "r1")
-    second = _call(guard, "send_text", args, "r2")
-    third = _call(guard, "send_text", args, "r3")
+    first = _guard_call(guard, "send_text", args, "r1")
+    second = _guard_call(guard, "send_text", args, "r2")
+    third = _guard_call(guard, "send_text", args, "r3")
 
     assert "提醒" not in first
     assert "提醒" not in second
@@ -1490,21 +1520,21 @@ def test_repeat_guard_resets_for_a_new_task() -> None:
     guard = RepeatReminder()
     args = {"text": "ls"}
 
-    _call(guard, "send_text", args, "r")
-    _call(guard, "send_text", args, "r")
+    _guard_call(guard, "send_text", args, "r")
+    _guard_call(guard, "send_text", args, "r")
     guard.reset()
 
-    assert "提醒" not in _call(guard, "send_text", args, "r")
+    assert "提醒" not in _guard_call(guard, "send_text", args, "r")
 
 
 def test_repeat_guard_resets_on_a_different_call() -> None:
     guard = RepeatReminder()
 
-    _call(guard, "send_text", {"text": "a"}, "r")
-    _call(guard, "send_text", {"text": "a"}, "r")
-    _call(guard, "send_text", {"text": "b"}, "r")
+    _guard_call(guard, "send_text", {"text": "a"}, "r")
+    _guard_call(guard, "send_text", {"text": "a"}, "r")
+    _guard_call(guard, "send_text", {"text": "b"}, "r")
 
-    assert "提醒" not in _call(guard, "send_text", {"text": "b"}, "r")
+    assert "提醒" not in _guard_call(guard, "send_text", {"text": "b"}, "r")
 
 
 # ---- 注册 ----

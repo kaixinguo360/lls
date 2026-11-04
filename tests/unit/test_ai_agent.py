@@ -398,6 +398,39 @@ def test_poll_cancels_the_stream_and_closes_it() -> None:
     assert state["closed"] is True
 
 
+def test_a_running_tool_can_be_interrupted() -> None:
+    """工具跑着的时候也要能中断：不设步数上限靠的就是这一下 Ctrl-C。"""
+    state = {"started": False, "cancelled": False}
+
+    async def slow(args):
+        state["started"] = True
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            state["cancelled"] = True
+            raise
+        return "done"
+
+    async def poll(timeout):
+        await asyncio.sleep(0)
+        if state["started"]:
+            raise AgentCancelled("stop")
+
+    agent = Agent(
+        ScriptedProvider([_calls(_call("c1", "slow", {})), _text("不该走到这一步")]),
+        "m",
+        system=SYSTEM,
+        tools=[_tool("slow", slow)],
+        poll=poll,
+    )
+
+    with pytest.raises(AgentCancelled):
+        asyncio.run(agent.run("任务"))
+
+    # 等它真的停下才抛：否则「中断」只是把协程扔了，活儿还在跑。
+    assert state["cancelled"] is True
+
+
 # ---- 事件与请求形状 ----
 
 

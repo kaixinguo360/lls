@@ -10,11 +10,15 @@
 
 输出走临时文件而不是管道：超时杀掉进程组之后，已经写出来的部分仍然拿得回，
 也不会因为管道写满而死锁。
+
+**中断也照这个办**：调用方取消（用户按下 Ctrl-C）时先整组杀掉再抛出去 ——
+模型停了、make 还在后台跑，是比不中断更糟的结果。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import signal
@@ -32,6 +36,7 @@ DEFAULT_BASH_TIMEOUT = 120.0  # bash 未给 timeout 时的取值
 MAX_BASH_TIMEOUT = 600.0      # bash 的 timeout 上限
 MAX_BASH_CHARS = 12_000       # bash 的 stdout / stderr 各自最多回多少字符
 BASH_KEEP_TAIL = 0.75         # 截断时尾部留多少（头部留剩下的）
+KILL_WAIT = 5.0               # 杀完之后最多等这么久收尸，别卡住中断
 
 BASH_TOOL = Tool(
     name="bash",
@@ -146,6 +151,12 @@ class Shell:
                     timed_out = True
                     _kill_group(proc)
                     code = await waiter
+                except asyncio.CancelledError:
+                    # 用户按了 Ctrl-C：连子进程一起收掉再抛，别把 make 留在背后。
+                    _kill_group(proc)
+                    with contextlib.suppress(BaseException):
+                        await asyncio.wait_for(waiter, KILL_WAIT)
+                    raise
             elapsed = time.monotonic() - started
             try:
                 with open(pwd_file, encoding="utf-8", errors="replace") as handle:

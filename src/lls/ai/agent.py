@@ -6,7 +6,9 @@
 * 工具由调用方以 :class:`AgentTool` 提供（协议定义 + 执行函数），本模块不
   知道任何具体工具；
 * 进度通过 ``on_event`` 外传；中断通过 ``poll`` 回调（抛
-  :class:`AgentCancelled`）；
+  :class:`AgentCancelled`）。``poll`` 在等模型输出时调用，**在等工具跑完时
+  也调用** —— 工具是这一轮里唯一可能跑上几十秒的地方，那一段不接收中断，
+  「用 Ctrl-C 停住它」就只剩杀进程一条路；
 * **继续/结束只由「本轮是否出现工具调用」决定**：没有工具调用就是正常结束，
   assistant 文本即最终答复。这与主流 agent（DSH / opencode）一致 —— 不设
   finish 工具，也不把普通回复当成需要特殊处理的事件。
@@ -23,6 +25,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass
 from enum import Enum
@@ -364,7 +367,7 @@ class Agent:
             return "error: tool arguments must be a JSON object"
 
         try:
-            result = await entry.run(arguments)
+            result = await self._settle(asyncio.ensure_future(entry.run(arguments)))
         except AgentCancelled:
             raise
         except Exception as e:  # noqa: BLE001
@@ -378,6 +381,27 @@ class Agent:
             )
         )
         return result
+
+    async def _settle(self, work: "asyncio.Future[Any]") -> Any:
+        """等工具跑完，期间把中断交回宿主。
+
+        这里是这一轮里唯一可能干等几十秒的地方（bash、wait_for）。本命令不设
+        步数上限，靠的就是「不对劲就按 Ctrl-C」；这一段若不接收中断，那个刹车
+        就只剩杀进程 —— 而中断之后先等它真的停下再抛，免得留一个还在跑的
+        make。
+        """
+        if self._poll is None:
+            return await work
+        try:
+            while not work.done():
+                await self._poll(STOP_POLL)
+        except BaseException:
+            # 不管是 Ctrl-C 还是别的什么把这里掀了，都先停下工具再往外抛。
+            work.cancel()
+            with contextlib.suppress(BaseException):
+                await work
+            raise
+        return await work
 
     # ---- 辅助 ----
 
