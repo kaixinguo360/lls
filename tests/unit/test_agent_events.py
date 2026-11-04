@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
-from lls.ai import Chunk, ChunkKind, ConfigError
+from lls.ai import Chunk, ChunkKind, ConfigError, ToolCall, ToolCallDelta
 from lls.ai.sessions import SessionBusy, SessionStore
-from lls.ai.sessions.events import INTERRUPT_MARKER
+from lls.ai.sessions.events import INTERRUPT_MARKER, SUMMARY_PREFIX
 from lls.commands.builtin import agent as agent_cmd
 from lls.session.errors import Interrupted
 from lls.commands.builtin import sessions as sessions_cmd
@@ -133,6 +134,24 @@ def _text(value: str, usage=None):
         chunks.append(Chunk(ChunkKind.USAGE, usage=usage))
     chunks.append(Chunk(ChunkKind.DONE))
     return chunks
+
+
+def _call(call_id: str, name: str, arguments) -> ToolCall:
+    raw = arguments if isinstance(arguments, str) else json.dumps(arguments)
+    return ToolCall(id=call_id, name=name, arguments=raw)
+
+
+def _calls(*calls) -> list:
+    """按 wire 的样子把工具调用拆成分片（id/name 只在首片）。"""
+    chunks = []
+    for index, call in enumerate(calls):
+        chunks.append(
+            Chunk(
+                ChunkKind.TOOL_CALL_DELTA,
+                fragment=ToolCallDelta(index, call.id, call.name, call.arguments),
+            )
+        )
+    return chunks + [Chunk(ChunkKind.DONE)]
 
 
 def _run(monkeypatch, provider, answers, keeper, *, args=None, catalog=None):
@@ -1012,3 +1031,187 @@ def test_undo_takes_back_the_compaction_written_before_the_turn(tmp_path) -> Non
     assert all("新任务" not in (message.content or "") for message in session.history())
     assert session.meta.turns == 3
     session.close()
+
+
+# ---- 先剪后压：便宜的那一半 ----
+
+def _prefill_with_a_big_output(keeper) -> object:
+    """一轮历史，其中一条工具输出顶得上半个窗口。"""
+    session = keeper.create("stub", "m")
+    session.append_user("旧任务")
+    call = ToolCall("c1", "bash", "{}")
+    session.append_assistant("", (call,))
+    session.append_tool_result(call, "输出" * 20_000)
+    session.append_assistant("旧答复")
+    session.append_turn_end("ok")
+    return session
+
+
+def test_a_huge_tool_output_is_pruned_instead_of_summarised(monkeypatch, tmp_path) -> None:
+    """剪一刀就回到水位以内，那次摘要请求根本不必发。"""
+    keeper = SessionStore(root=tmp_path)
+    _prefill_with_a_big_output(keeper).close()
+    provider = ScriptedProvider([_text("新答复")])
+
+    _run(
+        monkeypatch,
+        provider,
+        ["/exit"],
+        keeper,
+        args="新任务",
+        catalog=FakeCatalog(provider, 20000),
+    )
+
+    session = keeper.current()
+    events = session.events()
+    assert [event.type for event in events].count("lls/prune") == 1
+    assert not [event for event in events if event.type == "lls/compact"]
+    # 没有摘要请求：只发了这一轮真正的那一次。
+    assert len(provider.requests) == 1
+    tool = next(message for message in provider.requests[0] if message.role == "tool")
+    assert "已省略" in (tool.content or "")
+    assert len(tool.content or "") < len("输出" * 20_000)
+    assert session.last_turn_end().data["lls"].get("note", "").startswith("已修剪")
+    session.close()
+
+
+def test_the_prune_only_happens_once_per_range(monkeypatch, tmp_path) -> None:
+    """下一轮没有新的超长输出，就不再记第二刀。"""
+    keeper = SessionStore(root=tmp_path)
+    _prefill_with_a_big_output(keeper).close()
+    provider = ScriptedProvider([_text("答复一"), _text("答复二")])
+
+    _run(
+        monkeypatch,
+        provider,
+        ["任务一", "任务二", "/exit"],
+        keeper,
+        catalog=FakeCatalog(provider, 20000),
+    )
+
+    events = keeper.current().events()
+    assert [event.type for event in events].count("lls/prune") == 1
+    keeper.current().close()
+
+
+# ---- 上下文溢出：压到最小再试一次 ----
+
+def test_an_overflow_compacts_and_tries_once_more(monkeypatch, tmp_path) -> None:
+    """装不下时不直接判死：压到最小再试一次，第二次才认。"""
+
+    class OverflowOnce(ScriptedProvider):
+        failed = False
+
+        async def chat(self, model, messages, **kwargs):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("HTTP 400: maximum context length exceeded")
+            async for chunk in super().chat(model, messages, **kwargs):
+                yield chunk
+
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    for index in range(4):
+        session.append_user("旧任务 {}".format(index))
+        session.append_assistant("答" * 700)
+        session.append_turn_end("ok")
+    session.close()
+    provider = OverflowOnce([_text("摘要：以前在聊旧任务"), _text("新答复")])
+
+    _run(
+        monkeypatch,
+        provider,
+        ["/exit"],
+        keeper,
+        args="新任务",
+        catalog=FakeCatalog(provider, 20000),
+    )
+
+    session = keeper.current()
+    compacts = [event for event in session.events() if event.type == "lls/compact"]
+    assert compacts and compacts[0].data["summary"] == "摘要：以前在聊旧任务"
+    # 被拒的那次没算进请求记录：摘要一次，重试一次。
+    assert len(provider.requests) == 2
+    first = provider.requests[1][1]      # [0] 是 system
+    assert (first.content or "").startswith(SUMMARY_PREFIX)
+    assert session.last_turn_end().data["lls"].get("status") == "ok"
+    session.close()
+
+
+def test_a_second_overflow_is_reported_not_retried_forever(monkeypatch, tmp_path) -> None:
+    """压过还装不下就认输：不能把同一笔等待重复到每一步。"""
+
+    class AlwaysOverflow(ScriptedProvider):
+        async def chat(self, model, messages, **kwargs):
+            self.requests.append(list(messages))
+            raise RuntimeError("HTTP 400: maximum context length exceeded")
+            yield Chunk(ChunkKind.DONE)
+
+    keeper = SessionStore(root=tmp_path)
+    provider = AlwaysOverflow([])
+
+    _run(
+        monkeypatch,
+        provider,
+        ["任务", "/exit"],
+        keeper,
+        catalog=FakeCatalog(provider, 20000),
+    )
+
+    session = keeper.current()
+    end = session.last_turn_end()
+    assert end.data["lls"].get("status") == "error"
+    assert "错误：" in end.data["lls"].get("note", "")
+    # 两次就停：一次原请求，一次兜底之后的重试。
+    assert len(provider.requests) == 2
+    session.close()
+
+
+# ---- 轮内压缩：几十步的一轮不该撑爆窗口 ----
+
+def test_a_long_turn_is_compacted_in_the_middle(monkeypatch, tmp_path) -> None:
+    """轮内连读两个大文件就吃满了窗口：第三次请求之前先压，不等到下一轮。"""
+    first = tmp_path / "a.txt"
+    second = tmp_path / "b.txt"
+    first.write_text("甲" * 7000, encoding="utf-8")
+    second.write_text("乙" * 7000, encoding="utf-8")
+    keeper = SessionStore(root=tmp_path / "sessions")
+    provider = ScriptedProvider(
+        [
+            _calls(
+                _call(
+                    "c1",
+                    "read_file",
+                    {"path": str(first), "start_line": 1, "max_lines": 10},
+                )
+            ),
+            _calls(
+                _call(
+                    "c2",
+                    "read_file",
+                    {"path": str(second), "start_line": 1, "max_lines": 10},
+                )
+            ),
+            _text("摘要：读了两个文件"),
+            _text("完"),
+        ]
+    )
+
+    _run(
+        monkeypatch,
+        provider,
+        ["/exit"],
+        keeper,
+        args="读两个文件",
+        catalog=FakeCatalog(provider, 20000),
+    )
+
+    session = keeper.current()
+    assert [event.type for event in session.events()].count("lls/compact") == 1
+    # 第三次请求带着摘要，不再是那两个大文件的原文。
+    sent = provider.requests[3]
+    assert (sent[1].content or "").startswith(SUMMARY_PREFIX)
+    assert all("甲" * 100 not in (message.content or "") for message in sent)
+    assert session.last_turn_end().data["lls"].get("status") == "ok"
+    session.close()
+

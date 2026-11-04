@@ -598,3 +598,40 @@ def test_stream_reply_cancels_the_request_when_the_wait_asks_it_to() -> None:
         return provider
 
     assert asyncio.run(run()).closed is True
+
+
+# ---- 每次请求前都问一遍 ----
+
+def test_before_request_is_asked_before_every_step() -> None:
+    """一轮几十步，工具结果只增不减：每一拍都得重新量一次、重新裁一次。"""
+    seen = []
+
+    async def trim(history):
+        seen.append(len(history))
+        return history[-2:]        # 只留最后一步：assistant + 它那条 tool 回复
+
+    async def handler(args):
+        return "观察"
+
+    provider = ScriptedProvider(
+        [
+            _calls(_call("c1", "echo", {"text": "一"})),
+            _calls(_call("c2", "echo", {"text": "二"})),
+            _text("完"),
+        ]
+    )
+    agent = Agent(
+        provider,
+        "m",
+        system=SYSTEM,
+        tools=[_tool("echo", handler)],
+        before_request=trim,
+    )
+
+    result = asyncio.run(agent.run("任务"))
+
+    # 钩子看到的是「上一次交回去的那份」：1 → 3 → 4 条。
+    assert seen == [1, 3, 4]
+    # 每次真正发出去的，就是钩子交回的那份（messages 首位是 system）。
+    assert [len(entry["messages"]) - 1 for entry in provider.requests] == [1, 2, 2]
+    assert result.messages[-1].content == "完"

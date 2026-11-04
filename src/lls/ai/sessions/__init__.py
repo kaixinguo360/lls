@@ -4,7 +4,7 @@
 事件并派生消息。窗口裁剪在 :mod:`.window`，事件模型在 :mod:`.events`。
 """
 
-from .events import Event, fold, log_entries, task_message
+from .events import Event, fold, log_entries, prune_text, task_message
 from .store import (
     MAX_SESSIONS,
     Session,
@@ -17,18 +17,15 @@ from .store import (
     store,
 )
 from .window import (
-    CHARS_PER_TOKEN,
     COMPACT_TARGET_RATIO,
     COMPACT_TRIGGER_RATIO,
     Window,
     default_budget,
     estimate_tokens,
     fit,
-    last_turns,
 )
 
 __all__ = [
-    "CHARS_PER_TOKEN",
     "COMPACT_TARGET_RATIO",
     "COMPACT_TRIGGER_RATIO",
     "Event",
@@ -44,9 +41,9 @@ __all__ = [
     "estimate_tokens",
     "fit",
     "fold",
-    "last_turns",
     "log_entries",
     "new_session_id",
+    "prune_text",
     "store",
     "task_message",
 ]

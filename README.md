@@ -116,16 +116,20 @@ sessions/
     events.jsonl              session / turn/start / step/start / step/end /
                               user/message / system/message / request/header /
                               request/context / assistant/message / tool/call /
-                              tool/result / turn/end / lls/screen / lls/compact
+                              tool/result / turn/end / lls/screen / lls/compact /
+                              lls/prune
     blobs/<sha1>              超过 8KB 的工具输出与画面正文，事件里只留指针
     lock                      占用者的 fcntl 排他锁
 ```
 
 送进模型的上下文是**按预算从事件里派生**的只读视图，与磁盘上留了多少无关：
 
-- 预算 = `min(context_window * 0.6, ai.context_limit)`，按 token 估算，
-  优先用 provider 返回的 `usage`；
-- 从尾部向前装，按 `user` 边界切分，`tool_calls` 与对应 `tool` 回复不拆；
+- 预算 = `min(context_window * 0.6, 窗口 - 输出预留 - 余量, ai.context_limit)`，
+  按 token 估算（ASCII 四字符一个、CJK 一个码点一个）；
+- 从尾部向前装，按**步**切分（`assistant` 连同它那批 `tool` 回复算一块），
+  因此 `tool_calls` 与对应回复不拆；一轮几十步也裁得动；
+- **每次请求之前**都重新量一次：轮内工具结果只增不减，只在轮首裁一次的话，
+  长轮次照样会把窗口撑爆；
 - 每轮随任务发出去的终端画面单独落一条 `screen`，`user` 指向它：重放出来的
   就是当时发出去的那条消息（逐字相同，缓存的前缀才连得上），画面没留下就
   退回纯任务；
@@ -133,9 +137,13 @@ sessions/
 - 中断、出错的轮次仍会进入上下文：没等到结果的 `tool_calls` 补一条 `error: …`，
   中断的那一轮再补一行「被用户中断」的标记 —— 下一轮看得见上一轮停在哪儿，
   不会重复已完成的操作；
-- 用量到预算的 85% 就把最旧的一段压成摘要、压回预算的 60%（`lls/compact` 事件，原文
-  仍在 events 里），两次压缩之间因此隔得开几轮；新摘要以旧摘要为底稿合并；
-  摘要失败才退回硬截断，压掉的太少就不压 —— 摘要请求本身也会产生开销。
+- 到水位（预算的 85%）时**先剪后压**：先把超过 8K 字的工具输出剪成「开头 3K +
+  省略标记 + 结尾 1K」（`lls/prune` 事件，只记参数），剪完回到水位以内就不再
+  发摘要请求；还超才把最旧的一段压成摘要、压回预算的 60%（`lls/compact` 事件，
+  原文仍在 events 里），两次压缩之间因此隔得开几轮；新摘要以旧摘要为底稿合并；
+- 摘要比原文短不到一半就放弃：宁可硬截断，也不花一次请求买回同一段历史；
+- 请求被「上下文超长」拒了之后，压到只留最近一小截再试一次；同一轮里压缩
+  失败过一次就不再重试。
 
 会话内以 `/` 开头的是本地命令，不发给模型（`/help` 列全部）：`/status`（别名 `/s`）
 整屏翻看全部对话（打开即停在最后一行，往上翻看历史；版式与提示里 `(agent)`/`(agent-reply)`/`(agent-note)` 一致），

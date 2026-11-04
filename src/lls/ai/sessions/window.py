@@ -1,36 +1,50 @@
-"""上下文窗口：按 token 预算从尾部裁剪，按轮切分。
+"""上下文窗口：按 token 预算从尾部裁剪，按「一步」切分。
 
 预算与模型有关，与「几轮」无关：一次读大文件就能吃掉半窗，只数轮数根本
 挡不住。这里只做纯计算，不认识磁盘也不发请求，便于单测。
+
+切分的单位是「一步」，不是「一轮」：一轮里能跑几十步，每步都带回一段终端
+画面或文件内容，一轮的体积可以顶满整个窗口。按轮切只剩两种结果 —— 整轮
+留下（装不下，请求照样被 400），或者整轮丢掉（当前任务没了）。按步切才裁
+得动，而且 ``assistant`` 与它那批 ``tool`` 回复永远落在同一块里，裁完不会
+留下没人应答的 tool_calls。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, List, Sequence
+from typing import List, Sequence
 
 from ..types import Message
 from .events import SUMMARY_PREFIX
 
 __all__ = [
+    "ASCII_PER_TOKEN",
     "BUDGET_RATIO",
-    "CHARS_PER_TOKEN",
     "COMPACT_TARGET_RATIO",
     "COMPACT_TRIGGER_RATIO",
+    "HEADROOM",
+    "NON_ASCII_TOKENS",
+    "OUTPUT_RESERVE",
     "Window",
     "default_budget",
     "estimate_tokens",
     "fit",
-    "last_turns",
     "message_tokens",
 ]
 
-#: 粗估：一个 token 大约 3.5 个 UTF-8 字节。中文会低估，但只用于「要不要
-#: 裁」的判断，宁可早裁一点，也不要请求被 400。
-CHARS_PER_TOKEN = 3.5
+#: 粗估用的两个数：ASCII 四字符一个 token，非 ASCII 一个码点一个 token。
+#: 只用于「要不要裁」的判断，宁可早裁一点，也不要请求被 400。
+ASCII_PER_TOKEN = 4.0
+NON_ASCII_TOKENS = 1.0
 
 #: 预算占 context window 的比例，留给输出与工具定义。
 BUDGET_RATIO = 0.6
+
+#: 从窗口里先扣掉的两块：回复与工具定义要占的输出预留，以及压力余量。
+#: 比例本身是拍的；这两个数是「按比例算出来的预算仍然太大」时的兜底。
+OUTPUT_RESERVE = 8_192
+HEADROOM = 16_384
 
 #: 压缩的触发水位：用到预算的这个比例就压，不等装不下才压。等到装不下，
 #: 窗口会一直贴着上限：每轮只丢掉刚超出的那一点，于是每轮都要再压一次。
@@ -81,10 +95,19 @@ class Window:
 
 
 def estimate_tokens(text: str) -> int:
-    """按 UTF-8 字节数粗估 token。"""
+    """按字符集粗估 token。
+
+    旧做法是「UTF-8 字节数 / 3.5」：一个汉字三字节只算 0.86 token，中文
+    历史因此被系统性低估近一半 —— 水位永远到不了，等到 400 才发现。汉字
+    一个码点本来就要一个多 token，英文四字符一个；分开算，误差才在同一边
+    （宁可高估，早一点裁）。
+    """
     if not text:
         return 0
-    return int(len(text.encode("utf-8")) / CHARS_PER_TOKEN) + 1
+    # encode 两次都是 C 里的活：比逐字判断 ``ord(c) > 127`` 快得多。
+    ascii_count = len(text.encode("ascii", "ignore"))
+    non_ascii = len(text) - ascii_count
+    return int(ascii_count / ASCII_PER_TOKEN + non_ascii * NON_ASCII_TOKENS) + 1
 
 
 def message_tokens(message: Message) -> int:
@@ -97,23 +120,33 @@ def message_tokens(message: Message) -> int:
 
 
 def default_budget(context_window: int, limit: int = 0) -> int:
-    """预算 = min(context window * 0.6, 配置上限)；上限为 0 表示不设。"""
+    """预算 = min(context window * 0.6, 窗口扣掉输出预留与余量)；上限 0 不设。
+
+    只按比例算，小窗口会算出「装不下」的预算：32k 的模型拿 0.6 也有 19k，
+    可它还要留 8k 输出、还得给下一批工具结果腾地方。所以再拿
+    ``window - reserve`` 卡一道；窗口本来就比 reserve 还小（测试里的假窗口
+    就是这样）就只按比例算，免得算出 0。
+    """
     window = max(0, int(context_window or 0))
     budget = int(window * BUDGET_RATIO)
+    reserve = OUTPUT_RESERVE + HEADROOM
+    if window > reserve:
+        budget = min(budget, window - reserve)
     if limit and limit > 0:
         budget = min(budget, int(limit))
     return max(0, budget)
 
 
 def fit(messages: Sequence[Message], budget: int, pending: Sequence[Message] = ()) -> Window:
-    """从尾部向前装，装不下就整轮丢掉。
+    """从尾部向前装，装不下就整块丢掉。
 
-    按 ``user`` 边界切分，因此 assistant 的 tool_calls 与对应 tool 回复
-    永远在同一轮里，不会被拆散。
+    切分的单位是「步」：``user`` 自成一块，``assistant`` 连同它后面的
+    ``tool`` 回复是一块。因此 assistant 的 tool_calls 与对应工具回复永远在
+    同一块里，不会被拆散。
 
     ``pending`` 是这一轮一定要发、但还没进历史的消息（当前任务）。它占预算，
     但在没有历史（或全被裁掉）时保证请求里仍有内容可答；反过来，有 ``pending``
-    时最近一轮历史不再享受「必留」特权 —— 否则旧的大轮次会把当前任务挤出预算。
+    时最近一块历史不再享受「必留」特权 —— 否则旧的大块会把当前任务挤出预算。
     """
     messages = list(messages)
     pending = list(pending)
@@ -125,20 +158,20 @@ def fit(messages: Sequence[Message], budget: int, pending: Sequence[Message] = (
     if messages and (messages[0].content or "").startswith(SUMMARY_PREFIX):
         head = [messages.pop(0)]
 
-    turns = _split_turns(messages)
+    steps = _split_steps(messages)
     kept: List[List[Message]] = []
     used = sum(message_tokens(message) for message in head)
     used += sum(message_tokens(message) for message in pending)
-    for turn in reversed(turns):
-        cost = sum(message_tokens(message) for message in turn)
-        # 没有 pending 时最后一条历史必须留：它是这次请求唯一的输入。
+    for step in reversed(steps):
+        cost = sum(message_tokens(message) for message in step)
+        # 没有 pending 时最后一块历史必须留：它是这次请求唯一的输入。
         if budget > 0 and used + cost > budget and (kept or pending):
             break
-        kept.append(turn)
+        kept.append(step)
         used += cost
     kept.reverse()
 
-    kept_count = sum(len(turn) for turn in kept)
+    kept_count = sum(len(step) for step in kept)
     dropped = len(messages) - kept_count
     # 下标以调用方给的列表为准：摘要留在头部，因此要补上它的位置。
     offset = len(head)
@@ -149,7 +182,7 @@ def fit(messages: Sequence[Message], budget: int, pending: Sequence[Message] = (
     if budget > 0 and used > budget:
         note = "单轮已超预算"
     # ``pending`` 只参与预算：它由调用方自己随请求发出去，放进这里会重复一遍。
-    flat: List[Message] = head + [message for turn in kept for message in turn]
+    flat: List[Message] = head + [message for step in kept for message in step]
     return Window(
         flat,
         budget=budget,
@@ -163,19 +196,12 @@ def fit(messages: Sequence[Message], budget: int, pending: Sequence[Message] = (
     )
 
 
-def last_turns(messages: Sequence[Message], turns: int) -> List[Message]:
-    """只留最近 ``turns`` 轮；``turns <= 0`` 表示不限制。"""
-    messages = list(messages)
-    if turns <= 0:
-        return messages
-    return [message for turn in _split_turns(messages)[-int(turns):] for message in turn]
-
-
-def _split_turns(messages: Sequence[Message]) -> List[List[Message]]:
-    turns: List[List[Message]] = []
+def _split_steps(messages: Sequence[Message]) -> List[List[Message]]:
+    """按步切：``tool`` 跟着它前面那条 ``assistant`` 走，其余的各自起一块。"""
+    steps: List[List[Message]] = []
     for message in messages:
-        if message.role == "user" or not turns:
-            turns.append([message])
+        if message.role == "tool" and steps and steps[-1][0].role == "assistant":
+            steps[-1].append(message)
         else:
-            turns[-1].append(message)
-    return turns
+            steps.append([message])
+    return steps

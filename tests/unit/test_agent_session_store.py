@@ -18,10 +18,11 @@ from lls.ai.sessions import (
     SessionBusy,
     SessionError,
     SessionStore,
+    default_budget,
     estimate_tokens,
     fit,
     fold,
-    last_turns,
+    prune_text,
     task_message,
 )
 from lls.ai.sessions.events import (
@@ -384,7 +385,8 @@ def test_events_stay_small_when_the_output_is_big(tmp_path: Path) -> None:
 # ---- 窗口 ----
 
 
-def test_window_drops_whole_turns_and_never_orphans_a_tool(tmp_path: Path) -> None:
+def test_window_drops_whole_steps_and_never_orphans_a_tool(tmp_path: Path) -> None:
+    """按步裁：开头可能落在某一步中间，但每个 tool 回复都跟着它那次调用。"""
     keeper = SessionStore(root=tmp_path)
     session = keeper.create("stub", "m")
     for index in range(4):
@@ -398,10 +400,15 @@ def test_window_drops_whole_turns_and_never_orphans_a_tool(tmp_path: Path) -> No
     window = session.window(budget=600)
 
     assert window.dropped > 0
-    assert window.messages[0].role == "user"
-    assert sum(1 for message in window.messages if message.role == "tool") == sum(
-        1 for message in window.messages if message.tool_calls
-    )
+    assert window.messages
+    answered = set()
+    for message in window.messages:
+        if message.role == "assistant":
+            answered = {call.id for call in message.tool_calls}
+        elif message.role == "tool":
+            assert message.tool_call_id in answered
+        else:
+            answered = set()
     assert window.used <= 600
     session.close()
 
@@ -425,16 +432,88 @@ def test_fit_keeps_everything_under_the_budget() -> None:
     assert window.used > 0
 
 
-def test_last_turns_zero_means_no_cap() -> None:
-    messages = [Message("user", "a"), Message("assistant", "b")]
-
-    assert last_turns(messages, 0) == messages
-    assert last_turns(messages, 1) == messages
-
-
-def test_estimate_counts_utf8_bytes() -> None:
+def test_estimate_counts_cjk_per_codepoint() -> None:
+    """一个汉字按一个 token 起算：按 UTF-8 字节打折会把中文低估近一半。"""
     assert estimate_tokens("") == 0
-    assert estimate_tokens("汉" * 35) >= 10
+    assert estimate_tokens("汉" * 35) >= 35
+    assert estimate_tokens("a" * 400) == 101
+
+
+def test_the_budget_leaves_room_for_the_reply() -> None:
+    """大窗口扣比例、也扣输出预留；小窗口不能算出「装不下」的预算。"""
+    assert default_budget(128_000) == 76_800
+    # 32000 扣掉 0.6 之后仍然太大：还得留输出与余量。
+    assert default_budget(32_000) < 32_000 - 8_192
+    assert default_budget(8_000) > 0
+    assert default_budget(128_000, limit=20_000) == 20_000
+
+
+def test_prune_text_keeps_the_head_and_the_tail() -> None:
+    text = "头" * 3000 + "中" * 5000 + "尾" * 3000
+
+    out = prune_text(text, 2000, 500, 200)
+
+    assert out.startswith("头" * 500)
+    assert out.endswith("尾" * 200)
+    assert "已省略" in out
+    # 已经在预算内就不动：修剪绝不能把结果改大。
+    assert prune_text("短", 2000, 500, 200) == "短"
+    assert prune_text("x" * 500, 2000, 400, 200) == "x" * 500
+
+
+def test_a_prune_event_shortens_the_tool_outputs_it_covers(tmp_path: Path) -> None:
+    """修剪只记参数：折出来的那条 tool 回复变成「开头 + 省略 + 结尾」，原文还在。"""
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    call = ToolCall("c1", "bash", "{}")
+    session.append_user("任务")
+    session.append_assistant("", (call,))
+    session.append_tool_result(call, "头" * 3000 + "中" * 5000 + "尾" * 3000)
+    session.append_assistant("答复")
+    session.append_turn_end("ok")
+    tool_seq = next(
+        event.seq for event in session.events() if event.type == "tool/result"
+    )
+
+    session.append_prune(tool_seq, 8000, 2000, 500)
+
+    assert session.pruned_upto() == tool_seq
+    tool = session.history()[2]
+    assert tool.role == "tool"
+    assert tool.content.startswith("头" * 2000)
+    assert tool.content.endswith("尾" * 500)
+    assert "已省略" in tool.content
+    assert len(tool.content) < 3000
+    # 事件里只有参数；原文在 blobs 里，一个字都没删。
+    raw = (session.path / "events.jsonl").read_text("utf-8")
+    assert "中" * 5000 not in raw
+    blobs = list((session.path / "blobs").iterdir())
+    assert any("中" * 5000 in path.read_text("utf-8") for path in blobs)
+    session.close()
+
+
+def test_a_prune_stops_at_its_upto(tmp_path: Path) -> None:
+    """修剪点之后的新结果不受影响：剪的是 seq <= upto，不是「以后都剪」。"""
+    keeper = SessionStore(root=tmp_path)
+    session = keeper.create("stub", "m")
+    first = ToolCall("c1", "bash", "{}")
+    second = ToolCall("c2", "bash", "{}")
+    session.append_user("任务")
+    session.append_assistant("", (first,))
+    session.append_tool_result(first, "旧" * 5000)
+    session.append_assistant("", (second,))
+    session.append_tool_result(second, "新" * 5000)
+    session.append_turn_end("ok")
+    first_seq = next(
+        event.seq for event in session.events() if event.type == "tool/result"
+    )
+
+    session.append_prune(first_seq, 2000, 500, 200)
+
+    tools = [message for message in session.history() if message.role == "tool"]
+    assert "已省略" in (tools[0].content or "")
+    assert tools[1].content == "新" * 5000
+    session.close()
 
 
 # ---- 并发 ----
@@ -659,13 +738,15 @@ def test_fit_counts_the_pending_task_against_the_budget() -> None:
     assert window.used < 200
 
 
-def test_fit_keeps_the_last_turn_when_nothing_is_pending() -> None:
+def test_fit_keeps_the_last_step_when_nothing_is_pending() -> None:
+    """没有 pending 时必须留下最后一块，哪怕它自己就超预算。"""
     messages = [Message("user", "旧" * 400), Message("assistant", "答" * 400)]
 
     window = fit(messages, budget=200)
 
-    assert window.messages == messages
-    assert window.keep_from == 0
+    assert window.messages == [messages[1]]
+    assert window.keep_from == 1
+    assert window.note
 
 
 def test_current_pointer_is_only_a_cache(tmp_path: Path) -> None:

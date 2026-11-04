@@ -210,11 +210,17 @@ class Agent:
         on_event: Callable[[AgentEvent], None] | None = None,
         poll: Callable[[float], Awaitable[None]] | None = None,
         on_message: Callable[[Message, dict | None], None] | None = None,
+        before_request: Callable[[list[Message]], Awaitable[list[Message]]] | None = None,
     ) -> None:
         """``poll`` 在等待模型输出时反复调用，参数是建议等待的秒数。
 
         它应当真的等待（读输入/等信号），并在需要中断时抛
         :class:`AgentCancelled`；立即返回会让循环空转。
+
+        ``before_request`` 在**每一次**请求派发之前调用，交回要发的那份历史：
+        调用方据此裁剪、或者把旧的一段压成摘要。不设这个钩子的话，一次
+        ``run`` 里只有开头那份历史是裁过的 —— 几十步的工具结果一路追加，
+        窗口照样会被撑爆。
         """
         self._provider = provider
         self._model = model
@@ -229,6 +235,7 @@ class Agent:
         # 每条进入会话的消息都回调一次（附带该轮的 usage）：调用方据此
         # 增量落盘，崩溃或中断时也不会丢掉已经发生的部分。
         self._on_message = on_message
+        self._before_request = before_request
         self._usage: dict | None = None
         self._partial = ""
 
@@ -258,6 +265,10 @@ class Agent:
         while True:
             step += 1
             self._emit(AgentEvent(AgentEventKind.STEP, step=step))
+            if self._before_request is not None:
+                # 钩子交回的是**要发的那份**历史：它可能刚被裁过一轮，
+                # 也可能刚把前面一段换成了摘要。之后新消息照旧追加。
+                conversation = list(await self._before_request(conversation))
             if self._max_steps is not None and step >= self._max_steps:
                 return await self._finish_at_limit(conversation, step)
 

@@ -34,6 +34,7 @@
 | `tool/result` | `{turn, step, message:{role:"tool", source:{kind:"tool",callId}, toolCallId, content:[text], isError, id}, meta}` |
 | `lls/screen` | `{turn, content/blob, size?}` |
 | `lls/compact` | `{summary, upto_seq}` |
+| `lls/prune` | `{upto_seq, threshold, head, tail}` |
 | `lls/undo` | `{drop_from}` |
 | `lls/model-switch` | `{model}` |
 

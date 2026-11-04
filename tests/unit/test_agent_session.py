@@ -1334,6 +1334,23 @@ def test_a_second_compact_says_it_is_already_small(tmp_path) -> None:
     assert "上次压缩点之后没有新的历史" in services.messages[-1]
     session.close()
 
+
+def test_a_summary_that_does_not_shrink_is_dropped(tmp_path) -> None:
+    """摘要几乎和原文一样长：宁可硬截断，也不花一次请求换同一段历史。"""
+    store = SessionStore(root=tmp_path)
+    session = _seeded(store, turns=4, filler="细" * 300)
+    services = FakeServices([])
+    provider = ScriptedProvider(
+        [[Chunk(ChunkKind.TEXT, "长" * 5000), Chunk(ChunkKind.DONE)]]
+    )
+    worker = agent_cmd._Session(services, provider, "m", session, budget=600, keeper=store)
+
+    asyncio.run(worker._slash_compact(""))
+
+    assert "摘要并没有比原文短多少" in services.messages[-1]
+    assert not [event for event in session.events() if event.type == "lls/compact"]
+    session.close()
+
 # ---- 压缩：摘要的输入与长度跟着被丢量走 ----
 
 

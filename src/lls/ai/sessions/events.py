@@ -25,6 +25,7 @@ __all__ = [
     "INTERRUPT_MARKER",
     "META_TYPES",
     "MISSING_BLOB",
+    "PRUNE_MARKER",
     "SUMMARY_PREFIX",
     "Event",
     "decode",
@@ -32,7 +33,9 @@ __all__ = [
     "fold",
     "log_entries",
     "message_from_parts",
+    "prune_text",
     "reasoning_part",
+    "result_text",
     "task_message",
     "text_part",
     "tool_call_part",
@@ -56,6 +59,7 @@ EVENT_TYPES = frozenset(
         "tool/result",
         "lls/screen",
         "lls/compact",
+        "lls/prune",
         "lls/undo",
         "lls/model-switch",
     }
@@ -69,6 +73,10 @@ META_TYPES = frozenset({"session", "system/message", "request/header", "request/
 
 #: 摘要顶在上下文最前面时用的提示，避免模型把它当成用户新提的任务。
 SUMMARY_PREFIX = "（以下是更早对话的摘要，原文已压缩；需要细节时请问用户）\n"
+
+#: 被修剪的工具输出：中间那段换成这句话。要写清省略了多少字 —— 模型才知道
+#: 自己看到的不是全文，也才知道少了多少。
+PRUNE_MARKER = "\n\n（这段工具输出的中间 {} 字已省略：只保留开头与结尾）\n\n"
 
 #: 正文落在 blobs/ 里但读不出来时的占位：宁可留一句「已清理」，也不要
 #: 静默跳过一个工具回复 —— 那会让 tool_calls 与 tool 对不上。
@@ -252,6 +260,59 @@ def turn_status(event: Event) -> str:
     return _turn_status(event)
 
 
+def prune_text(text: str, threshold: int, head: int, tail: int) -> str:
+    """头保尾留地剪一段工具输出；没超阈值就原样返回。
+
+    预算以字符（码点）计，切片不会切坏代理对。内容已经在预算内就不动 ——
+    修剪绝不能把结果改大，否则每压一次都要重剪一遍，还越剪越贵。
+
+    留着开头是有原因的：命令、报错、路径一般都在前面；留着结尾是因为
+    「最后一行是什么」几乎总是接着往下做时要看的那条信息。
+    """
+    if threshold <= 0 or head < 0 or tail < 0 or len(text) <= threshold:
+        return text
+    if head + tail >= len(text):
+        return text
+    omitted = len(text) - head - tail
+    return text[:head] + PRUNE_MARKER.format(omitted) + text[-tail:]
+
+
+def _prune_rule(events: Iterable[Event]) -> Tuple[int, int, int, int]:
+    """最近一条 ``lls/prune`` 记下的规则：``(upto_seq, threshold, head, tail)``。
+
+    取 ``upto_seq`` 最大的那条：分叉、撤销之后事件不再是严格递增的，但
+    「盖得更远的那一刀」总是该生效的那一条。规则连同参数一起记在事件里，
+    因此以后改常量也不会改写已有会话的重放结果。
+    """
+    rule = (0, 0, 0, 0)
+    for event in events:
+        if event.type != "lls/prune":
+            continue
+        data = event.data
+        upto = data.get("upto_seq")
+        threshold = data.get("threshold")
+        head = data.get("head")
+        tail = data.get("tail")
+        if not _is_int(upto) or int(upto) <= 0:
+            continue
+        if not (_is_int(threshold) and _is_int(head) and _is_int(tail)):
+            continue
+        if int(upto) >= rule[0]:
+            rule = (int(upto), int(threshold), int(head), int(tail))
+    return rule
+
+
+def _pruned(text: str, seq: int, rule: Tuple[int, int, int, int]) -> str:
+    upto, threshold, head, tail = rule
+    if not upto or seq > upto:
+        return text
+    return prune_text(text, threshold, head, tail)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def fold(
     events: Iterable[Event],
     blobs: Optional[Callable[[str], Optional[str]]] = None,
@@ -259,9 +320,11 @@ def fold(
 ) -> List[Message]:
     """把事件折成 ``Message`` 序列（不含 system）。
 
-    ``lls/compact`` 把 ``seq <= upto_seq`` 的区间换成一段摘要；工具输出
-    落在 blobs 里时由 ``blobs`` 读回，读不到就用占位文本 —— 但绝不跳过
-    消息，否则 tool_calls 会失去配对。
+    ``lls/compact`` 把 ``seq <= upto_seq`` 的区间换成一段摘要；``lls/prune``
+    把同一区间里超长的工具输出换成「开头 + 省略标记 + 结尾」。两者都是纯
+    派生的视图：原文还在磁盘上，重放只按事件里记下的参数重算，因此同一条
+    事件流永远折出同一份上下文。工具输出落在 blobs 里时由 ``blobs`` 读回，
+    读不到就用占位文本 —— 但绝不跳过消息，否则 tool_calls 会失去配对。
 
     中断和出错的轮次照样进上下文：用户看见屏幕上做到哪一步，模型也该看见，
     否则下一轮它只记得一句重述的任务，会把做过的事情再做一遍。缺的是收尾：
@@ -280,6 +343,7 @@ def fold(
             if isinstance(upto, int) and not isinstance(upto, bool) and upto >= cutoff:
                 cutoff = upto
                 summary = str(data.get("summary") or "")
+    prune = _prune_rule(events)
 
     screens = {event.seq: event for event in events if event.type == "lls/screen"}
     messages: List[Message] = []
@@ -355,7 +419,9 @@ def fold(
             )
             text = message.content or ""
             call_id = _tool_call_id(event)
-            messages.append(Message("tool", text, tool_call_id=call_id))
+            messages.append(
+                Message("tool", _pruned(text, event.seq, prune), tool_call_id=call_id)
+            )
             if marks is not None:
                 marks.append(event.seq)
             pending[:] = [item for item in pending if item[1] != call_id]
@@ -426,6 +492,18 @@ def _entry_text(
     return "".join(
         _part_text(part, blobs)
         for part in event.data.get("content", [])
+        if isinstance(part, Mapping) and part.get("type") == "text"
+    )
+
+
+def result_text(
+    event: Event,
+    blobs: Optional[Callable[[str], Optional[str]]] = None,
+) -> str:
+    """一条 ``tool/result`` 的正文（大的正文在 blobs 里时读回来）。"""
+    return "".join(
+        _part_text(part, blobs)
+        for part in _message_data(event).get("content", [])
         if isinstance(part, Mapping) and part.get("type") == "text"
     )
 

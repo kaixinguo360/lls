@@ -38,6 +38,7 @@ from .events import (
     fold,
     log_entries,
     reasoning_part,
+    result_text,
     text_part,
     tool_call_part,
 )
@@ -614,6 +615,24 @@ class Session:
     def append_compact(self, summary: str, upto_seq: int) -> None:
         self.append("lls/compact", {"summary": summary, "upto_seq": upto_seq})
 
+    def append_prune(
+        self, upto_seq: int, threshold: int, head: int, tail: int
+    ) -> Optional[Event]:
+        """记下一次修剪：``seq <= upto_seq`` 里超长的工具输出只留头尾。
+
+        只记参数，不记改写过后的文本：内容由原文与预算确定性算出来，事件
+        因此很小，重放（以及以后改常量）也永远得到同一份上下文。
+        """
+        return self.append(
+            "lls/prune",
+            {
+                "upto_seq": int(upto_seq),
+                "threshold": int(threshold),
+                "head": int(head),
+                "tail": int(tail),
+            },
+        )
+
     def append_undo(self, drop_from: int) -> Optional[Event]:
         """抹掉 ``seq > drop_from`` 的那一段：撤销上一轮。
 
@@ -807,6 +826,28 @@ class Session:
         if tail and tail[0].type == "lls/compact":
             return _upto(tail[0])
         return 0
+
+    def pruned_upto(self) -> int:
+        """最近一次修剪覆盖到哪一条 seq。"""
+        tail = self._from_end(lambda event: event.type == "lls/prune")
+        if tail and tail[0].type == "lls/prune":
+            return _upto(tail[0])
+        return 0
+
+    def oversized_results(self, after_seq: int, upto_seq: int, threshold: int) -> bool:
+        """``after_seq < seq <= upto_seq`` 的工具输出里，有没有超长到该剪的？
+
+        修剪要写一条事件，而事件一旦写下就再也不会被重算：先问一句，免得
+        每次压缩都留下一刀「其实什么都没剪」的记录。
+        """
+        for event in self.recent():
+            if event.type != "tool/result":
+                continue
+            if event.seq <= after_seq or event.seq > upto_seq:
+                continue
+            if len(result_text(event, self.read_blob)) > threshold:
+                return True
+        return False
 
     def window(self, budget: int) -> Window:
         return fit(self.history(), budget)
@@ -1128,7 +1169,7 @@ class SessionStore:
                 screen = lls.get("screen_seq")
                 if isinstance(screen, int) and not isinstance(screen, bool):
                     lls["screen_seq"] = moved.get(screen, 0)
-            if event.type == "lls/compact":
+            if event.type in ("lls/compact", "lls/prune"):
                 upto = data.get("upto_seq")
                 if isinstance(upto, int) and not isinstance(upto, bool):
                     covered = [
