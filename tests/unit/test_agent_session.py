@@ -20,7 +20,7 @@ from lls.ui import strip_sgr
 from lls.ai.sessions import SessionStore
 from lls.ai.tools import RepeatReminder, ScreenView, builtin_tools
 from lls.ai.tools import shell as shell_mod
-from lls.ai.sessions.events import INTERRUPT_MARKER
+from lls.ai.sessions.events import INTERRUPT_MARKER, SUMMARY_PREFIX
 from lls.session.errors import Interrupted, SessionEnded
 from lls.tty import KeyNameError
 
@@ -1350,6 +1350,45 @@ def test_a_summary_that_does_not_shrink_is_dropped(tmp_path) -> None:
     assert "摘要并没有比原文短多少" in services.messages[-1]
     assert not [event for event in session.events() if event.type == "lls/compact"]
     session.close()
+
+
+def test_slash_compact_goes_all_the_way_down(tmp_path) -> None:
+    """用户按一下就是要压到底：只留最后一块，而不是压回水位再按一次。"""
+    store = SessionStore(root=tmp_path)
+    session = _seeded(store, turns=5, filler="细" * 300)
+    services = FakeServices([])
+    # 预算给得宽松：自动压缩根本不会动，深压照样压。
+    worker = _worker(services, session, store, budget=4000)
+
+    asyncio.run(worker._slash_compact(""))
+
+    messages = session.history()
+    assert len(messages) == 2
+    assert (messages[0].content or "").startswith(SUMMARY_PREFIX)
+    assert messages[1].role == "assistant"
+    session.close()
+
+
+def test_slash_compact_does_not_prune_first(tmp_path) -> None:
+    """手动压缩是「我要摘要」：剪一刀就交差不是这条命令的意思。"""
+    store = SessionStore(root=tmp_path)
+    session = store.create("stub", "m")
+    call = ToolCall("c1", "bash", "{}")
+    session.append_user("旧任务")
+    session.append_assistant("", (call,))
+    session.append_tool_result(call, "输出" * 20_000)
+    session.append_assistant("旧答复")
+    session.append_turn_end("ok")
+    services = FakeServices([])
+    worker = _worker(services, session, store, rounds=3, budget=8000)
+
+    asyncio.run(worker._slash_compact(""))
+
+    kinds = [event.type for event in session.events()]
+    assert kinds.count("lls/prune") == 0
+    assert kinds.count("lls/compact") == 1
+    session.close()
+
 
 # ---- 压缩：摘要的输入与长度跟着被丢量走 ----
 

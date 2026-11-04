@@ -33,6 +33,7 @@ import difflib
 import hashlib
 import json
 import time
+from enum import Enum
 from typing import Any, Dict, List, NamedTuple, Tuple
 
 from lls.ai import (
@@ -101,9 +102,9 @@ _COLLAPSE = object()  # 输入行空了：收起来，屏幕回到单行执行�
 _EXIT = object()
 _CONTINUE = object()
 
-# 摘要是一次网络请求：输入按「这次要丢掉多少」伸缩，不再是固定的四万字。
-# 丢掉十万 token 时只喂四万字原文，早期任务目标会悄悄漏掉；丢两千 token 时
-# 喂四十万字又纯属浪费，还容易被摘要请求自己的窗口卡住。
+# 摘要是一次网络请求：输入按「这次要丢掉多少」伸缩 —— 丢得多就多读原文，
+# 否则早期任务目标会悄悄漏掉；丢得少就别喂一个大请求，那既浪费，也容易被
+# 摘要请求自己的窗口卡住。超过上限就分块滚动。
 COMPACT_SOURCE_CHARS_MIN = 20_000    # 输入下限（字符）：短历史够用
 COMPACT_SOURCE_CHARS_MAX = 40_000    # 单个请求的上限（字符）：再长就分块滚动
 COMPACT_SOURCE_CHARS_PER_TOKEN = 0.5  # 每丢掉一个 token 带多少字原文
@@ -162,8 +163,6 @@ MIN_COMPACT_TOKENS = 1024
 PRUNE_THRESHOLD_CHARS = 8_192   # 超过这么多字才剪
 PRUNE_HEAD_CHARS = 3_072        # 开头留多少字：命令、报错、路径都在前面
 PRUNE_TAIL_CHARS = 1_024        # 结尾留多少字：最后一行往往正是要接着看的
-# 溢出兜底：只留这么多比例的近期历史，其余全压进摘要。
-COMPACT_MAXIMAL_RATIO = 0.15
 # 被摘要换掉的那段，至少要缩到一半以下才算划算：压完几乎没变小，就等于
 # 花一次请求买了同一段历史，还丢了原文。
 COMPACT_SHRINK_RATIO = 0.5
@@ -214,7 +213,7 @@ _SLASH_COMMANDS = (
         "/model [provider/model]",
     ),
     _SlashCommand(
-        "compact", (), "_slash_compact", "立刻把最旧的一段历史压成摘要", "/compact"
+        "compact", (), "_slash_compact", "立刻压到底：只留最后一步，其余进摘要", "/compact"
     ),
     _SlashCommand("tools", (), "_slash_tools", "列出模型可用的工具", "/tools"),
     _SlashCommand(
@@ -287,6 +286,19 @@ _SLASH_POLICY = {
     "_slash_undo": "idle",
     "_slash_exit": "abort",
 }
+
+
+class _CompactMode(str, Enum):
+    """压缩的三种来路 —— 决定压多深、要不要先修剪。
+
+    自动压缩要留出水位以上的余量，所以只压回目标线；手动和溢出都压到底，
+    区别在修剪：手动是用户明确要摘要，先剪一刀会让「已压缩」名不副实；
+    溢出是请求刚被拒过，先剪（不发请求）往往就能救回来。
+    """
+
+    AUTO = "auto"
+    OVERFLOW = "overflow"
+    MANUAL = "manual"
 
 
 class _CompactFailed(Exception):
@@ -1042,18 +1054,16 @@ class _Session:
         return _CANCEL
 
     async def _slash_compact(self, args: str) -> Any:
-        """立刻压一次历史。摘要是一次网络请求：先摆出这一相，且可中断。"""
+        """立刻压一次历史，压到底。摘要是一次网络请求：先摆出这一相，且可中断。"""
         if self._session is None:
             await self._s.show_message("本次会话不持久化，没有可压缩的历史")
             return _CANCEL
         painter = _Painter(self._s)
         # 这时没人打字：这一行状态自己画上去，压完由 finally 收尾。
         painter.compacting()
-        self._compacted_now = False
-        self._pruned_now = False
         try:
             window = await offload(self._prepare_window, ())
-            compressed = await self._compact(window, (), force=True)
+            compressed = await self._compact(window, (), mode=_CompactMode.MANUAL)
         except (Aborted, _CompactFailed) as e:
             await self._s.show_message("{}，历史没有改动".format(e))
             return _CANCEL
@@ -1061,11 +1071,7 @@ class _Session:
             self._s.restore_context()
         after = await offload(self._prepare_window, ())
         if compressed:
-            await self._s.show_message(
-                "{}，当前窗口 {}".format(
-                    "已修剪" if self._pruned_now else "已压缩", after.describe()
-                )
-            )
+            await self._s.show_message("已压缩，当前窗口 {}".format(after.describe()))
         else:
             await self._s.show_message(
                 "{}；当前窗口 {}".format(self._skip_reason(), after.describe())
@@ -1749,34 +1755,30 @@ class _Session:
         self,
         window: Any,
         pending: Any = (),
-        force: bool = False,
-        maximal: bool = False,
+        mode: _CompactMode = _CompactMode.AUTO,
     ) -> bool:
-        """到水位就把最旧的一段压成摘要，一次压回目标水位；失败退回硬截断。
+        """把旧历史压成摘要，一次压到位；压不成就不动历史。
 
-        三步，一步比一步贵：
+        三种来路（见 :class:`_CompactMode`），只差两件事：**压多深**、**剪不剪**。
 
-        1. **修剪**：把超长的工具输出剪成头尾（见 :meth:`_prune`）。不发请求，
-           剪完常常就回到水位以内 —— 那这一次到此为止，摘要根本不必发。
-        2. **摘要**：还超，就让模型把这一段压成要点。
-        3. **兜底**：压了几乎没变小就放弃，照常硬截断。花一次请求买回同一段
-           历史、还丢掉原文，不如不压。
+        * 自动：到水位才动手，先修剪再摘要 —— 修剪不发请求，剪完常常就回到
+          水位以内，那一次摘要根本不必发。压到 ``COMPACT_TARGET_RATIO`` 的
+          水位，好让后面几轮有地方攒。
+        * 溢出：请求刚被「装不下」顶回来。先剪（同样的毛病通常就是几条巨大
+          的输出），再压到底 —— 只留最后一块，其余全进摘要。
+        * 手动：用户按了 ``/compact``。不修剪、不问水位、不看
+          :data:`MIN_COMPACT_TOKENS`，直接压到底 —— 用户要的是一次到底，
+          而不是压回水位再按一次。
 
-        两种触发：这一轮已经装不下（``window.dropped``），或者用量到了
-        ``COMPACT_TRIGGER_RATIO``。压到哪儿由 ``COMPACT_TARGET_RATIO`` 决定，
-        不是「刚好够这一轮」—— 只补足一轮的话，窗口会一直贴着上限，
-        每轮都要重摘一遍整段前缀。
-
-        ``force`` 是用户显式要求的（/compact）：不问水位，也不看
-        :data:`MIN_COMPACT_TOKENS` —— 那是自动触发时的划算判断，不该否决一条
-        明确的指令。``maximal`` 是上下文已经溢出后的兜底：只留
-        :data:`COMPACT_MAXIMAL_RATIO` 那一小截，剪不动也照剪。
+        三种都守同一条实质约束：**压了必须能前进**（cutoff 越过
+        :meth:`compacted_upto`，顶部摘要不自压），**摘要必须真的变小**
+        （不到被丢量的一半就放弃，宁可硬截断，也不花一次请求买回同一段历史）。
 
         ``target.keep_from`` 是消息列表里第一个被保留的下标，据此换算成「裁到
         哪一条事件」。摘要本身顶在头部，不能拿消息条数相减来算，否则每次都少
         裁一条，第二次以后 cutoff 不前进，压缩就只剩第一次生效。
 
-        只有 ``force`` 才会向用户交代结果，所以也只有这条路径记原因
+        只有手动那条路才会向用户交代结果，所以也只有它记原因
         （``self._compact_skip``）：自动压缩的每次跳过都只是一次静默的否决，
         没人会问「为什么没压」。
         """
@@ -1786,39 +1788,39 @@ class _Session:
         if window.budget <= 0:
             self._compact_skip = "no-budget"
             return False
-        trigger = int(window.budget * COMPACT_TRIGGER_RATIO)
-        if not force and not maximal and not window.dropped and window.used < trigger:
+        deep = mode is not _CompactMode.AUTO
+        waterline = int(window.budget * COMPACT_TRIGGER_RATIO)
+        if not deep and not window.dropped and window.used < waterline:
             return False
 
-        budget = _target_budget(window.budget, maximal)
+        # 压到底只留最后一块（那是当前这一步，压不掉）；自动压缩压回目标水位。
+        target_line = 1 if deep else int(window.budget * COMPACT_TARGET_RATIO)
         messages, marks = self._session.history_marks()
         # 顶部那条摘要不参与压缩：它既不该算进被压掉的区间，也不能被自己覆盖。
         pinned = 1 if messages and _is_summary(messages[0]) else 0
-        target = fit(messages, budget, pending)
+        target = fit(messages, target_line, pending)
         cut = target.keep_from
 
-        if self._prune(marks):
+        if mode is not _CompactMode.MANUAL and self._prune(marks):
             window = self._prepare_window(pending)
-            # 剪完就回到水位以内，这一次到此为止：/compact 也算数 —— 剪掉大半
-            # 段画面转储本来就是压缩，再花一次请求去摘那点剩料不划算。
-            if not maximal and not window.dropped and window.used < trigger:
+            if not window.dropped and window.used < waterline:
                 self._pruned_now = True
                 return True
             messages, marks = self._session.history_marks()
             pinned = 1 if messages and _is_summary(messages[0]) else 0
-            target = fit(messages, budget, pending)
+            target = fit(messages, target_line, pending)
             cut = target.keep_from
 
         if cut <= pinned or cut > len(marks):
             self._compact_skip = "no-progress"
             return False
-        if not force and not maximal and target.dropped_tokens < MIN_COMPACT_TOKENS:
+        if not deep and target.dropped_tokens < MIN_COMPACT_TOKENS:
             return False
         source, chars = _compact_limits(target.dropped_tokens, window.budget)
         # 摘要自己也要占位置：按它大概多长把目标线再往下压一点，否则压完刚好
         # 贴着目标线，加上摘要就又超了 —— 下一次请求立刻又回到水位。
-        if budget > chars:
-            deeper = fit(messages, budget - chars, pending)
+        if not deep and target_line > chars:
+            deeper = fit(messages, target_line - chars, pending)
             if cut < deeper.keep_from <= len(marks):
                 target = deeper
                 cut = deeper.keep_from
@@ -1828,7 +1830,7 @@ class _Session:
             return False
         previous = messages[0].content[len(SUMMARY_PREFIX):] if pinned else ""
         summary = await self._summarize(messages[pinned:cut], previous, source, chars)
-        if not maximal and estimate_tokens(summary) > target.dropped_tokens * COMPACT_SHRINK_RATIO:
+        if estimate_tokens(summary) > target.dropped_tokens * COMPACT_SHRINK_RATIO:
             self._compact_skip = "no-shrink"
             return False
         self._session.append_compact(summary, cutoff)
@@ -1838,10 +1840,13 @@ class _Session:
     def _prune(self, marks: Any) -> bool:
         """把历史里超长的工具输出剪一刀；记下这一刀就返回 True。
 
-        剪的是整段可见历史，不只是马上要被压掉的那一段。走到这里说明已经到
-        了水位，而这时候最占地方的通常正是几条巨大的画面转储：原文都完整地
-        躺在磁盘上，模型要细节可以再读一次；留着全文把窗口撑爆，才是真的没
-        法继续。最新那一条也照剪 —— 撑爆窗口的往往就是它。
+        走到这里说明已经到水位（或请求刚被拒），而这时候最占地方的通常正是
+        几条巨大的画面转储。原文都完整地躺在磁盘上，模型要细节可以再读一次；
+        留着全文把窗口撑爆，才是真的没法继续。最新那一条也照剪 —— 撑爆窗口
+        的往往就是它。
+
+        手动压缩（``/compact``）不走这一步：那一次本来就要把整段换成摘要，
+        多剪一刀既省不下请求，也让「已压缩」和实际做的不是一回事。
         """
         if self._session is None or not marks:
             return False
@@ -1859,15 +1864,15 @@ class _Session:
         )
 
     async def _recover(self, window: Any, painter: "_Painter") -> Any:
-        """上下文溢出之后：压到最小，再试一次。
+        """上下文溢出之后：压到底，再试一次。
 
-        请求已经被拒过，水位和目标都不再重要：先剪超长的工具输出（超长的那
-        一条单独就能撑爆窗口），再把旧历史整段压进摘要，只留最近一小截。
-        压不成也照样返回 —— 再试一次才知道是真装不下，还是这次能过。
+        请求已经被拒过，水位和目标都不再重要：先剪掉超长的工具输出，再只留
+        最后一块、其余全进摘要。压不成也照样返回 —— 再试一次才知道是真装不
+        下，还是这次能过。
         """
         painter.compacting()
         try:
-            await self._compact(window, (), force=True, maximal=True)
+            await self._compact(window, (), mode=_CompactMode.OVERFLOW)
         except _CompactFailed as e:
             self._compact_error = str(e)
         finally:
@@ -2112,13 +2117,6 @@ def _context_overflow(error: Any) -> bool:
     if "http 4" not in text:
         return False
     return any(hint in text for hint in _OVERFLOW_HINTS)
-
-
-def _target_budget(budget: int, maximal: bool = False) -> int:
-    """压缩的目标预算：平时压回目标水位；溢出兜底时只留最近一小截。"""
-    if maximal:
-        return max(1, int(budget * COMPACT_MAXIMAL_RATIO))
-    return int(budget * COMPACT_TARGET_RATIO)
 
 
 def _row(message: Any) -> str:
