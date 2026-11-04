@@ -11,6 +11,7 @@ import inspect
 import json
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +34,7 @@ class FakeScreen:
     columns = 80
     rows = 24
     alternate = False
+    host_modes = frozenset()
 
     def __init__(self, text: str = "screen", texts=None, increment: bool = False) -> None:
         self._text = text
@@ -40,6 +42,7 @@ class FakeScreen:
         self._increment = increment
         self._calls = 0
         self.limits = []
+        self.cursor = SimpleNamespace(x=0, y=0, hidden=False)
 
     def text(self, **kwargs) -> str:
         self.limits.append(kwargs.get("limit"))
@@ -365,7 +368,7 @@ def test_a_task_can_take_several_tool_rounds(monkeypatch) -> None:
     # 第三轮请求里能看到 read_terminal 的观察（作为工具结果回灌）
     observation = provider.requests[2]["messages"][-1]
     assert observation.role == "tool"
-    assert "<terminal_state>" in (observation.content or "")
+    assert "<terminal_state " in (observation.content or "")
     # 最终答复进入下一轮提示
     assert any("全部通过" in prompt for prompt in services.prompts)
     assert result.handler == "default"
@@ -948,7 +951,7 @@ def test_read_terminal_returns_the_screen_and_status() -> None:
         tools["read_terminal"].run({"lines": 30, "wait_seconds": 0})
     )
 
-    assert "<terminal_state>" in result
+    assert "<terminal_state " in result
     assert "hello" in result
     assert "<status>quiet</status>" in result
     assert screen.limits[-1] == 30
@@ -1558,6 +1561,7 @@ def test_agent_tool_schemas_are_strict_and_required() -> None:
         "bash",
         "read_terminal",
         "wait_for",
+        "resize_terminal",
         "send_text",
         "send_keys",
         "send_raw",

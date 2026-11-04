@@ -29,12 +29,20 @@ from lls.ai.types import Tool
 
 
 class FakePort:
-    """四方法的最小终端：满足 ``TerminalPort``，没有引擎。"""
+    """最小终端：满足 ``TerminalPort``，没有引擎。"""
 
     def __init__(self, text: str = "line") -> None:
-        self.screen = SimpleNamespace(text=lambda limit=0: text)
+        self.screen = SimpleNamespace(
+            text=lambda limit=0: text,
+            rows=24,
+            columns=80,
+            cursor=SimpleNamespace(x=0, y=0, hidden=False),
+            alternate=False,
+            host_modes=frozenset(),
+        )
         self.written = []
         self.flushed = 0
+        self.resized: list[tuple[int, int]] = []
 
     def write(self, data: bytes, *, enter: bool = False) -> None:
         self.written.append((data, enter))
@@ -44,6 +52,10 @@ class FakePort:
 
     async def wait(self, timeout: float) -> None:
         await asyncio.sleep(0)
+
+    def resize(self, rows: int, columns: int) -> tuple[int, int]:
+        self.resized.append((rows, columns))
+        return rows, columns
 
 
 def _tool(name: str) -> Tool:
@@ -68,6 +80,7 @@ def test_builtin_tools_are_strict_and_named() -> None:
         "bash",
         "read_file",
         "read_terminal",
+        "resize_terminal",
         "send_keys",
         "send_raw",
         "send_text",

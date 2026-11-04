@@ -810,6 +810,42 @@ class Engine:
             self._pty.resize(size.lines, size.columns)
         self._relayout_overlay()
 
+    def resize(self, rows: int, columns: int) -> tuple[int, int]:
+        """把模型与子进程的 pty 一起调到给定尺寸，返回实际生效的行列。
+
+        只允许比宿主窗口小（像分屏）：模型比物理屏幕大时，渲染会写到宿主之外，
+        或让终端把光标夹到底行 —— 画面与模型随即错位，而那种错位正是「绝不
+        越界」那条约束要防的。放大由用户拖窗口（SIGWINCH）来做。
+        """
+        try:
+            host = os.get_terminal_size()
+        except OSError:
+            host = os.terminal_size((80, 24))
+        rows = max(1, min(int(rows), host.lines))
+        columns = max(1, min(int(columns), host.columns))
+        previous = self.screen.rows
+        self.screen.resize(rows, columns)
+        if self._pty is not None:
+            self._pty.resize(rows, columns)
+        self._relayout_overlay()
+        self._blank_below(rows, previous)
+        return rows, columns
+
+    def _blank_below(self, rows: int, previous: int) -> None:
+        """模型比调用前矮：把模型下方那几行擦掉。
+
+        调小之后物理屏幕比模型高，渲染只覆盖 0..rows-1，底下会留着调小前的
+        旧画面。擦行会把物理光标带走，所以顺手把它放回模型该在的位置。
+        """
+        if self._console is None or rows >= previous:
+            return
+        with self._out.frame():
+            out = [
+                "\x1b[{};1H\x1b[0K".format(row + 1) for row in range(rows, previous)
+            ]
+            self._out.write("".join(out).encode())
+            self._place_physical_cursor()
+
     def _relayout_overlay(self) -> None:
         """窗口尺寸变了：覆盖层按新尺寸重排，和模型一起铺一遍。
 

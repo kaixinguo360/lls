@@ -27,6 +27,7 @@ __all__ = [
     "DEFAULT_READ_LINES",
     "MAX_LINES",
     "READ_TOOL",
+    "RESIZE_TOOL",
     "SEND_KEYS_TOOL",
     "SEND_RAW_TOOL",
     "SEND_TEXT_TOOL",
@@ -42,6 +43,13 @@ READ_POLL = 0.1           # 读终端时轮询键盘的间隔
 READ_QUIET = 0.25         # 画面多久不变算静默
 MAX_WAIT = 60.0           # read_terminal 的 wait_seconds 上限
 MAX_WAIT_FOR = 600.0      # wait_for 的 timeout 上限：长编译也该等得到
+MAX_RESIZE_ROWS = 500     # resize_terminal 的行数上限
+MAX_RESIZE_COLUMNS = 1000 # resize_terminal 的列数上限
+
+#: 括号粘贴的开关与两个边界。终端只在子进程主动打开 ``?2004`` 时才认它们。
+PASTE_MODE = 2004
+PASTE_OPEN = b"\x1b[200~"
+PASTE_CLOSE = b"\x1b[201~"
 
 
 class TerminalPort(Protocol):
@@ -49,7 +57,8 @@ class TerminalPort(Protocol):
 
     ``screen`` 是子进程的屏幕模型（``text(limit=...)`` 取尾部若干行）；
     ``write`` 往子进程写字节；``flush_model`` 把还没解析的输出喂给模型 ——
-    读之前必须先追上，否则读到的是上一刻的画面。
+    读之前必须先追上，否则读到的是上一刻的画面；``resize`` 把模型与子进程
+    一起调到给定尺寸，返回实际生效的行列（工具有权要求的、比宿主窗口小）。
     """
 
     @property
@@ -60,6 +69,8 @@ class TerminalPort(Protocol):
     def flush_model(self) -> None: ...
 
     async def wait(self, timeout: float) -> None: ...
+
+    def resize(self, rows: int, columns: int) -> tuple[int, int]: ...
 
 
 #: 等的时候「同时处理键盘事件」的回调（Ctrl-C 由它变成取消）。
@@ -167,7 +178,11 @@ class ScreenView:
                 return text, "matched"
 
     def observe(self, text: str, status: str) -> str:
-        """把一次读取包成观察块；与上次相同则省略正文。"""
+        """把一次读取包成观察块；与上次相同则省略正文。
+
+        抬头那四个属性是「我在看什么」：窗口多大、光标在第几行第几列（1-based）、
+        当前是主屏还是备用屏。没有它们，模型驱动全屏程序只能靠画面差分猜位置。
+        """
         if text == self._last:
             body = "（与上次读取相同）"
         else:
@@ -175,8 +190,18 @@ class ScreenView:
             self._last = text
         if not body.strip():
             body = "（屏幕为空）"
+        screen = self._port.screen
+        cursor = screen.cursor
+        head = '<terminal_state rows="{}" cols="{}" cursor="{},{}" buffer="{}">'.format(
+            screen.rows,
+            screen.columns,
+            cursor.y + 1,
+            cursor.x + 1,
+            "alternate" if screen.alternate else "main",
+        )
         return (
-            "<terminal_state>\n"
+            head
+            + "\n"
             + body
             + "\n</terminal_state>\n"
             + "<status>"
@@ -332,6 +357,36 @@ WAIT_FOR_TOOL = Tool(
     strict=True,
 )
 
+RESIZE_TOOL = Tool(
+    name="resize_terminal",
+    description=(
+        "Resize the window the child sees: the screen model and its pty are both "
+        "resized and the child gets SIGWINCH. Only sizes up to the host terminal "
+        "are accepted (a smaller window is like a split pane); a real window "
+        "resize overrides it."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "rows": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_RESIZE_ROWS,
+                "description": "New height in lines.",
+            },
+            "columns": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_RESIZE_COLUMNS,
+                "description": "New width in columns.",
+            },
+        },
+        "required": ["rows", "columns"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 
 # ---- 工具实现 ----
 
@@ -353,10 +408,17 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
             raise ValueError("'enter' must be a boolean")
 
         data = text.encode("utf-8")
+        pasted = b"\n" in data and PASTE_MODE in port.screen.host_modes
+        if pasted:
+            # 多行文本必须走括号粘贴：逐键写进去会被 readline/vim 当成一次次
+            # 键入 —— 每行都被执行、自动缩进叠加。单行不包：``send_text("i")``
+            # 在 vim 里必须是「进入插入模式」，包成粘贴就变成一个普通字符。
+            data = PASTE_OPEN + data + PASTE_CLOSE
         port.write(data, enter=enter)
         appended = bool(enter and not data.endswith(b"\n"))
         return (
             f"已写入 {len(data) + (1 if appended else 0)} 字节"
+            f"{'（括号粘贴）' if pasted else ''}"
             f"{'（末尾已回车）' if appended else ''}。用 read_terminal 查看结果。"
         )
 
@@ -406,10 +468,28 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
         text, status = await view.wait_for(lines, pattern, timeout)
         return view.observe(text, status)
 
+    async def resize_terminal(args: dict[str, Any]) -> str:
+        rows = as_int(args.get("rows"), 0)
+        columns = as_int(args.get("columns"), 0)
+        if rows <= 0 or columns <= 0:
+            raise ValueError("'rows' and 'columns' must be positive")
+
+        actual_rows, actual_columns = port.resize(rows, columns)
+        clamped = (actual_rows, actual_columns) != (rows, columns)
+        return (
+            "终端已调整为 {}×{}{}，子进程收到 SIGWINCH。"
+            "用 read_terminal 查看重排结果。".format(
+                actual_rows,
+                actual_columns,
+                "（宿主窗口更小，已按它收窄）" if clamped else "",
+            )
+        )
+
     return [
         AgentTool(READ_TOOL, read_terminal),
         AgentTool(WAIT_FOR_TOOL, wait_for),
         AgentTool(SEND_TEXT_TOOL, send_text),
         AgentTool(SEND_KEYS_TOOL, send_keys),
         AgentTool(SEND_RAW_TOOL, send_raw),
+        AgentTool(RESIZE_TOOL, resize_terminal),
     ]

@@ -93,10 +93,16 @@ lls bash        # 指定命令
 
 工具：
 
-- `read_terminal`：读取终端最近若干行，可等待输出静默；
-- `send_text`：写入文字，`enter=true` 时作为命令提交；
+- `read_terminal`：读取终端最近若干行，可等待输出静默；观察抬头带
+  `rows`/`cols`/`cursor`/`buffer` —— 窗口多大、光标在第几行第几列（1-based）、
+  当前是主屏还是全屏程序的备用屏；
+- `send_text`：写入文字，`enter=true` 时作为命令提交；文本含换行且子进程
+  开了括号粘贴（`?2004`）时自动包成一次粘贴（单行仍逐键，vim 里的 `i` 才是
+  插入模式）；
 - `send_keys`：具名按键（`enter`/`tab`/`esc`/方向键/`ctrl-c`/`f1`…/`alt-x`）；
 - `send_raw`：以 base64/hex 发送任意字节；
+- `resize_terminal`：把子进程的窗口调成 `rows×columns`（模型与 pty 一起，
+  子进程收到 SIGWINCH）；只能比宿主窗口小，放大交给用户拖窗口；
 - `wait_for`：等到画面出现某段文字（正则，只在之后新出现的行里找）或安静下来，
   慢命令用它一次等到，不必反复读屏；
 - `bash`：在另一个 shell 里跑一条命令，回退出码与完整输出（`cd` 留到下次

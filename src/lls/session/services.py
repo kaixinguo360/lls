@@ -90,6 +90,13 @@ class Services:
         """向子进程写字节；``enter=True`` 时追加换行。"""
         self._engine.write_child(data, enter=enter)
 
+    def resize(self, rows: int, columns: int) -> tuple[int, int]:
+        """把屏幕模型与子进程一起调到给定尺寸，返回实际生效的行列。
+
+        只能比宿主窗口小（像分屏）；放大由用户拖窗口（SIGWINCH）来做。
+        """
+        return self._engine.resize(rows, columns)
+
     # ---- 输入 ----
 
     async def read_chars(self, timeout: float | None = None) -> bytes | None:
