@@ -22,7 +22,7 @@ import signal
 import sys
 import time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 if TYPE_CHECKING:  # 只在类型检查时需要；运行时引擎不认识录制模块
     from lls.recording import TerminalSink
@@ -37,7 +37,7 @@ from lls.edit.complete import (
     display_width,
     ghost_for,
 )
-from lls.term import ScreenModel
+from lls.term import HOST_INPUT_MODES, ScreenModel
 from lls.tty import Console, Key, KeyParser, PtySession, TerminalBackend, Winsize
 from lls.ui import render_row_cells
 
@@ -109,6 +109,10 @@ def _row_paint(cells: Any) -> str:
 
 _BEGIN_SYNC = b"\x1b[?2026h"
 _END_SYNC = b"\x1b[?2026l"
+
+# 光标可见性（DECTCEM）。渲染时由模型决定，交还终端后由子进程的字节决定。
+_HIDE_CURSOR = b"\x1b[?25l"
+_SHOW_CURSOR = b"\x1b[?25h"
 
 
 class _PendingWrites:
@@ -199,6 +203,9 @@ class Engine:
         self._console: Console | None = None
         self._out = _PendingWrites()
         self._loop: asyncio.AbstractEventLoop | None = None
+        # 宿主终端此刻开着哪些上报模式（引擎对宿主的影子）。见 _sync_host_modes。
+        self._host_modes: set[int] = set()
+        self._cursor_shown = True
 
         self._key_parser = KeyParser()
         self._key_buf: list[Key] = []
@@ -310,12 +317,7 @@ class Engine:
                         await self.show_message(f"错误：{e}")
                 # 处理器可能请求了切换（协作式：本轮做完才切）
                 if self._pending_handler is not None:
-                    self._current = self._pending_handler
-                    self._pending_handler = None
-                    # 兜底：换了处理器，上一个处理器的浮层就不该还留在屏上。
-                    # 正常路径上它自己已经收过（read_line / restore），这里
-                    # 只在漏收时补一刀 —— restore 幂等，没有浮层时是空操作。
-                    self.restore()
+                    self._switch_handler(self._pending_handler)
         finally:
             await self._cleanup()
 
@@ -328,6 +330,54 @@ class Engine:
     def request_handler(self, name: str) -> None:
         """请求切换处理器（下一轮生效）。"""
         self._pending_handler = name
+
+    def _switch_handler(self, name: str) -> None:
+        """换处理器：收起上一个的浮层，再把宿主的上报模式调成新处理器要的。"""
+        self._current = name
+        self._pending_handler = None
+        # 兜底：换了处理器，上一个处理器的浮层就不该还留在屏上。
+        # 正常路径上它自己已经收过（read_line / restore），这里只在漏收时
+        # 补一刀 —— restore 幂等，没有浮层时是空操作。
+        self.restore()
+        self._apply_host_modes()
+
+    # ---- 宿主终端的上报模式 ----
+
+    def _apply_host_modes(self) -> None:
+        """渲染接管键盘时关掉宿主的上报，交还时按模型补回。
+
+        「交还时按模型补回」里的模型是**此刻**的模型：渲染期间子进程照样会
+        开关这些模式（agent 用工具起 vim 就是），所以不能拿进入时的快照来恢复
+        —— 那会把已经退掉的鼠标态重新打开，也会漏掉期间新开的。
+
+        进入渲染模式时，「宿主现在开着什么」不用猜：透传期间子进程的字节直达
+        宿主，宿主与模型是同步的，直接以模型为准即可。
+        """
+        if self._console is None:
+            return
+        # 透传时模型在后面追赶；账本要取最新的一拍。
+        self.flush_backlog()
+        want = set(self.screen.host_modes)
+        if not self._passthrough():
+            self._host_modes = set(want)
+            want = set()
+        with self._out.frame():
+            self._sync_host_modes(want)
+
+    def _sync_host_modes(self, want: Iterable[int]) -> None:
+        """把宿主的模式调成 ``want``：多的关掉、缺的打开，只发差分。"""
+        target = set(want) & HOST_INPUT_MODES
+        off = self._host_modes - target
+        on = target - self._host_modes
+        if not off and not on:
+            return
+        parts: list[str] = []
+        if off:
+            parts.append("\x1b[?{}l".format(";".join(str(m) for m in sorted(off))))
+        if on:
+            parts.append("\x1b[?{}h".format(";".join(str(m) for m in sorted(on))))
+        self._out.write("".join(parts).encode())
+        self._host_modes = target
 
     # ---- 退出码 ----
 
@@ -399,6 +449,14 @@ class Engine:
             self.screen.clear_dirty()
 
     async def _cleanup(self) -> None:
+        # 宿主终端的模式不交给子进程收尾：它可能已经死了，没人替它发 ?1000l。
+        # 这里无条件复位，并把光标放回去。
+        if self._console is not None:
+            with self._out.frame():
+                self._sync_host_modes(())
+                if not self._cursor_shown:
+                    self._out.write(_SHOW_CURSOR)
+                    self._cursor_shown = True
         if self._loop is not None:
             for fd in (self._pty_fd, sys.stdin.fileno()):
                 if fd >= 0:
@@ -954,19 +1012,34 @@ class Engine:
         不猜，也就不可能猜错。代价是每帧多写不到一行字节。
 
         浮层收起之后，才回到子进程的光标：那是子进程自己维护的位置，只能按
-        模型定位。
+        模型定位。子进程把光标藏起来时（``?25l``）就不再放 —— 全屏程序画帧的
+        中间态本来就不该露出一个跳动的光标。浮层在时反过来：那是我们的界面，
+        光标必须看得见。
         """
         if self._console is None:
             return
         spot = self.overlay.cursor_position()
         if spot is None:
+            if self.screen.cursor.hidden:
+                if self._cursor_shown:
+                    self._out.write(_HIDE_CURSOR)
+                    self._cursor_shown = False
+                return
+            self._show_cursor()
             c = self.screen.cursor
             self._out.write("\x1b[{};{}H".format(c.y + 1, c.x + 1).encode())
             return
+        self._show_cursor()
         row, prefix = spot
         line = "\x1b[{};1H".format(row + 1)
         line += render_row_cells(prefix, keep_trailing_blank=True)
         self._out.write(line.encode())
+
+    def _show_cursor(self) -> None:
+        """需要时把光标放出来；已经可见就一个字节都不写。"""
+        if not self._cursor_shown:
+            self._out.write(_SHOW_CURSOR)
+            self._cursor_shown = True
 
     def _bell(self) -> None:
         """响一声铃：没有候选、或补全轮盘绕完一圈。

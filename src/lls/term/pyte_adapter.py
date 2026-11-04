@@ -33,7 +33,7 @@ import pyte
 
 from lls.ui.width import conservative_char_width
 
-from .model import BLANK, Cell, Cursor
+from .model import BLANK, HOST_INPUT_MODES, Cell, Cursor
 
 __all__ = ["PyteScreenModel"]
 
@@ -237,6 +237,15 @@ class PyteScreenModel:
     @property
     def alternate(self) -> bool:
         return self._cur is self._alt
+
+    @property
+    def host_modes(self) -> frozenset[int]:
+        """子进程要求的宿主上报模式（pyte 把私有模式码左移了 5 位）。"""
+        return frozenset(
+            code
+            for code in (raw >> 5 for raw in self._cur.mode)
+            if code in HOST_INPUT_MODES
+        )
 
     @property
     def dirty(self) -> frozenset[int]:
