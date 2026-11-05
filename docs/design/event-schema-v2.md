@@ -61,6 +61,13 @@
 - 文本与 `raw` 由同一次工具返回（`Observation`）产出，所以不会各说各话；改格式时
   两者一起改。
 
+## 终端引用
+
+开启录制时，每条事件在 `lls.terminal_cursor` 记录事件发生时的
+`{"recording_id": "...", "frame": N}`；录制停用后不再带这个字段。帧到时间的
+映射由录制包的 `index.jsonl` 负责，事件本身不存区间或正文。详见
+[终端录制与回放](terminal-recording.md)。
+
 ## 版本
 
 - `meta.json.version = 2`；

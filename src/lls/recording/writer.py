@@ -1,15 +1,14 @@
-"""终端录制：原始终端 I/O 的单一事实来源。
+"""终端录制写端：原始终端 I/O 的单一事实来源。
 
-一次启动对应一个 recording id；录制内部按大小分段。达到单次上限时丢弃
-本次最早的分段，保留最新内容；关闭或分段结束时可选 gzip 压缩。
-
-本模块只依赖标准库，不认识 LLS 的会话、模型或界面。别人要用它，只需要
-对上下面两个 Protocol：引擎往里写字节，会话事件记一个帧号。
+一次启动对应一个 recording id；录制内部按大小分段。达到单次上限时丢弃本次
+最早的分段，保留最新内容；关闭或分段结束时按配置压缩。写端只依赖标准库，
+不认识 LLS 的会话、模型或界面。
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import gzip
 import json
 import os
@@ -17,59 +16,39 @@ import secrets
 import shutil
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import TextIO
+
+from .format import CHANNEL_RESIZE, CHANNELS, FORMAT_VERSION, parse_resize
+from .model import TerminalRef
 
 __all__ = [
     "DEFAULT_MAX_RECORDING_BYTES",
     "DEFAULT_MAX_TOTAL_BYTES",
-    "TerminalCursor",
     "TerminalRecorder",
-    "TerminalRef",
-    "TerminalSink",
-    "parse_ref",
 ]
 
 DEFAULT_MAX_RECORDING_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 
 
-class TerminalSink(Protocol):
-    """能接收终端字节的地方。
-
-    引擎只知道自己要「写一帧」：谁在落盘、落哪儿、要不要压缩，一概不管。
-    录制是可选旁路，因此写失败得由调用方就地兜住（见 ``Engine._record``）。
-    """
-
-    def record(self, channel: str, data: bytes | str) -> object:
-        """写入一帧；``channel`` 只有 ``"i"``（输入）与 ``"o"``（输出）。"""
-        ...
+def _private_append(path: Path) -> TextIO:
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o600)
+    return os.fdopen(fd, "a", encoding="utf-8", newline="\n")
 
 
-class TerminalCursor(Protocol):
-    """一条事件要记的录制位置：录制 id 加单调递增的帧号。"""
-
-    recording: str
-    frame: int
-
-
-@dataclass(frozen=True)
-class TerminalRef:
-    """一个可持久化的终端时刻引用。"""
-
-    recording: str
-    frame: int
-
-    def __str__(self) -> str:
-        return "{}:{}".format(self.recording, self.frame)
+def _private_write(path: Path, text: str) -> None:
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
 
 
-def parse_ref(value: str) -> TerminalRef:
-    recording, _, raw = value.rpartition(":")
-    if not recording or not raw.isdigit():
-        raise ValueError("bad terminal ref: {!r}".format(value))
-    return TerminalRef(recording, int(raw))
+def _private_replace(path: Path, text: str) -> None:
+    temp = path.with_name(path.name + ".tmp")
+    _private_write(temp, text)
+    os.replace(temp, path)
 
 
 class TerminalRecorder:
@@ -80,30 +59,53 @@ class TerminalRecorder:
         root: str | os.PathLike[str],
         *,
         recording_id: str | None = None,
+        rows: int | None = None,
+        columns: int | None = None,
         compress: bool = True,
         max_recording_bytes: int = DEFAULT_MAX_RECORDING_BYTES,
         max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
         fsync: bool = True,
     ) -> None:
         self.root = Path(root)
-        self.recording_id = recording_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         if recording_id is None:
-            self.recording_id += "-" + secrets.token_hex(4)
+            recording_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            recording_id += "-" + secrets.token_hex(4)
+        if (
+            not recording_id
+            or recording_id in (".", "..")
+            or "/" in recording_id
+            or "\\" in recording_id
+        ):
+            raise ValueError(f"bad recording id: {recording_id!r}")
+        self.recording_id = recording_id
         self._compress = compress
         self._max_recording_bytes = max(1024, int(max_recording_bytes))
         self._max_total_bytes = max(0, int(max_total_bytes))
         self._fsync = fsync
         self._lock = threading.RLock()
         self._closed = False
+        self._closed_at: float | None = None
         self._frame = 0
         self._segment_no = 0
         self._segments: list[str] = []
         self._created_at = time.time()
+        self._t0 = time.monotonic()
+        self._time_base = 0.0
+        self._started = self._t0
+        self._last_at = 0.0
+        self._initial_rows = rows if rows is not None and rows > 0 else None
+        self._initial_columns = columns if columns is not None and columns > 0 else None
+        self._rows = self._initial_rows
+        self._columns = self._initial_columns
         self.dir = self.root / self.recording_id
-        self.dir.mkdir(parents=True, exist_ok=True)
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with contextlib.suppress(OSError):
+            os.chmod(self.dir, 0o700)
         self._recover()
-        self._index = (self.dir / "index.jsonl").open("a", encoding="utf-8", newline="\n")
+        self._index = _private_append(self.dir / "index.jsonl")
         self._open_segment()
+
+    # ---- 恢复 ----
 
     def _recover(self) -> None:
         """清理崩溃残留：临时文件、半份压缩包。"""
@@ -116,7 +118,7 @@ class TerminalRecorder:
             try:
                 with gzip.open(packed, "rt", encoding="utf-8") as handle:
                     next(handle)
-            except (OSError, EOFError):
+            except (OSError, EOFError, StopIteration):
                 packed.unlink(missing_ok=True)
                 continue
             source.unlink(missing_ok=True)
@@ -124,7 +126,7 @@ class TerminalRecorder:
     # ---- 分段 ----
 
     def _segment_name(self, no: int) -> str:
-        return "segment-{:06d}.cast".format(no)
+        return f"segment-{no:06d}.cast"
 
     def _segment_path(self, name: str) -> Path:
         return self.dir / name
@@ -133,16 +135,21 @@ class TerminalRecorder:
         self._segment_no += 1
         name = self._segment_name(self._segment_no)
         self._stream_name = name
-        self._stream = (self.dir / name).open("a", encoding="utf-8", newline="\n")
+        self._stream = _private_append(self._segment_path(name))
         self._started = time.monotonic()
+        self._time_base = round(self._started - self._t0, 6)
         self._segments.append(name)
         self._append_line(
             self._stream,
             {
-                "version": 1,
+                "version": FORMAT_VERSION,
                 "id": self.recording_id,
                 "segment": name,
                 "created_at": self._created_at,
+                "time_base": round(self._time_base, 6),
+                "first_frame": self._frame + 1,
+                "rows": self._rows,
+                "columns": self._columns,
             },
         )
         self._write_meta()
@@ -156,15 +163,11 @@ class TerminalRecorder:
         self._stream.close()
         self._stream = None
         path = self._segment_path(self._stream_name)
-        final = path
+        if not path.is_file():
+            return
         if self._compress:
             final = path.with_suffix(".cast.gz")
-            temp = final.with_name(final.name + ".tmp")
-            with path.open(encoding="utf-8") as reader, gzip.open(
-                temp, "wt", encoding="utf-8", compresslevel=6
-            ) as writer:
-                shutil.copyfileobj(reader, writer)
-            os.replace(temp, final)
+            self._compress_segment(path, final)
             path.unlink(missing_ok=True)
             self._rewrite_index(self._stream_name, final.name)
             self._segments = [
@@ -172,11 +175,23 @@ class TerminalRecorder:
             ]
         self._write_meta()
 
+    def _compress_segment(self, source: Path, target: Path) -> None:
+        temp = target.with_name(target.name + ".tmp")
+        fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with contextlib.ExitStack() as stack:
+            raw = stack.enter_context(os.fdopen(fd, "wb"))
+            writer = stack.enter_context(
+                gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=6)
+            )
+            reader = stack.enter_context(source.open("rb"))
+            shutil.copyfileobj(reader, writer)
+        os.replace(temp, target)
+
     def _rewrite_index(self, old: str, new: str) -> None:
         self._index.flush()
         self._index.close()
         index = self.dir / "index.jsonl"
-        kept = []
+        kept: list[str] = []
         for line in index.read_text(encoding="utf-8").splitlines():
             try:
                 item = json.loads(line)
@@ -185,17 +200,15 @@ class TerminalRecorder:
             if item.get("segment") == old:
                 item["segment"] = new
             kept.append(json.dumps(item, ensure_ascii=False))
-        temp = index.with_name(index.name + ".tmp")
-        temp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-        os.replace(temp, index)
-        self._index = index.open("a", encoding="utf-8", newline="\n")
+        _private_replace(index, "\n".join(kept) + ("\n" if kept else ""))
+        self._index = _private_append(index)
 
     def _drop_segment(self, name: str) -> None:
         path = self._segment_path(name)
         self._segments.remove(name)
         self._index.flush()
         self._index.close()
-        kept = []
+        kept: list[str] = []
         for line in (self.dir / "index.jsonl").read_text(encoding="utf-8").splitlines():
             try:
                 item = json.loads(line)
@@ -204,10 +217,8 @@ class TerminalRecorder:
             if item.get("segment") != name:
                 kept.append(line)
         index = self.dir / "index.jsonl"
-        temp = index.with_name(index.name + ".tmp")
-        temp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-        os.replace(temp, index)
-        self._index = index.open("a", encoding="utf-8", newline="\n")
+        _private_replace(index, "\n".join(kept) + ("\n" if kept else ""))
+        self._index = _private_append(index)
         path.unlink(missing_ok=True)
         self._write_meta()
 
@@ -230,32 +241,29 @@ class TerminalRecorder:
     # ---- 元数据 ----
 
     def _write_meta(self) -> None:
-        temp = self.dir / "meta.json.tmp"
-        temp.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "id": self.recording_id,
-                    "created_at": self._created_at,
-                    "compressed": self._compress,
-                    "frames": self._frame,
-                    "retained_from": self._retained_from(),
-                    "segments": list(self._segments),
-                    "bytes": self._segment_bytes(),
-                },
-                ensure_ascii=False,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temp, self.dir / "meta.json")
+        payload = {
+            "version": FORMAT_VERSION,
+            "id": self.recording_id,
+            "created_at": self._created_at,
+            "closed_at": self._closed_at,
+            "rows": self._initial_rows,
+            "columns": self._initial_columns,
+            "compressed": self._compress,
+            "frames": self._frame,
+            "duration": round(self._last_at, 6),
+            "retained_from": self._retained_from(),
+            "segments": list(self._segments),
+            "bytes": self._segment_bytes(),
+        }
+        target = self.dir / "meta.json"
+        _private_replace(target, json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _retained_from(self) -> int:
         first = None
         for line in (self.dir / "index.jsonl").read_text(encoding="utf-8").splitlines():
             try:
                 frame = int(json.loads(line)["frame"])
-            except (ValueError, KeyError):
+            except (ValueError, KeyError, TypeError):
                 continue
             first = frame if first is None else min(first, frame)
         return first or 1
@@ -268,29 +276,36 @@ class TerminalRecorder:
             return TerminalRef(self.recording_id, self._frame)
 
     def record(self, channel: str, data: bytes | str) -> TerminalRef:
-        """写入一帧；大块输入按单次上限切帧。"""
-        if channel not in ("i", "o"):
-            raise ValueError("channel must be 'i' or 'o'")
+        """写入一帧；大块字节按单次上限切帧。"""
+        if channel not in CHANNELS:
+            raise ValueError("channel must be one of {}".format(", ".join(CHANNELS)))
         payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
         with self._lock:
             if self._closed:
                 raise RuntimeError("recorder is closed")
             if not payload:
                 return self.current_ref
+            if channel == CHANNEL_RESIZE:
+                size = parse_resize(payload)
+                if size is not None:
+                    self._rows, self._columns = size
             chunk_size = max(1, self._max_recording_bytes // 2)
             ref = self.current_ref
             for start in range(0, len(payload), chunk_size):
                 chunk = payload[start : start + chunk_size]
-                if self._stream.tell() and self._stream.tell() + len(chunk) > self._max_recording_bytes:
+                used = self._stream.tell()
+                if used and used + len(chunk) > self._max_recording_bytes:
                     self._rotate()
                 ref = self._write_frame(channel, chunk)
             return ref
 
     def _write_frame(self, channel: str, payload: bytes) -> TerminalRef:
         offset = self._stream.tell()
-        now = time.monotonic() - self._started
+        relative = round(time.monotonic() - self._started, 6)
+        at = self._time_base + relative
         self._frame += 1
-        event = [round(now, 6), channel, base64.b64encode(payload).decode("ascii")]
+        self._last_at = max(self._last_at, at)
+        event = [relative, channel, base64.b64encode(payload).decode("ascii")]
         self._append_line(self._stream, event)
         self._append_line(
             self._index,
@@ -298,6 +313,7 @@ class TerminalRecorder:
                 "frame": self._frame,
                 "segment": self._stream_name,
                 "time": event[0],
+                "at": round(at, 6),
                 "offset": offset,
                 "channel": channel,
                 "bytes": len(payload),
@@ -317,6 +333,7 @@ class TerminalRecorder:
             if self._closed:
                 return
             self._closed = True
+            self._closed_at = time.time()
             self._close_segment()
             self._prune_segments()
             self._index.close()
@@ -332,7 +349,7 @@ class TerminalRecorder:
             try:
                 meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
                 created = float(meta["created_at"])
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, TypeError):
                 continue
             size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
             entries.append((created, size, path))
@@ -348,7 +365,7 @@ class TerminalRecorder:
 
     def _tombstone(self, recording_id: str) -> None:
         path = self.root / "tombstones.jsonl"
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
+        with contextlib.closing(_private_append(path)) as handle:
             handle.write(
                 json.dumps(
                     {"recording_id": recording_id, "deleted_at": time.time()},
@@ -359,32 +376,8 @@ class TerminalRecorder:
             handle.flush()
             os.fsync(handle.fileno())
 
-    # ---- 读取 ----
-
-    def iter_events(self) -> Iterator[dict]:
-        """按分段顺序读回事件，兼容未压缩与 gzip。"""
-        for name in list(self._segments):
-            path = self._segment_path(name)
-            if not path.is_file():
-                continue
-            if path.suffix == ".gz":
-                handle_cm = gzip.open(path, "rt", encoding="utf-8")
-            else:
-                handle_cm = path.open(encoding="utf-8")
-            with handle_cm as handle:
-                for line in handle:
-                    try:
-                        item = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(item, dict):
-                        continue
-                    yield {
-                        "time": item[0],
-                        "channel": item[1],
-                        "data": base64.b64decode(item[2]),
-                    }
+    # ---- 行工具 ----
 
     @staticmethod
-    def _append_line(handle, value: object) -> None:
+    def _append_line(handle: TextIO, value: object) -> None:
         handle.write(json.dumps(value, ensure_ascii=False) + "\n")

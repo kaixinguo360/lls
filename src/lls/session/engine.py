@@ -480,7 +480,7 @@ class Engine:
         return self._recorder_error
 
     def _record(self, channel: str, data: bytes) -> None:
-        """写一帧录制；失败就整个停掉，别让可选项把终端带下去。
+        """写一帧录制（``i``/``o``/``r``）；失败就整个停掉，别让可选项把终端带下去。
 
         录制是旁路：磁盘满、权限变了、gzip 写不动，都不该让终端读写报错。
         停用只发生一次 —— 之后每帧都直接跳过，而不是反复失败、反复刷日志。
@@ -493,6 +493,10 @@ class Engine:
         except Exception as e:  # noqa: BLE001 - 录制失败不能影响终端
             self._recorder = None
             self._recorder_error = "录制已停用：{}".format(e)
+
+    def _record_size(self) -> None:
+        """把当前行列写进录制；播放时才可能按录制时的窗口重排。"""
+        self._record("r", f"{self.screen.columns}x{self.screen.rows}".encode())
 
     # ---- fd 回调 ----
 
@@ -800,15 +804,24 @@ class Engine:
 
     # ---- 信号 ----
 
-    def _on_winch(self) -> None:
+    @staticmethod
+    def _host_size() -> os.terminal_size:
+        """宿主窗口尺寸；没有 tty 或 pty 报了 0×0 时退回 80×24。"""
         try:
             size = os.get_terminal_size()
         except OSError:
-            return
+            return os.terminal_size((80, 24))
+        if size.lines <= 0 or size.columns <= 0:
+            return os.terminal_size((80, 24))
+        return size
+
+    def _on_winch(self) -> None:
+        size = self._host_size()
         self.screen.resize(size.lines, size.columns)
         if self._pty is not None:
             self._pty.resize(size.lines, size.columns)
         self._relayout_overlay()
+        self._record_size()
 
     def resize(self, rows: int, columns: int) -> tuple[int, int]:
         """把模型与子进程的 pty 一起调到给定尺寸，返回实际生效的行列。
@@ -817,10 +830,7 @@ class Engine:
         或让终端把光标夹到底行 —— 画面与模型随即错位，而那种错位正是「绝不
         越界」那条约束要防的。放大由用户拖窗口（SIGWINCH）来做。
         """
-        try:
-            host = os.get_terminal_size()
-        except OSError:
-            host = os.terminal_size((80, 24))
+        host = self._host_size()
         rows = max(1, min(int(rows), host.lines))
         columns = max(1, min(int(columns), host.columns))
         previous = self.screen.rows
@@ -829,6 +839,7 @@ class Engine:
             self._pty.resize(rows, columns)
         self._relayout_overlay()
         self._blank_below(rows, previous)
+        self._record_size()
         return rows, columns
 
     def _blank_below(self, rows: int, previous: int) -> None:

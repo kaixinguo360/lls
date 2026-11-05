@@ -59,11 +59,19 @@ def build_handlers() -> dict[str, Handler]:
     }
 
 
-def run_interactive(command: list[str]) -> int:
+def _terminal_size() -> os.terminal_size:
+    """宿主窗口尺寸；没有 tty 或 pty 报了 0×0 时退回 80×24。"""
     try:
         size = os.get_terminal_size()
     except OSError:
-        size = os.terminal_size((80, 24))
+        return os.terminal_size((80, 24))
+    if size.lines <= 0 or size.columns <= 0:
+        return os.terminal_size((80, 24))
+    return size
+
+
+def run_interactive(command: list[str]) -> int:
+    size = _terminal_size()
     screen = PyteScreenModel(rows=size.lines, columns=size.columns)
 
     config = load_config()
@@ -73,6 +81,8 @@ def run_interactive(command: list[str]) -> int:
 
         recorder = TerminalRecorder(
             config.paths.recordings_dir,
+            rows=size.lines,
+            columns=size.columns,
             compress=config.recording.compress,
             max_recording_bytes=config.recording.max_recording_bytes,
             max_total_bytes=config.recording.max_total_bytes,

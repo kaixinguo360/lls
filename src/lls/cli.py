@@ -1,4 +1,4 @@
-"""CLI 入口：参数解析、非 tty 透传、环境诊断。"""
+"""CLI 入口：全局选项、一级子命令分派、非 tty 透传与环境诊断。"""
 
 from __future__ import annotations
 
@@ -8,11 +8,50 @@ import subprocess
 import sys
 import traceback
 
+from .subcommands import Command
+
 __all__ = ["doctor", "main", "parse_args"]
 
 
+def _recording(argv: list[str]) -> int:
+    from .config import load
+    from .recording.cli import main as recording_main
+    from .replay_adapter import row_renderer, screen_factory
+
+    return recording_main(
+        argv,
+        root=load().paths.recordings_dir,
+        screen_factory=screen_factory,
+        row_renderer=row_renderer,
+    )
+
+
+COMMANDS: dict[str, Command] = {
+    "recording": Command("recording", "列出、回放与导出终端录制", _recording),
+}
+
+
+def _command_help() -> str:
+    return "\n".join(
+        f"  {command.name:<12}{command.summary}"
+        for command in COMMANDS.values()
+    )
+
+
+def _default_shell() -> str:
+    shell = os.environ.get("SHELL")
+    if shell and os.path.realpath(shell) != os.path.realpath(sys.argv[0]):
+        return shell
+    return os.environ.get("LLS_FALLBACK_SHELL", "/bin/sh")
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog="lls", description="基于 PTY 的终端包装器")
+    p = argparse.ArgumentParser(
+        prog="lls",
+        description="基于 PTY 的终端包装器",
+        epilog=f"子命令：\n{_command_help()}\n\n其余参数作为要运行的命令。",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("--config", metavar="PATH", help="配置文件路径（默认按 XDG 查找）")
     p.add_argument(
         "--set",
@@ -28,13 +67,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="要运行的命令（不填则用 $SHELL）",
     )
     return p.parse_args(argv)
-
-
-def _default_shell() -> str:
-    shell = os.environ.get("SHELL")
-    if shell and os.path.realpath(shell) != os.path.realpath(sys.argv[0]):
-        return shell
-    return os.environ.get("LLS_FALLBACK_SHELL", "/bin/sh")
 
 
 def doctor() -> int:
@@ -61,6 +93,7 @@ def doctor() -> int:
     print(f"config:   {config.path}{suffix}")
     print(f"paths.root:         {config.paths.root}")
     print(f"paths.sessions_dir: {config.paths.sessions_dir}")
+    print(f"paths.recordings_dir: {config.paths.recordings_dir}")
     history_dir = config.paths.history_dir
     if not config.input_history.enabled:
         history_dir = f"{history_dir}（已禁用）"
@@ -108,6 +141,62 @@ def _run(argv: list[str] | None = None) -> int:
     return run_interactive(command)
 
 
+def _split_global(argv: list[str]) -> tuple[list[str], list[str], bool]:
+    """把全局选项与命令分开。
+
+    全局选项只在第一个位置参数之前生效；``--`` 之后一律当命令，用来运行与
+    子命令同名的程序。``lls bash --config x`` 里的 ``--config`` 不属于全局。
+    """
+    head: list[str] = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            return head, argv[index + 1 :], True
+        if token in ("--config", "--set"):
+            head.extend(argv[index : index + 2])
+            index += 2
+            continue
+        if token.startswith("--config=") or token.startswith("--set="):
+            head.append(token)
+            index += 1
+            continue
+        if token in ("--doctor", "-h", "--help"):
+            head.append(token)
+            index += 1
+            continue
+        break
+    return head, argv[index:], False
+
+
+def _global_options(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config")
+    parser.add_argument("--set", action="append", default=[])
+    parser.add_argument("--doctor", action="store_true")
+    return parser.parse_args(argv)
+
+
+def _main(argv: list[str] | None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    head, rest, escaped = _split_global(argv)
+    if "-h" in head or "--help" in head:
+        return _run(["-h"] if "-h" in head else ["--help"])
+    if not escaped and rest and rest[0] in COMMANDS:
+        from .config import ConfigError, configure
+
+        options = _global_options(head)
+        try:
+            configure(path=options.config, overrides=options.set)
+        except ConfigError as e:
+            print(f"lls: {e}", file=sys.stderr)
+            return 2
+        if options.doctor:
+            return doctor()
+        return COMMANDS[rest[0]].run(rest[1:])
+    return _run(head + rest)
+
+
 def main(argv: list[str] | None = None) -> int:
     """进程最外层。
 
@@ -115,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     以免遗漏的错误信息被静默忽略。
     """
     try:
-        return _run(argv)
+        return _main(argv)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
         return 1

@@ -230,6 +230,33 @@ agent 的对话行在同一份历史里分了两类：回车会执行命令的�
 
 写不进去（家目录只读、磁盘满）只是不再落盘，不影响继续输入。
 
+## 录制与回放
+
+录制默认关闭。打开 `recording.enabled` 后，每次 `lls` 启动会把 PTY 的原始
+字节按 `o`（子进程输出）、`i`（输入）、`r`（窗口 resize）写进
+`paths.recordings_dir`。一次启动一个目录，内部按大小分段；超过单次上限时丢弃
+本次最早的分段，只保留最新内容。目录 0700、文件 0600，录制里可能有密钥。
+
+```bash
+lls recording ls                    # 列出录制；--json 给脚本用
+lls recording play <id|目录>         # 全屏回放
+lls recording export <id|目录> -o out.cast
+```
+
+`play` 的按键：空格暂停，`←`/`→` 前后 5 秒，`↑`/`↓` 前后 1 秒，`,`/`.` 前后
+0.1 秒，`[`/`]` 变速，`g`/`G` 首尾，`i` 显示/隐藏输入，`q`/Esc/Ctrl-C 退出。
+窗口比录制小就裁切；`--dump` 只输出末屏文本，不进入全屏。`--frame`/`--time`
+从指定位置开始，`--show-input` 才在状态栏显示键入内容。
+
+`export` 写标准 asciicast v2，可以直接用 `asciinema play out.cast` 或网页
+播放器打开；`o` 事件按增量 UTF-8 解码，跨帧切断的多字节字符不会乱码。输入
+默认不导出（`--with-input` 才带），因为 echo-off 时的输入可能是密码。
+
+录制只包含子进程的终端字节，不包含 LLS 自己的命令行/agent 面板。录制与会话
+解耦：删除会话不会删除录制；每个会话事件只记 `recording_id:frame` 作为定位。
+
+要运行一个恰好叫 `recording` 的程序，用 `lls -- recording ...` 转义。
+
 ## 配置
 
 配置路径优先级：`--config` > `LLS_CONFIG` > `$XDG_CONFIG_HOME/lls/config.yaml`
@@ -245,6 +272,14 @@ paths:
   root: ~/.local/lls
   sessions_dir: sessions      # 相对配置文件所在目录；也可写绝对路径
   history_dir: history
+  recordings_dir: recordings
+
+recording:
+  enabled: false              # 默认不录
+  compress: true              # 分段关闭时压成 .cast.gz
+  max_recording_bytes: 67108864
+  max_total_bytes: 1073741824
+  fsync: true
 
 input_history:
   enabled: true
@@ -306,10 +341,12 @@ src/lls/handlers.py      输入处理器（透传 / 命令分发）
 src/lls/commands/        命令层，内置命令按类别分模块
 src/lls/ai/              provider 抽象、多轮对话、通用 agent 循环
 src/lls/ai/sessions/     会话落盘（事件流）、窗口裁剪与压缩
+src/lls/recording/       录制读写、回放与 asciicast 导出（自包含）
 src/lls/term/            屏幕模型（pyte 适配）
 src/lls/ui/              显示原语：换行、覆盖层定位、按模型渲染、字符宽度
 src/lls/edit/            行编辑缓冲
 src/lls/tty/             PTY 与终端后端、按键编解码
+src/lls/cli.py           全局选项、一级子命令分派、环境诊断
 ```
 
 依赖方向是单向的：引擎不认识命令；`commands` 只依赖 `Services`；`ai` 不认识
@@ -325,6 +362,8 @@ Windows 原生没有这些模块，请使用 WSL；`lls --doctor` 会给出结�
 
 - [会话事件 v2](docs/design/event-schema-v2.md)：事件形状、parts、版本与
   旧数据策略。
+- [终端录制与回放](docs/design/terminal-recording.md)：分包边界、v2 格式、
+  读取与回放、asciicast 导出。
 
 ## 开发
 

@@ -1,118 +1,176 @@
-# 终端录制与事件引用
+# 终端录制与回放
 
-终端录制保存**原始字节**，不保存屏幕渲染结果。它服务两个用途：
+录制保存的是 PTY 的**原始字节与时间**，不是屏幕渲染结果；回放时再把字节喂给
+屏幕模型。它服务三件事：复盘一次终端会话、按帧定位 agent 做过什么、导出成
+asciicast 分享。
 
-- 复现一次终端会话；
-- 给离线训练提供 `(历史, 输入, 输出)` 样本。
+录制与 LLS 会话解耦：录制层有自己的 id 和索引，会话事件只记当前帧引用。
 
-录制与 LLS 会话解耦：录制层有自己的 ID 和索引，会话事件只存当前帧引用。
+## 包边界
+
+```text
+src/lls/recording/
+  __init__.py          公开 API（不 import replay）
+  model.py             Frame / RecordingMeta / TerminalRef
+  format.py            版本、通道、分段名、resize 载荷
+  writer.py            TerminalRecorder
+  reader.py            Recording
+  ports.py             TerminalSink / TerminalCursor
+  errors.py
+  cli.py               ls / play / export
+  __main__.py          python -m lls.recording
+  replay/
+    screen.py          ReplayScreen 协议 + 默认 pyte 实现
+    player.py          Playback 状态机
+    paint.py           ScreenPainter
+    tui.py             全屏按键与时钟
+    export.py          asciicast v2 导出
+```
+
+这个包不 import 任何 `lls.*`：核心读写只依赖标准库，`replay/` 额外只依赖
+`pyte`。LLS 只在三处接进来：`app.py` 创建写端、`engine.py` 在 resize 时写
+`r` 帧、`lls/cli.py` 挂 `recording` 子命令。回放需要的屏幕模型和行渲染器由
+`src/lls/replay_adapter.py` 注入；把整个目录挪走时只需删掉这一个适配文件。
 
 ## 目录
 
 ```text
-<recording-root>/<recording-id>/
-  meta.json                  录制元数据
-  segment-000001.cast        JSONL：时间、通道、base64 字节
-  segment-000002.cast.gz     超出单次上限时滚动；压缩开启时旧分段是 .gz
-  index.jsonl                frame → 分段/时间/字节偏移
+<recordings-dir>/<recording-id>/
+  meta.json
+  segment-000001.cast
+  segment-000002.cast.gz
+  index.jsonl
+  tombstones.jsonl          （只在根目录，跨录制）
 ```
 
-每个分段第一行是对象，后续每行是数组：
+一个分段第一行是对象，之后每行是数组：
 
 ```json
-{"version": 1, "id": "20261103T010203Z-7f3a", "segment": "segment-000001.cast", "created_at": 1793...}
-[0.0, "i", "bHMK"]
-[0.12, "o", "YS50eHQK"]
+{"version": 2, "id": "20261105T031000Z-1a2b3c4d", "segment": "segment-000002.cast",
+ "created_at": 1793848664.9, "time_base": 812.437, "first_frame": 4501,
+ "rows": 48, "columns": 160}
+[0.0, "o", "aGVsbG8K"]
+[0.013, "i", "bHMK"]
+[0.020, "r", "MTYweDQ4"]
 ```
 
-通道只有：
+- `time_base` 是该段打开时距录制起点的秒数；段内 `t` 仍是相对时间，绝对时间
+  为 `time_base + t`。分段计时不会在滚动后归零。
+- `first_frame` 是该段第一帧的全局帧号；压缩、删旧段之后依然能继续编号。
+- `rows`/`columns` 是该段开始时的尺寸，使每个分段都能自描述。
+- 通道：
+  - `o` 读子进程的字节；
+  - `i` 写子进程的字节；
+  - `r` 终端 resize，载荷为 `"{COLS}x{ROWS}"`（与 asciicast v2 同形）。
+
+`meta.json`：
+
+```json
+{"version": 2, "id": "20261105T031000Z-1a2b3c4d", "created_at": 1793848664.9,
+ "closed_at": 1793848700.1, "rows": 48, "columns": 160, "compressed": true,
+ "frames": 8231, "duration": 12.345, "retained_from": 1,
+ "segments": ["segment-000001.cast.gz"], "bytes": 4194304}
+```
+
+`rows`/`columns` 是**录制开始**时的尺寸；后续变化由 `r` 帧表达。
+
+`index.jsonl` 每帧一行：
+
+```json
+{"frame": 4501, "segment": "segment-000002.cast", "time": 0.0,
+ "at": 812.437, "offset": 148, "channel": "o", "bytes": 22}
+```
+
+`time` 是段内相对时间，`at` 是绝对时间。`frame` 单调递增；`terminal_cursor`
+引用它就够了。
+
+## 写端
+
+`TerminalRecorder(root, rows=..., columns=..., compress=..., ...)`：
+
+- 一次启动一个 recording id；目录 0700，文件 0600。
+- 写 `i`/`o`/`r` 三类帧；大块字节按单次上限切帧。
+- 达到 `max_recording_bytes` 时切新段并丢弃本次最早的分段，保留最新内容；
+  `recording_id` 与 `frame` 不变，引用不会因滚动换 id。
+- 关闭分段时按 `compress` 压缩；压缩用临时文件 + `os.replace`，崩溃只留下
+  `.tmp` 或完整的 `.gz`。
+- `fsync` 为真时每帧同步 stream 与 index。
+- 关闭时写 `closed_at` 与 `duration`；崩溃留下的录制 `closed_at` 为 `null`。
+- 总量超过 `max_total_bytes` 时按 `created_at` 删除整个旧录制，并在根目录
+  `tombstones.jsonl` 留一条删除记录。
+
+写失败（磁盘满、权限变化、压缩失败）只会停用录制本身；终端读写照常，原因由
+`run_interactive` 打到 stderr。
+
+## 读端
+
+```python
+from lls.recording import Recording
+
+recording = Recording.open("~/.local/lls/recordings/<id>")
+for frame in recording.frames():
+    frame.number, frame.at, frame.channel, frame.data
+```
+
+- 分段从磁盘扫描，按数字排序；同名 `.cast` 与 `.cast.gz` 同时存在时优先
+  `.gz`。
+- 尾行损坏、gzip 中途断掉只影响当前分段；已读出的帧照常返回，原因进
+  `recording.warnings`。
+- `meta.json`/段头版本必须为 2；旧格式直接报错，不做迁移。
+- `frame(n)` 在保留窗口外抛 `FrameUnavailable`；`frame_time(n)` 优先用
+  `index.jsonl` 的 `at`。
+- `geometry_at(t)` 从初始尺寸叠加 `r` 帧，供播放器确定画布。
+- 整个目录不存在时区分 `RecordingNotFound` 与 `RecordingDeleted`（墓碑）。
+
+## 回放
+
+`Playback(recording, size=..., screen_factory=...)` 是纯状态机：
+
+- `o` 喂屏幕模型；`r` 调 `resize`；`i` 与未知通道忽略。
+- `seek(at)` 重置模型后快速重放到 `at`；终端状态是累积的，只能从头重建。
+  本机实测 `PyteScreenModel` 约 0.6 MB/s，超长录制 seek 会慢，这是已知取舍。
+- 默认屏幕是 `pyte` 薄封装；LLS 注入自己的 `PyteScreenModel`，回放与实时
+  画面共用备用屏、宽度和容错规则。
+- `ScreenPainter` 只画模型里的行、样式和光标；**不把录制字节直接写到宿主**，
+  也不重放标题、剪贴板、鼠标上报。`i` 默认不显示：普通终端会把输入回显进
+  `o`，重复显示；echo-off 时那里是明文密码。
+
+全屏界面（`replay/tui.py`）：
 
 ```text
-i  输入
-o  输出
+空格 暂停/继续     ←/→ 前后 5 秒     ↑/↓ 前后 1 秒
+,/.  前后 0.1 秒   [/] 减速/加速     g/G 首尾
+i    显示/隐藏输入  q/Esc/Ctrl-C 退出
 ```
 
-索引每行：
+窗口比录制尺寸小时裁切，不 reflow；底部状态栏显示 id、进度、倍速与输入
+（仅在 `--show-input` 时）。
 
-```json
-{"frame": 1, "segment": "segment-000001.cast", "time": 0.0, "offset": 0, "channel": "i", "bytes": 4}
+## 命令行
+
+```bash
+lls recording ls [--json]
+lls recording play <id|path> [--speed N] [--frame N] [--time SEC]
+                             [--size COLSxROWS] [--show-input] [--dump]
+lls recording export <id|path> [-o FILE] [--with-input] [--size COLSxROWS]
 ```
 
-## 引用
-
-每个事件在 `lls.terminal_cursor` 记录事件发生时的录制位置：
-
-```json
-{"recording_id": "20261103T010203Z-7f3a", "frame": 1}
-```
-
-`frame` 是单调递增的录制帧号；`index.jsonl` 把它映射到时间、字节偏移和通道。
-引用不是内容区间，也不保存正文、offset 或 hash。
-
-## 事件覆盖
-
-开启录制后，`Session.append` 在写入事件前读取 `TerminalRecorder.current_ref`，
-所有事件都带同一个结构：`session`、`turn/*`、`step/*`、`system/message`、
-`user/message`、`assistant/message`、`tool/call`、`tool/result`、`lls/*`。
-
-## 配置
-
-```yaml
-paths:
-  recordings_dir: ~/.local/lls/recordings
-
-recording:
-  enabled: false
-  compress: true
-  max_recording_bytes: 67108864
-  max_total_bytes: 1073741824
-  fsync: true
-```
-
-默认关闭。开启后由 `run_interactive` 创建 `TerminalRecorder`，引擎在每次
-PTY 写入/读取时实时记录：
-
-```text
-写子进程 → i
-读子进程 → o
-```
-
-这是真实子进程字节，不是屏幕重绘，也不是 bash 工具临时目录里的输出。
-`paths.recordings_dir` 与 `paths.sessions_dir` 平级，默认是
-`paths.root / "recordings"`；相对路径按配置文件所在目录解析。
-
-`max_recording_bytes` 是**一次启动的录制目录**上限；目录内按大小写成
-`segment-000001.cast` 等分段，超过上限时删除本次最早的分段，只保留最新
-内容。`recording_id` 始终不变，`terminal_cursor` 不会因为滚动换 id。
-
-`max_total_bytes` 是整个 `recordings_dir` 的上限；关闭或滚动时按
-`created_at` 从旧到新删除整个旧录制目录，当前活动录制不删。
-`compress: true` 在分段关闭时把 `.cast` 压成 `.cast.gz`。
-
-`fsync: true` 在每帧写完后同步 `stream` 与 `index`；这是崩溃安全与吞吐的
-取舍，默认开启。关闭压缩或 fsync 后性能更好，但断电/崩溃窗口更大。
+- 所有录制命令都在 `lls recording` 下，二级子命令由 `recording/cli.py` 自己
+  用 argparse 解析；顶层只在第一个位置参数处做一次分派。
+- `export` 写 asciicast v2：首行 `width`/`height`/`timestamp`/`duration`，
+  事件为 `[at, "o"|"i"|"r", text]`。`o` 用增量 UTF-8 解码，跨帧切断的多字节
+  字符不会变成乱码；`i` 默认不导出。
+- 非 tty 或没有 termios 时 `play` 提示改用 `--dump`/`export`；`--dump` 只输出
+  末屏文本。
+- 独立使用：`python -m lls.recording ls --root <dir>`；不经过 LLS 入口也
+  不需要配置文件。
 
 ## 边界
 
 - 只记录终端字节，不记录文件系统、任务或模型上下文。
-- 录制内容不进入模型请求。
-- 录制默认关闭；只有 `recording.enabled: true` 才创建录制器。
-- 依赖是两个窄接口（`lls/recording.py` 里的 Protocol）：引擎只要
-  `TerminalSink.record(channel, bytes)`，会话只要
-  `TerminalCursor.recording` / `frame`。两侧都不 import 录制模块，换成
-  别的实现（内存录制、远端录制）只需要对上这两个形状。
-- 录制是旁路，**它坏了只停用它自己**：写失败（磁盘满、权限变化、压缩失败）
-  当场停用并记下原因，终端读写照常；原因在退出时由 `run_interactive` 打到
-  stderr。只停用一次，不会每帧重试。
-- 收尾失败（最后一次 fsync、压缩）同样只报一句，不改变退出码。
-- 每个 session 事件在 `lls.terminal_cursor` 记录当前帧引用：
-  `{"recording_id": "<id>", "frame": <n>}`。
-- 录制被停用后，新事件不再带 `terminal_cursor` —— 不挂一个停在原地的帧号。
-- 引用是“事件发生时的录制位置”，不是内容区间。
 - 录制不归属 session；删除 session 不删除录制。
-- 压缩、滚动、留存上限已实现；快照、反事实分支不在当前实现内。
-- 崩溃恢复：启动时清掉 `.tmp`，校验并丢弃半份 gzip，保留完整明文或完整 gzip。
-- 读取时会跳过损坏的尾行；不把半帧当成成功事件。
-- `meta.retained_from` 表示当前录制仍保留的最小 frame；更早引用已不可解析。
-- 整个录制被总量上限删除时，`recordings_dir/tombstones.jsonl` 留下
-  `recording_id` 与删除时间，供引用解析器判断“已删除”而不是“文件丢失”。
+- raw PTY 录制不包含 LLS 自己的命令行/agent 面板；要回放那层界面需要另记宿主
+  渲染帧或屏幕快照。
+- 录制默认关闭；`recording.enabled: true` 才创建写端。
+- 引用是“事件发生时的录制位置”，不是内容区间。
+- `retained_from` 表示当前仍保留的最小帧；更早引用已不可解析。
