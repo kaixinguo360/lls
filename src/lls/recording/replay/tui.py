@@ -13,6 +13,8 @@ import shutil
 import sys
 import time
 
+from wcwidth import wcwidth
+
 try:  # 只有 POSIX 有；没有时 play 会给出提示，export/dump 仍然可用。
     import termios
     import tty
@@ -26,6 +28,27 @@ from .paint import RowRenderer, ScreenPainter
 from .player import Playback, ScreenFactory
 
 __all__ = ["run"]
+
+def _display_width(text: str) -> int:
+    return sum(max(0, wcwidth(char)) for char in text)
+
+
+def _fit_line(text: str, width: int) -> str:
+    """按显示宽度裁到 ``width`` 列并补齐；宽字符不会被劈成半格。"""
+    if width <= 0:
+        return ""
+    used = 0
+    kept: list[str] = []
+    for char in text:
+        cells = wcwidth(char)
+        if cells < 0:  # 控制字符不写进状态行，避免换行/折返
+            continue
+        if used + cells > width:
+            break
+        kept.append(char)
+        used += cells
+    return "".join(kept) + " " * (width - used)
+
 
 _KEYS = {
     b"\x1b[A": "up",
@@ -304,7 +327,8 @@ class _Player:
 
     def _draw_status(self) -> None:
         rows, columns = self._terminal_size()
-        if rows <= 0 or columns <= 0:
+        width = columns - 1  # 留最后一列，避免行尾自动折返
+        if rows <= 0 or width <= 0:
             return
         if self._paused:
             state = "暂停"
@@ -317,9 +341,8 @@ class _Player:
             f"{self._duration:.1f}s  {self._speed:.1f}x  {state}"
             f"{self._input_label()}  [空格]暂停 [←→]5s [q]退出"
         )
-        text = text[: max(0, columns - 1)]
         self._terminal.out.write(
-            (f"\x1b[{rows};1H\x1b[7m{text.ljust(columns - 1)}\x1b[0m").encode()
+            (f"\x1b[{rows};1H\x1b[7m{_fit_line(text, width)}\x1b[0m").encode()
         )
         self._terminal.out.flush()
 

@@ -29,6 +29,27 @@ class _FakeRecording:
         return self._frames[-1].at if self._frames else 0.0
 
 
+def test_status_line_fits_by_display_width() -> None:
+    from lls.recording.replay.tui import _display_width, _fit_line
+
+    text = (
+        "20261105T031000Z-1a2b3c4d  12.3/45.6s  1.0x  播放"
+        "  [空格]暂停 [←→]5s [q]退出"
+    )
+    for width in (0, 1, 10, 40, 79):
+        line = _fit_line(text, width)
+        assert _display_width(line) == width
+        assert "\n" not in line
+
+
+def test_status_line_never_splits_a_wide_character() -> None:
+    from lls.recording.replay.tui import _fit_line
+
+    assert _fit_line("中中中", 3) == "中 "
+    assert _fit_line("中中中", 4) == "中中"
+    assert _fit_line("a\nb", 2) == "ab"
+
+
 def test_key_decoder_recognizes_arrows_and_keeps_the_rest() -> None:
     from lls.recording.replay.tui import _decode_key
 
