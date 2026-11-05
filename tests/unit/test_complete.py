@@ -109,7 +109,7 @@ def test_registry_metas_carry_usage_for_the_two_command_sets() -> None:
 def test_the_agent_completer_reuses_the_slash_table() -> None:
     from lls.commands.builtin.agent import _SLASH_COMPLETER
 
-    assert _SLASH_COMPLETER("/st", 3).items == ("/status ",)
+    assert _SLASH_COMPLETER("/st", 3).items == ("/status ", "/stay ")
     assert _SLASH_COMPLETER("/model", 6).hint == " [provider/model]"
     assert _SLASH_COMPLETER("/usr/bin", 8).items == ()
     assert _SLASH_COMPLETER("/nope", 5).items == ()

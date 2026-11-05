@@ -212,13 +212,20 @@ def test_the_agent_puts_the_facts_on_the_tool_message(monkeypatch) -> None:
 
 
 def test_the_session_records_the_facts_as_meta_raw(tmp_path) -> None:
+    from lls.ai import turn as turn_mod
     from lls.ai.sessions import SessionStore
     from lls.ai.types import Message
-    from lls.commands.builtin import agent as agent_cmd
 
     keeper = SessionStore(root=tmp_path)
     session = keeper.create("p", "m")
-    state = agent_cmd._Session(FakePort(), None, "model", session)
+    state = turn_mod.Turn(
+        services=FakePort(),
+        view=None,
+        provider=None,
+        model="model",
+        session=session,
+        tools=(),
+    )
     state._calls["c1"] = "bash"
 
     state._on_message(

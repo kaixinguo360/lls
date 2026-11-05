@@ -60,6 +60,15 @@ class Services:
         """子进程的屏幕模型（唯一真相）。"""
         return self._engine.screen
 
+    @property
+    def exited(self) -> bool:
+        """引擎是否已经要求退出（信号、或子进程已经结束）。
+
+        无头运行的处理器靠它判断「该收尾了」：主循环只在一步做完之后才看
+        退出标志，而一步可能正是那个跑不完的轮次。
+        """
+        return self._engine.exited
+
     # ---- 宿主终端显示 ----
 
     async def show_message(self, text: str) -> None:
@@ -226,3 +235,10 @@ class Services:
         这样切换是**协作式**的：处理器总能把当前这一步做完。
         """
         self._engine.request_handler(name)
+
+    def stop(self) -> None:
+        """请求引擎退出主循环：当前这一步做完就收尾。
+
+        无头运行只有一种结束方式 —— 处理器把活干完，然后叫停自己。
+        """
+        self._engine.stop()

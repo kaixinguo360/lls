@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from lls.ai import Chunk, ChunkKind, ConfigError, ToolCall, ToolCallDelta
+from lls.ai import turn as turn_mod
 from lls.commands import get_command, keys
 from lls.commands.builtin import agent as agent_cmd
 from lls.ui import strip_sgr
@@ -846,7 +847,8 @@ def test_painter_forgets_the_previous_step() -> None:
 
 
 def test_system_prompt_matches_the_display_budget() -> None:
-    prompt = agent_cmd.SYSTEM_PROMPT
+    tools, _ = _tools(FakeServices([]))
+    prompt = agent_cmd._system_prompt(tools.values(), teacher=False)
 
     assert f"最多 {agent_cmd.SUGGESTED_REPLY_LINES} 行" in prompt
     assert f"最近 {agent_cmd.LOG_ENTRIES} 轮" in prompt
@@ -1325,6 +1327,19 @@ def _worker(services, session, store, rounds=1, budget=600):
     )
 
 
+def _turn_worker(services, session, rounds=1, budget=600):
+    """直接装配 Turn：压缩/摘要这些不是界面的事，测试不必经过 _Session。"""
+    return turn_mod.Turn(
+        services=services,
+        view=None,
+        provider=_summaries(rounds),
+        model="m",
+        session=session,
+        tools=(),
+        budget=budget,
+    )
+
+
 def test_force_compacts_though_little_would_be_dropped(tmp_path) -> None:
     """用户按了 /compact 就是要压：不到 1024 tok 的划算判断不该否决这条指令。"""
     store = SessionStore(root=tmp_path)
@@ -1345,7 +1360,7 @@ def test_auto_compaction_still_leaves_a_short_history_alone(tmp_path) -> None:
     session = _seeded(store, turns=5, filler="细" * 300)
     services = FakeServices([])
     # 预算给足：这点历史够不着 0.85 的水位，自动压缩不该发生。
-    worker = _worker(services, session, store, budget=4000)
+    worker = _turn_worker(services, session, budget=4000)
     window = worker._prepare_window(())
 
     assert asyncio.run(worker._compact(window)) is False
@@ -1435,11 +1450,11 @@ def test_an_overflow_prunes_before_it_summarises(tmp_path) -> None:
     session.append_assistant("旧答复")
     session.append_turn_end("ok")
     services = FakeServices([])
-    worker = _worker(services, session, store, budget=8000)
+    worker = _turn_worker(services, session, budget=8000)
 
     window = worker._prepare_window(())
     recovered = asyncio.run(
-        worker._compact(window, (), mode=agent_cmd._CompactMode.OVERFLOW)
+        worker._compact(window, (), mode=turn_mod.CompactMode.OVERFLOW)
     )
 
     assert recovered is True
@@ -1456,12 +1471,12 @@ def test_an_overflow_prunes_before_it_summarises(tmp_path) -> None:
 def test_a_trimmed_transcript_keeps_the_earliest_words() -> None:
     """只留尾巴会把最早的任务目标切掉；那段恰恰是路径和约定所在。"""
     messages = [
-        agent_cmd.Message("user", "最早的任务：改 ~/x 里的解析"),
-        agent_cmd.Message("assistant", "中" * 5000),
-        agent_cmd.Message("user", "最后一句"),
+        turn_mod.Message("user", "最早的任务：改 ~/x 里的解析"),
+        turn_mod.Message("assistant", "中" * 5000),
+        turn_mod.Message("user", "最后一句"),
     ]
 
-    text = agent_cmd._transcript(messages, 600)
+    text = turn_mod._transcript(messages, 600)
 
     assert "最早的任务" in text
     assert "最后一句" in text
@@ -1474,25 +1489,27 @@ def test_a_long_history_is_summarised_in_bounded_rounds(tmp_path) -> None:
     store = SessionStore(root=tmp_path)
     session = _seeded(store, turns=1)
     services = FakeServices([])
-    worker = _worker(services, session, store, rounds=agent_cmd.COMPACT_MAX_ROUNDS)
-    messages = [agent_cmd.Message("user", "段" * 800) for _ in range(12)]
+    worker = _turn_worker(
+        services, session, rounds=turn_mod.COMPACT_MAX_ROUNDS
+    )
+    messages = [turn_mod.Message("user", "段" * 800) for _ in range(12)]
 
     summary = asyncio.run(worker._summarize(messages, "", source=1000, chars=120))
 
-    assert len(worker._provider.requests) == agent_cmd.COMPACT_MAX_ROUNDS
+    assert len(worker._provider.requests) == turn_mod.COMPACT_MAX_ROUNDS
     assert "已省略" in summary
     session.close()
 
 
 def test_the_summary_budget_follows_what_is_dropped() -> None:
     """丢得多就该多读、多写；丢得少不必喂一个十万 token 的请求。"""
-    small_source, small_chars = agent_cmd._compact_limits(2_000)
-    big_source, big_chars = agent_cmd._compact_limits(80_000)
+    small_source, small_chars = turn_mod._compact_limits(2_000)
+    big_source, big_chars = turn_mod._compact_limits(80_000)
 
-    assert small_source == agent_cmd.COMPACT_SOURCE_CHARS_MIN
+    assert small_source == turn_mod.COMPACT_SOURCE_CHARS_MIN
     assert big_source > small_source
     assert big_chars > small_chars
-    assert "1234 字" in agent_cmd.COMPACT_PROMPT.format(chars=1234)
+    assert "1234 字" in turn_mod.COMPACT_PROMPT.format(chars=1234)
 
 
 # ---- 重复调用提醒 ----
@@ -1562,6 +1579,7 @@ def test_agent_tool_schemas_are_strict_and_required() -> None:
         "bash",
         "read_terminal",
         "wait_for",
+        "wait_for_change",
         "resize_terminal",
         "send_text",
         "send_keys",
@@ -1986,3 +2004,59 @@ def test_the_thin_service_lists_every_keyword_the_engine_takes() -> None:
     engine = set(inspect.signature(Engine.read_line).parameters) - {"self"}
     thin = set(inspect.signature(Services.read_line).parameters) - {"self"}
     assert engine == thin
+
+
+# ---- /stay ----
+
+
+def _bare_session(monkeypatch):
+    """只装配会话对象，不进 ``cmd_agent``：测的是开关与循环本身。"""
+    provider = ScriptedProvider([])
+    catalog = FakeCatalog(provider)
+    monkeypatch.setattr(agent_cmd, "default_catalog", lambda: catalog)
+    services = FakeServices([])
+    session = agent_cmd._Session(
+        services, provider, "stub-model", None, catalog=catalog
+    )
+    return session, services
+
+
+def test_stay_toggles_with_a_bare_command(monkeypatch) -> None:
+    session, services = _bare_session(monkeypatch)
+
+    asyncio.run(session._slash_stay(""))
+    assert session._stay is True
+    asyncio.run(session._slash_stay(""))
+    assert session._stay is False
+
+
+def test_stay_accepts_explicit_on_and_off(monkeypatch) -> None:
+    session, services = _bare_session(monkeypatch)
+
+    asyncio.run(session._slash_stay("on"))
+    assert session._stay is True
+    asyncio.run(session._slash_stay("off"))
+    assert session._stay is False
+
+    asyncio.run(session._slash_stay("maybe"))
+    assert session._stay is False
+    assert any("用法：/stay" in message for message in services.messages)
+
+
+def test_stay_runs_another_round_instead_of_prompting(monkeypatch) -> None:
+    """打开之后一轮接一轮，不回到提示；关掉才重新等人输入。"""
+    session, services = _bare_session(monkeypatch)
+    calls = []
+
+    async def fake_one(task):
+        calls.append(task)
+        if len(calls) >= 2:
+            session._stay = False
+
+    monkeypatch.setattr(session, "_one", fake_one)
+    session._stay = True
+
+    assert asyncio.run(session.run("任务")) is False
+
+    assert calls == ["任务", agent_cmd._CONTINUE]
+    assert services.prompts, "关掉 /stay 之后应该回到提示等输入"

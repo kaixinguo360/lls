@@ -86,6 +86,7 @@ def test_builtin_tools_are_strict_and_named() -> None:
         "send_raw",
         "send_text",
         "wait_for",
+        "wait_for_change",
         "write_file",
     ]
     assert all(entry.tool.strict for entry in box)

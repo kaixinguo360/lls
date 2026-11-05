@@ -26,8 +26,15 @@ def _recording(argv: list[str]) -> int:
     )
 
 
+def _serve(argv: list[str]) -> int:
+    from .headless import main as serve_main
+
+    return serve_main(argv)
+
+
 COMMANDS: dict[str, Command] = {
     "recording": Command("recording", "列出、回放与导出终端录制", _recording),
+    "serve": Command("serve", "无头运行：把终端交给 agent，没有宿主界面", _serve),
 }
 
 

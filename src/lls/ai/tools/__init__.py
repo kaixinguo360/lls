@@ -60,7 +60,7 @@ def builtin_tools(
     view: ScreenView | None = None,
     shell: Shell | None = None,
 ) -> Toolbox:
-    """装好默认那八个工具。
+    """装好默认这组工具。
 
     ``view`` 传进来时与宿主共用同一份「上次读到的画面」：任务开头拍的那张
     快照也算看过，模型第一次读屏不会白读一遍重复内容。``shell`` 不给就用

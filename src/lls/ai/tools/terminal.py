@@ -6,8 +6,9 @@
 假引擎；想把这组工具搬到别的宿主上（另一个 TUI 框架、一个纯 stdin/stdout 的
 脚本），照着这三个方法实现一遍就行。
 
-读写分开是有意的：动作工具（``send_*``）只写，读屏只有 ``read_terminal`` 与
-``wait_for`` 两个入口 —— 什么时候观察由模型决定，而不是每输入一个按键就回一屏。
+读写分开是有意的：动作工具（``send_*``）只写，读屏只有 ``read_terminal``、
+``wait_for`` 与 ``wait_for_change`` 三个入口 —— 什么时候观察由模型决定，而
+不是每输入一个按键就回一屏。
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ __all__ = [
     "ScreenView",
     "TerminalPort",
     "WAIT_FOR_TOOL",
+    "WAIT_FOR_CHANGE_TOOL",
     "terminal_tools",
 ]
 
@@ -177,6 +179,24 @@ class ScreenView:
                 "\n".join(_new_lines(before, text.split("\n")))
             ):
                 return text, "matched"
+
+    async def wait_for_change(self, lines: int, timeout: float) -> tuple[str, str]:
+        """等到画面**变了**：返回 (新画面, "changed")，超时返回 (旧画面, "timeout")。
+
+        等的是变化，不是安静：画面本来就安静时 :meth:`read` 会立刻返回，
+        拿它守着一个终端就是空转。也不要求某个模式匹配 —— 多一行、少一行、
+        某一行改了字都算，这是「没有任务、只对发生的事反应」需要的那一种。
+        """
+        text = self.snapshot(lines)
+        deadline = time.monotonic() + min(max(timeout, 0.0), MAX_WAIT_FOR)
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                return text, "timeout"
+            await self._poll(min(READ_POLL, max(0.0, deadline - now)))
+            fresh = self.snapshot(lines)
+            if fresh != text:
+                return fresh, "changed"
 
     def observe(self, text: str, status: str) -> Observation:
         """把一次读取包成观察块；与上次相同则省略正文。
@@ -375,6 +395,38 @@ WAIT_FOR_TOOL = Tool(
     strict=True,
 )
 
+WAIT_FOR_CHANGE_TOOL = Tool(
+    name="wait_for_change",
+    description=(
+        "Wait until anything on screen changes, then look: returns as soon as "
+        "the screen differs from what it was when the call started (new output, "
+        "a line gone, a line rewritten), or after the timeout. Unlike wait_for "
+        "with an empty pattern it does not wait for the screen to go quiet, so "
+        "it is the one to sit on while you have nothing to do yet. Returns the "
+        "tail of the screen plus a status: changed / timeout."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "timeout": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": MAX_WAIT_FOR,
+                "description": "Give up after this many seconds and report timeout.",
+            },
+            "lines": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_LINES,
+                "description": "Trailing lines to return; 120 is a good default.",
+            },
+        },
+        "required": ["timeout", "lines"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 RESIZE_TOOL = Tool(
     name="resize_terminal",
     description=(
@@ -494,6 +546,12 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
         text, status = await view.wait_for(lines, pattern, timeout)
         return view.observe(text, status)
 
+    async def wait_for_change(args: dict[str, Any]) -> str:
+        timeout = as_float(args.get("timeout"), MAX_WAIT_FOR)
+        lines = as_int(args.get("lines"), DEFAULT_READ_LINES)
+        text, status = await view.wait_for_change(lines, timeout)
+        return view.observe(text, status)
+
     async def resize_terminal(args: dict[str, Any]) -> str:
         rows = as_int(args.get("rows"), 0)
         columns = as_int(args.get("columns"), 0)
@@ -515,6 +573,7 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
     return [
         AgentTool(READ_TOOL, read_terminal),
         AgentTool(WAIT_FOR_TOOL, wait_for),
+        AgentTool(WAIT_FOR_CHANGE_TOOL, wait_for_change),
         AgentTool(SEND_TEXT_TOOL, send_text),
         AgentTool(SEND_KEYS_TOOL, send_keys),
         AgentTool(SEND_RAW_TOOL, send_raw),

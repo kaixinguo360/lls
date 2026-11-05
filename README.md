@@ -105,6 +105,8 @@ lls bash        # 指定命令
   子进程收到 SIGWINCH）；只能比宿主窗口小，放大交给用户拖窗口；
 - `wait_for`：等到画面出现某段文字（正则，只在之后新出现的行里找）或安静下来，
   慢命令用它一次等到，不必反复读屏；
+- `wait_for_change`：等到画面**变了**就返回（多一行、少一行、某行改写都算），
+  不要求画面先安静 —— 没有事情可做、只是在盯着终端时用它挂着；
 - `bash`：在另一个 shell 里跑一条命令，回退出码与完整输出（`cd` 留到下次
   调用；它看不见用户终端，也驱动不了 TUI）；
 - `read_file`：按行号读磁盘上的文本文件，正文带行号，页脚说明下一次从哪接着读；
@@ -124,9 +126,13 @@ lls bash        # 指定命令
 忙碌只是一个状态位，不是另一套界面：斜杠命令在这一轮运行期间仍可使用。行首输入 `/` 后，提示符就换成 `(agent-cmd)`（执行中也一样，命令就是命令），回车是
 执行命令而不是下一轮任务。`/` 命令同样支持补全：补出来的是规范名
 （`/ls` 会补成 `/sessions`），默认的行尾虚影同时给还没打的那一截与用法。命令按「是否会影响本轮正在使用的状态」分四档：
-`/help` `/s` `/tools` `/title` `/model` 立即执行，完成后回到执行中界面；
-`/compact` 排到本轮结束后；`/undo` `/retry` `/sessions` `/new` `/fork` `/rm`
-`/archive` 执行中拒绝，并提示先 `Ctrl-C`；`/exit` 先让本轮收尾再退出。
+`/help` `/s` `/tools` `/title` `/model` `/stay` 立即执行，完成后回到执行中界面；
+`/compact` 排到本轮结束后；`/undo` `/retry` `/sessions` `/new` `/fork`
+`/rm` `/archive` 执行中拒绝，并提示先 `Ctrl-C`；`/exit` 先让本轮收尾再退出。
+
+`/stay [on|off]`（不带参数是切换）打开后，每轮结束不再回到提示符，而是直接
+接着跑下一轮 —— 与 `lls serve --stay` 同一段循环。状态行在打开时多一个
+`· stay`；`Ctrl-C` 中断当前轮的同时会把它关掉，否则按一次停不下来。
 
 会话有独立身份，落盘到配置的 `paths.sessions_dir`（默认 `~/.local/lls/sessions`）。
 一条会话一个目录，`events.jsonl` 是唯一事实来源：一行一事件，只追加，
@@ -195,6 +201,33 @@ sessions/
 `/archive`。
 
 `agent` 不请求确认，模型给出的输入直接写入子进程 —— 请在允许其操作终端的会话中使用。
+
+### serve
+
+`lls serve` 把终端交给 agent 跑，没有宿主界面：不接管终端、不读键盘，跑完就
+退出。同一套引擎、同一套工具、同一份会话与录制。
+
+```bash
+lls serve --task "把 notes.txt 的行数写进 count.txt"      # 有头：把那一屏画到 stdout
+lls serve --task "…" --headless                          # 无头：只把最终答复写到 stdout
+lls serve --session <id|前缀|标题片段> --task "…"         # 接着已有会话
+lls serve --stay --task "…"                              # 模型停下后立刻再来一轮
+lls serve                                                # 没有任务：待命
+lls serve --task "…" -- zsh -l                           # 包装指定的命令；默认 $SHELL
+```
+
+- `--task` 省略时按**待命**处理：没有目标，模型只对终端里发生的事做最小反应，
+  没事就用 `wait_for_change` 挂着。待命期间不写 stdout。
+- `--stay`：模型一停就再跑一轮，直到 `SIGINT`/`SIGTERM` —— 与 `agent` 里的
+  `/stay` 是同一段循环。
+- 有头/无头只影响 stdout：`--headless` 只写最终答复；有头时把屏幕画到 stdout，
+  收尾时再打一次答复。
+- 会话照常落盘（`paths.sessions_dir`），终端录制照常（`paths.recordings_dir`），
+  事后可以用 `lls recording` 回放。
+- 退出码：`0` 正常结束，`1` 出错，或子进程先没了。
+
+无头运行里 `SIGINT` 是**停止指令**，不再转给子进程 —— 没有「打断前台作业」
+这回事。
 
 ### 求助教师（可选）
 

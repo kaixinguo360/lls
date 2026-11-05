@@ -189,6 +189,9 @@ class Engine:
         completion_style: str = "ghost",
         recorder: TerminalSink | None = None,
         clipboard: bool = False,
+        # 是否接管宿主终端：False 时只保留 pty、屏幕模型与录制这条链，
+        # 不打开 console、不读 stdin、不渲染。无头运行（``lls serve``）用。
+        attach_host: bool = True,
     ) -> None:
         self._backend = backend
         self._recorder = recorder
@@ -201,6 +204,8 @@ class Engine:
 
         self._pty: PtySession | None = None
         self._pty_fd = -1
+        self._stdin_fd = -1
+        self._attach_host = attach_host
         self._console: Console | None = None
         self._out = _PendingWrites()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -261,6 +266,16 @@ class Engine:
     def exited(self) -> bool:
         return self._exit_event.is_set()
 
+    def stop(self) -> None:
+        """请求主循环退出：当前这一步做完就收尾。
+
+        ``run()`` 之前调用无效果 —— 那时连事件循环都没有，也就没人会在这
+        之前要求退出。
+        """
+        if self._loop is None:
+            return
+        self._exit_event.set()
+
     @property
     def services(self) -> Services:
         return self._services
@@ -286,21 +301,28 @@ class Engine:
         winsize = Winsize(rows=self.screen.rows, columns=self.screen.columns)
         self._pty = self._backend.spawn(self._argv, winsize)
         self._pty_fd = self._pty.fileno()
-        self._attach_console(self._backend.open_console())
 
         self._loop = asyncio.get_running_loop()
-        self._align_model_to_cursor()
+        if self._attach_host:
+            self._attach_console(self._backend.open_console())
+            self._stdin_fd = sys.stdin.fileno()
+            self._align_model_to_cursor()
+            self._loop.add_reader(self._stdin_fd, self._on_stdin_readable)
         self._loop.add_reader(self._pty_fd, self._on_master_readable)
-        self._loop.add_reader(sys.stdin.fileno(), self._on_stdin_readable)
         try:
-            self._loop.add_signal_handler(signal.SIGWINCH, self._on_winch)
             self._loop.add_signal_handler(signal.SIGCHLD, self._on_sigchld)
             self._loop.add_signal_handler(signal.SIGHUP, self._on_hangup)
             self._loop.add_signal_handler(signal.SIGTERM, self._on_terminate)
             self._loop.add_signal_handler(signal.SIGQUIT, self._on_quit)
-            self._loop.add_signal_handler(signal.SIGINT, self._on_interrupt)
-            self._loop.add_signal_handler(signal.SIGTSTP, self._on_suspend)
-            self._loop.add_signal_handler(signal.SIGCONT, self._on_resume)
+            if self._attach_host:
+                self._loop.add_signal_handler(signal.SIGWINCH, self._on_winch)
+                self._loop.add_signal_handler(signal.SIGINT, self._on_interrupt)
+                self._loop.add_signal_handler(signal.SIGTSTP, self._on_suspend)
+                self._loop.add_signal_handler(signal.SIGCONT, self._on_resume)
+            else:
+                # 没有宿主终端时不存在「打断前台作业」这回事：SIGINT 就是
+                # 这次运行的停止指令，转给子进程只会把它留在后台。
+                self._loop.add_signal_handler(signal.SIGINT, self.stop)
         except (NotImplementedError, RuntimeError):
             # 部分平台/非主线程不支持在事件循环里装信号处理器：退化为默认行为
             pass
@@ -464,7 +486,7 @@ class Engine:
                     self._out.write(_SHOW_CURSOR)
                     self._cursor_shown = True
         if self._loop is not None:
-            for fd in (self._pty_fd, sys.stdin.fileno()):
+            for fd in (self._pty_fd, self._stdin_fd):
                 if fd >= 0:
                     with contextlib.suppress(Exception):
                         self._loop.remove_reader(fd)
