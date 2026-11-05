@@ -68,3 +68,14 @@ class Playback:
                 break
             self.apply(frame)
         self._position = target
+
+    def seek_frame(self, number: int) -> None:
+        """重建到第 ``number`` 帧为止；同一时间戳的后续帧不会混进来。"""
+        self.reset()
+        last = 0.0
+        for frame in self.recording.frames():
+            if frame.number > number:
+                break
+            self.apply(frame)
+            last = frame.at
+        self._position = last

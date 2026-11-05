@@ -57,6 +57,42 @@ def test_play_dump_prints_the_final_screen(tmp_path, capsys) -> None:
     assert "hello" in capsys.readouterr().out
 
 
+def test_play_dump_can_stop_at_a_frame(tmp_path, capsys) -> None:
+    recorder = TerminalRecorder(
+        tmp_path,
+        recording_id="r1",
+        rows=24,
+        columns=80,
+        compress=False,
+        fsync=False,
+    )
+    recorder.record("o", b"first")
+    recorder.record("o", b"second")
+    recorder.close()
+
+    assert (
+        recording_main(
+            ["play", "r1", "--root", str(tmp_path), "--dump", "--frame", "1"]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "first" in output
+    assert "second" not in output
+
+
+def test_play_rejects_a_frame_outside_the_recording(tmp_path, capsys) -> None:
+    _record(tmp_path)
+
+    assert (
+        recording_main(
+            ["play", "r1", "--root", str(tmp_path), "--dump", "--frame", "99"]
+        )
+        == 1
+    )
+    assert "不可用" in capsys.readouterr().err
+
+
 def test_play_reports_a_missing_recording(tmp_path, capsys) -> None:
     assert recording_main(["play", "nope", "--root", str(tmp_path)]) == 1
     assert "找不到录制" in capsys.readouterr().err

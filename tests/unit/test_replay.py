@@ -70,6 +70,22 @@ def test_playback_seek_only_applies_frames_up_to_the_target() -> None:
     assert playback.position == 0.5
 
 
+def test_seek_frame_stops_at_the_frame_even_with_equal_timestamps() -> None:
+    recording = _FakeRecording(
+        [
+            Frame(1, 0.0, "o", b"a"),
+            Frame(2, 0.0, "o", b"b"),
+            Frame(3, 0.0, "o", b"c"),
+        ]
+    )
+    playback = Playback(recording, screen_factory=_screen_factory)  # type: ignore[arg-type]
+
+    playback.seek_frame(1)
+    assert playback.screen.text() == "a"
+    playback.seek_frame(2)
+    assert playback.screen.text() == "ab"
+
+
 def test_seek_tolerates_microsecond_rounding_at_the_target() -> None:
     recording = _FakeRecording([Frame(1, 1.0000004, "o", b"a")])
     playback = Playback(recording, screen_factory=_screen_factory)  # type: ignore[arg-type]

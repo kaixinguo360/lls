@@ -160,8 +160,8 @@ lls recording export <id|path> [-o FILE] [--with-input] [--size COLSxROWS]
 - `export` 写 asciicast v2：首行 `width`/`height`/`timestamp`/`duration`，
   事件为 `[at, "o"|"i"|"r", text]`。`o` 用增量 UTF-8 解码，跨帧切断的多字节
   字符不会变成乱码；`i` 默认不导出。
-- 非 tty 或没有 termios 时 `play` 提示改用 `--dump`/`export`；`--dump` 只输出
-  末屏文本。
+- 非 tty 或没有 termios 时 `play` 提示改用 `--dump`/`export`；`--dump` 输出
+  目标位置（默认末屏）的文本。
 - 独立使用：`python -m lls.recording ls --root <dir>`；不经过 LLS 入口也
   不需要配置文件。
 

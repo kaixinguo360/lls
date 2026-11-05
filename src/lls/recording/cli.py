@@ -72,7 +72,7 @@ def _build_parser(root: str | os.PathLike[str] | None) -> argparse.ArgumentParse
     target.add_argument("--time", type=float, help="从指定秒数开始")
     play.add_argument("--size", type=_size, help="录制尺寸，COLSxROWS")
     play.add_argument("--show-input", action="store_true", help="在状态栏显示输入")
-    play.add_argument("--dump", action="store_true", help="只输出末屏文本")
+    play.add_argument("--dump", action="store_true", help="只输出目标位置的文本")
 
     export = sub.add_parser("export", help="导出为 asciicast v2")
     export.add_argument("id", metavar="ID|PATH", help="录制 id 或目录")
@@ -207,17 +207,19 @@ def _play(
     if size is None:
         raise RecordingError("录制没有尺寸，请用 --size 指定")
     if args.frame is not None:
-        start_at = recording.frame_time(args.frame)
-    elif args.time is not None:
-        start_at = args.time
-    else:
-        start_at = 0.0
+        recording.frame_time(args.frame)  # 验证帧存在且在保留窗口内
+    start_at = args.time if args.time is not None else 0.0
 
     if args.dump:
         from .replay.player import Playback
 
         playback = Playback(recording, size=size, screen_factory=screen_factory)
-        playback.seek(float("inf"))
+        if args.frame is not None:
+            playback.seek_frame(args.frame)
+        elif args.time is not None:
+            playback.seek(args.time)
+        else:
+            playback.seek(float("inf"))
         text = playback.screen.text()
         if text:
             print(text)
@@ -231,6 +233,7 @@ def _play(
         recording,
         size=size,
         start_at=start_at,
+        start_frame=args.frame,
         speed=args.speed,
         show_input=args.show_input,
         screen_factory=screen_factory,

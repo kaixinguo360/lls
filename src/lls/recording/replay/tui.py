@@ -97,6 +97,7 @@ class _Player:
         *,
         size: tuple[int, int],
         start_at: float,
+        start_frame: int | None,
         speed: float,
         show_input: bool,
         screen_factory: ScreenFactory | None,
@@ -117,22 +118,27 @@ class _Player:
             row_renderer=row_renderer,
             viewport=self._viewport,
         )
-        start = min(max(start_at, 0.0), self._duration)
         self._paused = False
-        self._paused_at = start
-        self._origin_at = start
-        self._origin_wall = time.monotonic()
-        self._ended = False
         self._keybuf = b""
         self._last_input = b""
         self._last_size = (0, 0)
-        self._playback.seek(start)
-        self._frames = recording.frames()
-        self._next = next(self._frames, None)
-        while self._next is not None and self._next.at <= start + TIME_EPSILON:
-            if self._next.channel == "i":
-                self._last_input = self._next.data
+        if start_frame is not None:
+            self._playback.seek_frame(start_frame)
+            start = self._playback.position
+            self._frames = recording.frames(start=start_frame + 1)
             self._next = next(self._frames, None)
+        else:
+            start = min(max(start_at, 0.0), self._duration)
+            self._playback.seek(start)
+            self._frames = recording.frames()
+            self._next = next(self._frames, None)
+            while self._next is not None and self._next.at <= start + TIME_EPSILON:
+                if self._next.channel == "i":
+                    self._last_input = self._next.data
+                self._next = next(self._frames, None)
+        self._paused_at = start
+        self._origin_at = start
+        self._origin_wall = time.monotonic()
         self._ended = self._next is None
 
     # ---- 主循环 ----
@@ -153,6 +159,8 @@ class _Player:
 
     def _terminal_size(self) -> tuple[int, int]:
         size = shutil.get_terminal_size((80, 24))
+        if size.lines <= 0 or size.columns <= 0:
+            return 80, 24
         return size.lines, size.columns
 
     def _viewport(self) -> tuple[int, int]:
@@ -328,6 +336,7 @@ def run(
     *,
     size: tuple[int, int],
     start_at: float = 0.0,
+    start_frame: int | None = None,
     speed: float = 1.0,
     show_input: bool = False,
     screen_factory: ScreenFactory | None = None,
@@ -343,6 +352,7 @@ def run(
             recording,
             size=size,
             start_at=start_at,
+            start_frame=start_frame,
             speed=speed,
             show_input=show_input,
             screen_factory=screen_factory,
