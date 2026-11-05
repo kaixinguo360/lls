@@ -189,7 +189,10 @@ def build(
     names = [_tool_name(entry) for entry in tools]
     lines = [_TOOL_HELP[name] for name in names if name in _TOOL_HELP]
     if not lines:
-        raise ValueError("prompt needs at least one known tool")
+        # 工具全被关掉是合法状态（用户可以在 /tools 里全关，或会话里存着
+        # 这样的策略）：这时模型只能直接答复，提示词照写，不要每轮都因为
+        # 拼不出提示词而失败。
+        lines = ["（本次运行没有可用的工具，只能直接给出答复。）"]
 
     rules = _RULES_TASK if mode == "task" else _RULES_STANDBY
     display_block = _DISPLAY[display].format(

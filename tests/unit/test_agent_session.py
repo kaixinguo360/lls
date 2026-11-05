@@ -2060,3 +2060,22 @@ def test_stay_runs_another_round_instead_of_prompting(monkeypatch) -> None:
 
     assert calls == ["任务", agent_cmd._CONTINUE]
     assert services.prompts, "关掉 /stay 之后应该回到提示等输入"
+
+
+def test_stay_still_drains_the_queue_between_rounds(monkeypatch) -> None:
+    """持续执行不能把排队的任务饿死：两轮之间先兑现队首，再自己接着跑。"""
+    session, services = _bare_session(monkeypatch)
+    calls = []
+
+    async def fake_one(task):
+        calls.append(task)
+        if len(calls) >= 2:
+            session._stay = False
+
+    monkeypatch.setattr(session, "_one", fake_one)
+    session._stay = True
+    session._queue.append(agent_cmd._parse("排队任务"))
+
+    asyncio.run(session.run("首个任务"))
+
+    assert calls == ["首个任务", "排队任务"]

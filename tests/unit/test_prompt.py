@@ -67,6 +67,44 @@ def test_unknown_scene_is_an_error() -> None:
         prompt.build(_tools("read_terminal"), display="tty", mode="task")
 
 
-def test_prompt_needs_at_least_one_known_tool() -> None:
-    with pytest.raises(ValueError):
-        prompt.build(_tools("unknown"), display="interactive")
+def test_no_tools_still_produces_a_prompt() -> None:
+    """工具全被关掉是合法状态：照常拼提示词，模型只能直接答复。"""
+    text = prompt.build([], display="interactive")
+
+    assert "没有可用的工具" in text
+
+
+def test_every_builtin_tool_has_a_description() -> None:
+    """新增工具时必须同时补一条说明，否则提示词里会漏掉它。"""
+    from lls.ai.tools import builtin_tools
+
+    box = builtin_tools(_Port(), _Port().wait)
+    missing = [entry.tool.name for entry in box if entry.tool.name not in prompt._TOOL_HELP]
+
+    assert missing == []
+
+
+class _Port:
+    """够 ``builtin_tools`` 装配就行，不跑任何工具。"""
+
+    def __init__(self) -> None:
+        self.screen = SimpleNamespace(
+            text=lambda limit=0: "",
+            rows=24,
+            columns=80,
+            cursor=SimpleNamespace(x=0, y=0, hidden=False),
+            alternate=False,
+            host_modes=frozenset(),
+        )
+
+    def write(self, data: bytes, *, enter: bool = False) -> None:
+        pass
+
+    def flush_model(self) -> None:
+        pass
+
+    async def wait(self, timeout: float) -> None:
+        pass
+
+    def resize(self, rows: int, columns: int) -> tuple[int, int]:
+        return rows, columns

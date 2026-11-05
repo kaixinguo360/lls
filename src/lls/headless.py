@@ -131,13 +131,14 @@ class _Serve:
             ToolPolicy.from_json(self._session.meta.tools)
         )
         tools = Toolbox(policy.filter(list(all_tools)))
+        has_teacher = any(entry.tool.name == "ask_teacher" for entry in tools)
         system = build_prompt(
             tools,
             # serve 没有会话提示这一层：答复要么写到 stdout，要么由
             # ``_run`` 在收尾时打印，所以一律按「没有人看」来写。
             display="headless",
             mode="task" if self._options.task else "standby",
-        ) + (TEACHER_HELP if teacher else "")
+        ) + (TEACHER_HELP if has_teacher else "")
 
         turn_no = 0
         task: Any = self._options.task or None

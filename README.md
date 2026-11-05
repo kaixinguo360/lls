@@ -217,11 +217,12 @@ lls serve --task "…" -- zsh -l                           # 包装指定的命�
 ```
 
 - `--task` 省略时按**待命**处理：没有目标，模型只对终端里发生的事做最小反应，
-  没事就用 `wait_for_change` 挂着。待命期间不写 stdout。
+  没事就用 `wait_for_change` 挂着。待命通常配 `--stay`，否则跑完一轮就退出。
 - `--stay`：模型一停就再跑一轮，直到 `SIGINT`/`SIGTERM` —— 与 `agent` 里的
   `/stay` 是同一段循环。
 - 有头/无头只影响 stdout：`--headless` 只写最终答复；有头时把屏幕画到 stdout，
-  收尾时再打一次答复。
+  收尾时再打一次答复。**有头会往 stdout 写转义序列**，管道里请显式 `--headless`。
+- 终端窗口固定 `80×24`：无头时没有宿主窗口可问，也不接受 `resize`。
 - 会话照常落盘（`paths.sessions_dir`），终端录制照常（`paths.recordings_dir`），
   事后可以用 `lls recording` 回放。
 - 退出码：`0` 正常结束，`1` 出错，或子进程先没了。

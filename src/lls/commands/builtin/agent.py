@@ -658,7 +658,7 @@ class _Session:
         self._log = session.log(LOG_ENTRIES) if session is not None else []
         self._retype = ""  # /undo 放回输入行的原文，读过一次就清空
         self._draft = ""   # 执行中输入中的草稿：回到提示时原样还给你
-        self._queue: List[str] = []   # 执行中回车排下的队，按顺序兑现
+        self._queue: List[_Parsed] = []   # 执行中回车排下的队，按顺序兑现
         self._notice = ""             # 执行中「已排队」那一句，画在队伍上方
         self._abort: Any = None  # 执行中的中断信号，见 _poll（每轮新建）
         # 这一轮是否占着键盘：从等第一下按键起，到输入行收工。占着的时候
@@ -678,16 +678,16 @@ class _Session:
         while True:
             if self._exit_requested:
                 return True
-            if task is None and self._stay:
-                # 持续执行：不等新任务，直接接着跑。没有可续的一轮时这就是
-                # 一次空历史请求（模型看到的只有系统提示与终端画面）。
-                task = _CONTINUE
             if task is None:
                 # 执行中排下的队先兑现：一轮结束后直接接着跑队首，
                 # 队空了才回到提示。排队的内容仍按一行的规矩解释 ——
                 # 斜杠命令仍然是命令，不是任务。
                 if self._queue:
                     task = await self._interpret(self._queue.pop(0))
+                elif self._stay:
+                    # 持续执行：没有新任务就一直跑。没有可续的一轮时这就是
+                    # 一次空历史请求（模型看到的只有系统提示与终端画面）。
+                    task = _CONTINUE
                 else:
                     task = await self._ask()
                 if task is _EXIT:
@@ -701,8 +701,9 @@ class _Session:
                 await self._one(task)
             except SessionClosed:
                 return False
-            # /stay：不回到提示符，直接接着跑下一轮 —— 等价于自动 /retry。
-            task = _CONTINUE if self._stay else None
+            # 下一轮从「有没有排队、要不要持续执行」重新判断：两者都由
+            # 循环开头那一处决定，这里不再替它选。
+            task = None
 
     async def _ask(self) -> Any:
         """读一个任务；返回文本或 ``_CANCEL`` / ``_EXIT`` / None（会话结束）。"""
@@ -1457,6 +1458,8 @@ class _Session:
             elif phase == "awaiting":
                 painter.awaiting()
 
+        # 教师提示只在 ask_teacher 真的装配着时才写：工具可能被策略关掉。
+        teacher = any(entry.tool.name == "ask_teacher" for entry in self._tools)
         return Turn(
             services=self._s,
             view=self._view,
@@ -1467,7 +1470,7 @@ class _Session:
             budget=self._budget,
             provider_id=self._provider_id,
             catalog=self._catalog,
-            system=_system_prompt(self._tools, teacher=self._teacher is not None),
+            system=_system_prompt(self._tools, teacher=teacher),
             state=self._turn_state,
             turn=self._turn_no,
             poll=self._poll,
