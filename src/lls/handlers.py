@@ -39,6 +39,8 @@ class Controllable(Protocol):
 
     def step_once(self) -> None: ...
 
+    def set_passthrough(self, enabled: bool) -> None: ...
+
 
 def split_command(line: str) -> tuple[str, str | None]:
     """把 ``"name args..."`` 拆成 ``(name, args)``；args 为空时为 None。"""
@@ -200,8 +202,23 @@ class ControlHandler:
         if text == "quit":
             s.stop()
             return
+        if text in ("help", "?"):
+            await s.show_message(
+                "pause | resume | step | quit\n"
+                "input <text> | exec <command>\n"
+                "passthrough on|off"
+            )
+            return
 
         command, _, arg = text.partition(" ")
+        if command == "passthrough":
+            mode = arg.strip().lower()
+            if mode not in ("on", "off"):
+                await s.show_message("passthrough on|off")
+                return
+            self._target.set_passthrough(mode == "on")
+            s.set_handler(self._main)
+            return
         if command in ("input", "exec"):
             payload = arg.strip()
             if not payload:

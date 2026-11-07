@@ -10,6 +10,7 @@ class Target:
         self.paused = False
         self.single = False
         self.resumed = 0
+        self.passthrough = True
 
     def pause(self):
         self.paused = True
@@ -23,6 +24,9 @@ class Target:
         self.paused = True
         self.single = True
 
+    def set_passthrough(self, enabled):
+        self.passthrough = enabled
+
 
 class Services:
     def __init__(self, line):
@@ -30,6 +34,7 @@ class Services:
         self.handler = None
         self.stopped = False
         self.writes = []
+        self.messages = []
 
     async def read_line(self, prompt, **kwargs):
         return self.line
@@ -41,7 +46,7 @@ class Services:
         self.writes.append((data, enter))
 
     async def show_message(self, text):
-        pass
+        self.messages.append(text)
 
     def stop(self):
         self.stopped = True
@@ -92,3 +97,18 @@ def test_exec_writes_with_enter():
     assert target.paused is True
     assert services.writes == [(b"echo hi", True)]
     assert services.handler == "main"
+
+
+def test_passthrough_toggle():
+    target, services = run("passthrough off")
+    assert target.passthrough is False
+    assert services.handler == "main"
+
+    target, services = run("passthrough on")
+    assert target.passthrough is True
+
+
+def test_help_lists_commands():
+    target, services = run("?")
+    assert services.handler is None
+    assert "passthrough on|off" in services.messages[0]

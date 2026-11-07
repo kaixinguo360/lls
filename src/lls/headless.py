@@ -1,8 +1,8 @@
 """Run a handler over a terminal.
 
 chat keeps the existing headless agent path. --handler runs an external handler;
-with a TTY and without --headless it uses the normal HostUI. --control registers
-the Ctrl-E control plane for handlers that can pause/resume/step.
+with a TTY and without --headless it uses the normal HostUI. A controllable
+handler gets the Ctrl-E control plane automatically.
 """
 
 from __future__ import annotations
@@ -45,7 +45,6 @@ class _Options:
     stay: bool
     command: list[str]
     handler: str = "chat"
-    control: bool = False
 
 
 def _parse(argv: list[str]) -> _Options:
@@ -60,12 +59,8 @@ def _parse(argv: list[str]) -> _Options:
     parser.add_argument("--stay", action="store_true", help="模型停下之后立刻再来一轮，直到被中断")
     parser.add_argument("--handler", default="chat",
                         help="chat（默认）或 module:Class；后者直接作为 Engine handler")
-    parser.add_argument("--control", action="store_true",
-                        help="为可暂停的 handler 注册 Ctrl-E 控制模式")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="被包装的命令；默认 $SHELL")
     args = parser.parse_args(argv)
-    if args.control and args.handler == "chat":
-        parser.error("--control requires --handler")
     command = list(args.command)
     if command and command[0] == "--":
         command = command[1:]
@@ -76,7 +71,6 @@ def _parse(argv: list[str]) -> _Options:
         stay=bool(args.stay),
         command=command or [_default_shell()],
         handler=(args.handler or "chat").strip(),
-        control=bool(args.control),
     )
 
 
@@ -265,9 +259,8 @@ def _make_recorder():
 async def _run_external(options: _Options) -> int:
     handler = _load_handler(options.handler)
     handlers = {"main": handler}
-    if options.control:
-        if not all(hasattr(handler, name) for name in ("pause", "resume", "step_once")):
-            raise TypeError("--control requires pause/resume/step_once on the handler")
+    control_methods = ("pause", "resume", "step_once", "set_passthrough")
+    if all(hasattr(handler, name) for name in control_methods):
         handlers["control"] = ControlHandler(handler)
     recorder = _make_recorder()
     screen = PyteScreenModel(rows=ROWS, columns=COLUMNS)

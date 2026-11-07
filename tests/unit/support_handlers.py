@@ -17,10 +17,11 @@ class EchoHandler:
 
 
 class PauseHandler:
-    """Minimal controllable handler for --control smoke tests."""
+    """Minimal controllable handler for the control-plane smoke tests."""
 
     def __init__(self) -> None:
         self.paused = False
+        self.passthrough = True
 
     def pause(self) -> None:
         self.paused = True
@@ -30,6 +31,9 @@ class PauseHandler:
 
     def step_once(self) -> None:
         self.paused = True
+
+    def set_passthrough(self, enabled: bool) -> None:
+        self.passthrough = enabled
 
     async def step(self, services) -> None:
         await services.wait(0.1)

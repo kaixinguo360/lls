@@ -26,7 +26,6 @@ There is no separate Session, Runtime, or controller loop.
 
 ```bash
 lls serve --handler pkg.mod:Class -- /bin/bash
-lls serve --handler pkg.mod:Class --control -- /bin/bash
 lls serve --handler chat
 ```
 
@@ -61,7 +60,8 @@ and should not call `read_line`, overlays, or tools.
 
 ## Control plane
 
-`--control` registers a `ControlHandler` next to the main handler:
+A handler that implements pause/resume/step_once/set_passthrough gets a
+`ControlHandler` next to the main handler automatically:
 
 ```text
 main handler
@@ -70,8 +70,14 @@ main handler
 ControlHandler
   pause | resume | step | quit
   input <text> | exec <command>
+  passthrough on|off
+  ? | help
   q / Esc → back to main
 ```
+
+Normal host keys are passed through to the child by default, so human and
+model input interleave. `passthrough off` stops forwarding normal keys;
+`passthrough on` restores it. `Ctrl-E` is always intercepted.
 
 `ControlHandler` only pauses/resumes/steps the target, plus explicit one-shot
 writes via `input`/`exec`; it does not run app commands or use tools. `input`
@@ -84,10 +90,12 @@ The target handler must provide:
 def pause(self) -> None: ...
 def resume(self) -> None: ...
 def step_once(self) -> None: ...
+def set_passthrough(self, enabled: bool) -> None: ...
 ```
 
-A tick handler consumes host keys itself, discards normal keys, and switches to
-`control` on Ctrl-E. Control keys never reach the child or the recorder.
+A tick handler consumes host keys itself, forwards them when passthrough is on,
+and switches to `control` on Ctrl-E. `Ctrl-E` never reaches the child or the
+recorder.
 
 External model handlers live with the model and are loaded with `--handler`;
 LLS does not ship a model adapter.
