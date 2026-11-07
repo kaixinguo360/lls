@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import importlib
 import os
 import sys
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ class _Options:
     headless: bool
     stay: bool
     command: list[str]
+    controller: str = "chat"
 
 
 def _parse(argv: list[str]) -> _Options:
@@ -56,6 +58,8 @@ def _parse(argv: list[str]) -> _Options:
     parser.add_argument("--new", action="store_true", help="新建会话（默认行为）")
     parser.add_argument("--headless", action="store_true", help="不画屏，只把最终答复写到 stdout")
     parser.add_argument("--stay", action="store_true", help="模型停下之后立刻再来一轮，直到被中断")
+    parser.add_argument("--controller", default="chat",
+                        help="chat（默认）或 module:Class；后者直接作为 Engine handler")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="被包装的命令；默认 $SHELL")
     args = parser.parse_args(argv)
     command = list(args.command)
@@ -67,6 +71,7 @@ def _parse(argv: list[str]) -> _Options:
         headless=bool(args.headless),
         stay=bool(args.stay),
         command=command or [_default_shell()],
+        controller=(args.controller or "chat").strip(),
     )
 
 
@@ -224,7 +229,63 @@ def _open_session(options: _Options, catalog: Any) -> Any:
     return keeper.create(provider_id, model_id, title=title)
 
 
+def _load_handler(spec: str) -> Any:
+    module_name, separator, attribute = spec.partition(":")
+    if not separator or not module_name or not attribute:
+        raise ValueError("controller must be module:Class")
+    handler = getattr(importlib.import_module(module_name), attribute)()
+    if not hasattr(handler, "step"):
+        raise TypeError(f"{spec} is not an LLS handler")
+    return handler
+
+
+def _make_recorder():
+    config = load_config()
+    if not config.recording.enabled:
+        return None
+    from .recording import TerminalRecorder
+
+    rec = config.recording
+    return TerminalRecorder(
+        config.paths.recordings_dir,
+        rows=ROWS,
+        columns=COLUMNS,
+        compress=rec.compress,
+        max_recording_bytes=rec.max_recording_bytes,
+        max_total_bytes=rec.max_total_bytes,
+        fsync=rec.fsync,
+    )
+
+
+async def _run_external(options: _Options) -> int:
+    handler = _load_handler(options.controller)
+    recorder = _make_recorder()
+    screen = PyteScreenModel(rows=ROWS, columns=COLUMNS)
+    engine = Engine(
+        make_backend(),
+        options.command,
+        screen,
+        {"external": handler},
+        "external",
+        recorder=recorder,
+        attach_host=False,
+    )
+    try:
+        await engine.run()
+    finally:
+        if recorder is not None:
+            try:
+                recorder.close()
+            except OSError as e:
+                print(f"lls serve: 录制收尾失败：{e}", file=sys.stderr)
+        if engine.recorder_error:
+            print(f"lls serve: {engine.recorder_error}", file=sys.stderr)
+    return 0
+
+
 async def _run(options: _Options) -> int:
+    if options.controller != "chat":
+        return await _run_external(options)
     try:
         catalog = default_catalog()
     except ConfigError as e:
@@ -242,21 +303,7 @@ async def _run(options: _Options) -> int:
         print(f"lls serve: {e}", file=sys.stderr)
         return 1
 
-    config = load_config()
-    recorder = None
-    if config.recording.enabled:
-        from .recording import TerminalRecorder
-
-        rec = config.recording
-        recorder = TerminalRecorder(
-            config.paths.recordings_dir,
-            rows=ROWS,
-            columns=COLUMNS,
-            compress=rec.compress,
-            max_recording_bytes=rec.max_recording_bytes,
-            max_total_bytes=rec.max_total_bytes,
-            fsync=rec.fsync,
-        )
+    recorder = _make_recorder()
 
     screen = PyteScreenModel(rows=ROWS, columns=COLUMNS)
     handler = _Serve(
