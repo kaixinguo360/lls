@@ -122,14 +122,14 @@ class Services:
         """
         await self._engine.wait_keys(timeout)
 
-    async def read_key(self) -> Key | None:
-        """读一个已解析的按键；子进程退出返回 None。
+    async def read_key(self, timeout: float | None = None) -> Key | None:
+        """读一个已解析的按键；超时或子进程退出返回 None。
 
         方向键、Home/End 这类序列可能被终端拆成几次 read，引擎会等到序列
         收全再产出；单独的 Esc 靠一个短超时判定。需要「按键语义」而非原始
         字节的界面（分页器、选择框）应当用这个，不要自己拼转义序列。
         """
-        return await self._engine.read_key()
+        return await self._engine.read_key(timeout)
 
     async def read_line(
         self,
@@ -235,6 +235,10 @@ class Services:
         这样切换是**协作式**的：处理器总能把当前这一步做完。
         """
         self._engine.request_handler(name)
+
+    def has_handler(self, name: str) -> bool:
+        """当前注册表里是否有 ``name``。"""
+        return self._engine.has_handler(name)
 
     def stop(self) -> None:
         """请求引擎退出主循环：当前这一步做完就收尾。

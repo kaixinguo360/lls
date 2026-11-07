@@ -1,6 +1,6 @@
-# Handlers as controllers
+# Handlers and the control plane
 
-LLS has one runtime and one controller contract.
+LLS has one runtime and one handler contract.
 
 ```
 Engine
@@ -10,10 +10,11 @@ Engine
   └── Handler
         ├── PassthroughHandler   human
         ├── CommandHandler       human
-        └── _Serve               chat
+        ├── _Serve               chat
+        └── external handler     model / bridge
 ```
 
-A handler is the controller. `Engine` repeatedly calls:
+`Engine` repeatedly calls:
 
 ```python
 await handler.step(services)
@@ -21,17 +22,22 @@ await handler.step(services)
 
 There is no separate Session, Runtime, or controller loop.
 
-## Loading a handler
+## Running a handler
 
 ```bash
-lls serve --controller pkg.mod:Class -- /bin/bash
-lls serve --controller chat
+lls serve --handler pkg.mod:Class -- /bin/bash
+lls serve --handler pkg.mod:Class --control -- /bin/bash
+lls serve --handler chat
 ```
 
-`--controller` instantiates the class with no arguments and installs it as the
+`--handler` instantiates the class with no arguments and installs it as the
 Engine handler. The `chat` default keeps the existing `_Serve` path.
 
-## Contract
+With a TTY and without `--headless`, the handler runs under the normal LLS
+HostUI: Renderer, overlays, resize and keyboard are active. Without a TTY, or
+with `--headless`, it runs headless and still records LLS-v2.
+
+## Handler contract
 
 ```python
 class Handler(Protocol):
@@ -53,5 +59,32 @@ services.stop()
 
 and should not call `read_line`, overlays, or tools.
 
-Handlers that integrate a model or another runtime live outside LLS core and
-are loaded by `--controller`; LLS does not ship a model adapter.
+## Control plane
+
+`--control` registers a `ControlHandler` next to the main handler:
+
+```text
+main handler
+  Ctrl-E → services.set_handler("control")
+
+ControlHandler
+  pause | resume | step | quit
+  q / Esc → back to main
+```
+
+`ControlHandler` only pauses/resumes/steps the target; it cannot write to the
+child, run app commands, or use tools.
+
+The target handler must provide:
+
+```python
+def pause(self) -> None: ...
+def resume(self) -> None: ...
+def step_once(self) -> None: ...
+```
+
+A tick handler consumes host keys itself, discards normal keys, and switches to
+`control` on Ctrl-E. Control keys never reach the child or the recorder.
+
+External model handlers live with the model and are loaded with `--handler`;
+LLS does not ship a model adapter.

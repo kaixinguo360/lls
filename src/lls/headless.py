@@ -1,10 +1,8 @@
-"""``lls serve``：把终端交给 agent，没有宿主界面。
+"""Run a handler over a terminal.
 
-与交互式的区别只有三样：没有 console 可接管（不读键盘、不进 raw 模式）、
-提示词按「没有人看」来写、以及 ``--stay`` 让模型停下之后立刻再来一轮。
-
-有任务就执行，没有就待命；``--headless`` 只是说别把屏幕画到 stdout ——
-它不改变 agent 怎么干活，只改变你看不看得到。
+chat keeps the existing headless agent path. --handler runs an external handler;
+with a TTY and without --headless it uses the normal HostUI. --control registers
+the Ctrl-E control plane for handlers that can pause/resume/step.
 """
 
 from __future__ import annotations
@@ -26,6 +24,7 @@ from .ai.tools import ScreenView, Toolbox, builtin_tools, teacher_tools
 from .ai.tools.policy import ToolPolicy, global_policy, reset_global_policy
 from .ai.turn import Turn, TurnState
 from .config import load as load_config
+from .handlers import ControlHandler
 from .session.engine import Engine
 from .session.errors import SessionEnded
 from .term import PyteScreenModel
@@ -45,7 +44,8 @@ class _Options:
     headless: bool
     stay: bool
     command: list[str]
-    controller: str = "chat"
+    handler: str = "chat"
+    control: bool = False
 
 
 def _parse(argv: list[str]) -> _Options:
@@ -58,10 +58,14 @@ def _parse(argv: list[str]) -> _Options:
     parser.add_argument("--new", action="store_true", help="新建会话（默认行为）")
     parser.add_argument("--headless", action="store_true", help="不画屏，只把最终答复写到 stdout")
     parser.add_argument("--stay", action="store_true", help="模型停下之后立刻再来一轮，直到被中断")
-    parser.add_argument("--controller", default="chat",
+    parser.add_argument("--handler", default="chat",
                         help="chat（默认）或 module:Class；后者直接作为 Engine handler")
+    parser.add_argument("--control", action="store_true",
+                        help="为可暂停的 handler 注册 Ctrl-E 控制模式")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="被包装的命令；默认 $SHELL")
     args = parser.parse_args(argv)
+    if args.control and args.handler == "chat":
+        parser.error("--control requires --handler")
     command = list(args.command)
     if command and command[0] == "--":
         command = command[1:]
@@ -71,7 +75,8 @@ def _parse(argv: list[str]) -> _Options:
         headless=bool(args.headless),
         stay=bool(args.stay),
         command=command or [_default_shell()],
-        controller=(args.controller or "chat").strip(),
+        handler=(args.handler or "chat").strip(),
+        control=bool(args.control),
     )
 
 
@@ -232,7 +237,7 @@ def _open_session(options: _Options, catalog: Any) -> Any:
 def _load_handler(spec: str) -> Any:
     module_name, separator, attribute = spec.partition(":")
     if not separator or not module_name or not attribute:
-        raise ValueError("controller must be module:Class")
+        raise ValueError("handler must be module:Class")
     handler = getattr(importlib.import_module(module_name), attribute)()
     if not hasattr(handler, "step"):
         raise TypeError(f"{spec} is not an LLS handler")
@@ -258,17 +263,24 @@ def _make_recorder():
 
 
 async def _run_external(options: _Options) -> int:
-    handler = _load_handler(options.controller)
+    handler = _load_handler(options.handler)
+    handlers = {"main": handler}
+    if options.control:
+        if not all(hasattr(handler, name) for name in ("pause", "resume", "step_once")):
+            raise TypeError("--control requires pause/resume/step_once on the handler")
+        handlers["control"] = ControlHandler(handler)
     recorder = _make_recorder()
     screen = PyteScreenModel(rows=ROWS, columns=COLUMNS)
+    interactive = (not options.headless and sys.stdin.isatty()
+                   and sys.stdout.isatty())
     engine = Engine(
         make_backend(),
         options.command,
         screen,
-        {"external": handler},
-        "external",
+        handlers,
+        "main",
         recorder=recorder,
-        attach_host=False,
+        attach_host=interactive,
     )
     try:
         await engine.run()
@@ -284,7 +296,7 @@ async def _run_external(options: _Options) -> int:
 
 
 async def _run(options: _Options) -> int:
-    if options.controller != "chat":
+    if options.handler != "chat":
         return await _run_external(options)
     try:
         catalog = default_catalog()

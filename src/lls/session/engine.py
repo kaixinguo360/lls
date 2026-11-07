@@ -359,6 +359,10 @@ class Engine:
         """请求切换处理器（下一轮生效）。"""
         self._pending_handler = name
 
+    def has_handler(self, name: str) -> bool:
+        """当前注册表里是否有 ``name``。"""
+        return name in self._handlers
+
     def _switch_handler(self, name: str) -> None:
         """换处理器：收起上一个的浮层，再把宿主的上报模式调成新处理器要的。"""
         self._current = name

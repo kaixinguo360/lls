@@ -14,13 +14,29 @@ from __future__ import annotations
 
 import inspect
 import traceback
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Protocol
 
 from lls.commands import execute_command
 from lls.commands.result import CommandResult
 from lls.session.services import Services
 
-__all__ = ["CommandHandler", "PassthroughHandler", "split_command"]
+__all__ = [
+    "CommandHandler",
+    "Controllable",
+    "ControlHandler",
+    "PassthroughHandler",
+    "split_command",
+]
+
+
+class Controllable(Protocol):
+    """A handler whose execution can be paused from the control plane."""
+
+    def pause(self) -> None: ...
+
+    def resume(self) -> None: ...
+
+    def step_once(self) -> None: ...
 
 
 def split_command(line: str) -> tuple[str, str | None]:
@@ -153,3 +169,44 @@ class CommandHandler:
         s.set_handler("default")
         if self._restore_on_exit:
             s.restore_context()
+
+
+class ControlHandler:
+    """Control plane for a running controller.
+
+    This is deliberately separate from :class:`CommandHandler`: it may only
+    pause/resume/step the target, never run app commands or touch the child.
+    """
+
+    def __init__(self, target: Controllable, *, main: str = "main") -> None:
+        self._target = target
+        self._main = main
+
+    async def step(self, s: Services) -> None:
+        line = await s.read_line(
+            "(control):",
+            cancel="q",
+            escape="resume",
+            history_id="control",
+        )
+        if line is None:
+            return
+        text = line.strip()
+        if text in ("", "q", "resume"):
+            self._target.resume()
+            s.set_handler(self._main)
+            return
+        if text == "quit":
+            s.stop()
+            return
+
+        command, _, _ = text.partition(" ")
+        if command == "pause":
+            self._target.pause()
+        elif command == "step":
+            self._target.pause()
+            self._target.step_once()
+        else:
+            await s.show_message(f"unknown control: {command}")
+            return
+        s.set_handler(self._main)
