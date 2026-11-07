@@ -259,7 +259,7 @@ def _make_recorder():
 async def _run_external(options: _Options) -> int:
     handler = _load_handler(options.handler)
     handlers = {"main": handler}
-    control_methods = ("pause", "resume", "step_once", "set_passthrough")
+    control_methods = ("pause", "resume", "step_once")
     if all(hasattr(handler, name) for name in control_methods):
         handlers["control"] = ControlHandler(handler)
     recorder = _make_recorder()

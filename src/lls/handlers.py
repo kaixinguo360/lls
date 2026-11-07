@@ -212,11 +212,15 @@ class ControlHandler:
 
         command, _, arg = text.partition(" ")
         if command == "passthrough":
+            setter = getattr(self._target, "set_passthrough", None)
+            if setter is None:
+                await s.show_message("passthrough unavailable")
+                return
             mode = arg.strip().lower()
             if mode not in ("on", "off"):
                 await s.show_message("passthrough on|off")
                 return
-            self._target.set_passthrough(mode == "on")
+            setter(mode == "on")
             s.set_handler(self._main)
             return
         if command in ("input", "exec"):
