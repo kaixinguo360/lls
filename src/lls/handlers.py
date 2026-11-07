@@ -4,42 +4,22 @@
 
 * :class:`PassthroughHandler` —— 子进程独占终端，输入原样转发（可绑定
   某些字节切到别的处理器）；
-* :class:`CommandHandler` —— 读一行，按注册表分发为命令；
-* :class:`ControlHandler` —— 控制外部控制器的暂停/恢复/单步，
-  并支持一次性 input/exec。
+* :class:`CommandHandler` —— 读一行，按注册表分发为命令。
 
-具体业务不在这里：命令逻辑在 :mod:`lls.commands` 里，本层只做分发与控制。
+具体业务不在这里：命令逻辑在 :mod:`lls.commands` 里，本层只做分发。
 """
 
 from __future__ import annotations
 
 import inspect
 import traceback
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable
 
 from lls.commands import execute_command
 from lls.commands.result import CommandResult
 from lls.session.services import Services
 
-__all__ = [
-    "CommandHandler",
-    "Controllable",
-    "ControlHandler",
-    "PassthroughHandler",
-    "split_command",
-]
-
-
-class Controllable(Protocol):
-    """A handler whose execution can be paused from the control plane."""
-
-    def pause(self) -> None: ...
-
-    def resume(self) -> None: ...
-
-    def step_once(self) -> None: ...
-
-    def set_passthrough(self, enabled: bool) -> None: ...
+__all__ = ["CommandHandler", "PassthroughHandler", "split_command"]
 
 
 def split_command(line: str) -> tuple[str, str | None]:
@@ -174,75 +154,4 @@ class CommandHandler:
             s.restore_context()
 
 
-class ControlHandler:
-    """Control plane for a running controller.
 
-    This is deliberately separate from :class:`CommandHandler`: it only
-    controls the target, plus explicit one-shot child writes via input/exec.
-    """
-
-    def __init__(self, target: Controllable, *, main: str = "main") -> None:
-        self._target = target
-        self._main = main
-
-    def _back(self, s: Services) -> None:
-        s.requeue_pending_keys()
-        s.set_handler(self._main)
-
-    async def step(self, s: Services) -> None:
-        line = await s.read_line(
-            "(control):",
-            cancel="q",
-            escape="resume",
-            history_id="control",
-        )
-        if line is None:
-            return
-        text = line.strip()
-        if text in ("", "q", "resume"):
-            self._target.resume()
-            self._back(s)
-            return
-        if text == "quit":
-            s.stop()
-            return
-        if text in ("help", "?"):
-            await s.show_message(
-                "pause | resume | step | quit\n"
-                "input <text> | exec <command>\n"
-                "passthrough on|off"
-            )
-            return
-
-        command, _, arg = text.partition(" ")
-        if command == "passthrough":
-            setter = getattr(self._target, "set_passthrough", None)
-            if setter is None:
-                await s.show_message("passthrough unavailable")
-                return
-            mode = arg.strip().lower()
-            if mode not in ("on", "off"):
-                await s.show_message("passthrough on|off")
-                return
-            setter(mode == "on")
-            self._back(s)
-            return
-        if command in ("input", "exec"):
-            payload = arg.strip()
-            if not payload:
-                await s.show_message(f"{command} needs text")
-                return
-            self._target.pause()
-            s.write(payload.encode("utf-8"), enter=command == "exec")
-            self._back(s)
-            return
-
-        if command == "pause":
-            self._target.pause()
-        elif command == "step":
-            self._target.pause()
-            self._target.step_once()
-        else:
-            await s.show_message(f"unknown control: {command}")
-            return
-        self._back(s)

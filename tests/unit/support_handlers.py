@@ -14,26 +14,3 @@ class EchoHandler:
             self.sent = True
             services.write(b"echo handler-ready\r")
         await services.wait(0.05)
-
-
-class PauseHandler:
-    """Minimal controllable handler for the control-plane smoke tests."""
-
-    def __init__(self) -> None:
-        self.paused = False
-        self.passthrough = True
-
-    def pause(self) -> None:
-        self.paused = True
-
-    def resume(self) -> None:
-        self.paused = False
-
-    def step_once(self) -> None:
-        self.paused = True
-
-    def set_passthrough(self, enabled: bool) -> None:
-        self.passthrough = enabled
-
-    async def step(self, services) -> None:
-        await services.wait(0.1)

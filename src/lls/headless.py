@@ -1,8 +1,7 @@
 """Run a handler over a terminal.
 
 chat keeps the existing headless agent path. --handler runs an external handler;
-with a TTY and without --headless it uses the normal HostUI. A controllable
-handler gets the Ctrl-E control plane automatically.
+with a TTY and without --headless it uses the normal HostUI.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from .ai.tools import ScreenView, Toolbox, builtin_tools, teacher_tools
 from .ai.tools.policy import ToolPolicy, global_policy, reset_global_policy
 from .ai.turn import Turn, TurnState
 from .config import load as load_config
-from .handlers import ControlHandler
 from .session.engine import Engine
 from .session.errors import SessionEnded
 from .term import PyteScreenModel
@@ -258,10 +256,7 @@ def _make_recorder():
 
 async def _run_external(options: _Options) -> int:
     handler = _load_handler(options.handler)
-    handlers = {"main": handler}
-    control_methods = ("pause", "resume", "step_once")
-    if all(hasattr(handler, name) for name in control_methods):
-        handlers["control"] = ControlHandler(handler)
+    handlers = {"handler": handler}
     recorder = _make_recorder()
     screen = PyteScreenModel(rows=ROWS, columns=COLUMNS)
     interactive = (not options.headless and sys.stdin.isatty()
@@ -271,7 +266,7 @@ async def _run_external(options: _Options) -> int:
         options.command,
         screen,
         handlers,
-        "main",
+        "handler",
         recorder=recorder,
         attach_host=interactive,
     )
