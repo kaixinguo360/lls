@@ -185,6 +185,10 @@ class ControlHandler:
         self._target = target
         self._main = main
 
+    def _back(self, s: Services) -> None:
+        s.requeue_pending_keys()
+        s.set_handler(self._main)
+
     async def step(self, s: Services) -> None:
         line = await s.read_line(
             "(control):",
@@ -197,7 +201,7 @@ class ControlHandler:
         text = line.strip()
         if text in ("", "q", "resume"):
             self._target.resume()
-            s.set_handler(self._main)
+            self._back(s)
             return
         if text == "quit":
             s.stop()
@@ -221,7 +225,7 @@ class ControlHandler:
                 await s.show_message("passthrough on|off")
                 return
             setter(mode == "on")
-            s.set_handler(self._main)
+            self._back(s)
             return
         if command in ("input", "exec"):
             payload = arg.strip()
@@ -230,7 +234,7 @@ class ControlHandler:
                 return
             self._target.pause()
             s.write(payload.encode("utf-8"), enter=command == "exec")
-            s.set_handler(self._main)
+            self._back(s)
             return
 
         if command == "pause":
@@ -241,4 +245,4 @@ class ControlHandler:
         else:
             await s.show_message(f"unknown control: {command}")
             return
-        s.set_handler(self._main)
+        self._back(s)

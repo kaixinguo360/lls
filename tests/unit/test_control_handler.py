@@ -45,6 +45,9 @@ class Services:
     def write(self, data, enter=False):
         self.writes.append((data, enter))
 
+    def requeue_pending_keys(self):
+        pass
+
     async def show_message(self, text):
         self.messages.append(text)
 
