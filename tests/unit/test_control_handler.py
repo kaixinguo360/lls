@@ -29,12 +29,16 @@ class Services:
         self.line = line
         self.handler = None
         self.stopped = False
+        self.writes = []
 
     async def read_line(self, prompt, **kwargs):
         return self.line
 
     def set_handler(self, name):
         self.handler = name
+
+    def write(self, data, enter=False):
+        self.writes.append((data, enter))
 
     async def show_message(self, text):
         pass
@@ -74,3 +78,17 @@ def test_quit_stops_engine():
     target, services = run("quit")
     assert services.stopped is True
     assert services.handler is None
+
+
+def test_input_writes_without_enter():
+    target, services = run("input echo hi")
+    assert target.paused is True
+    assert services.writes == [(b"echo hi", False)]
+    assert services.handler == "main"
+
+
+def test_exec_writes_with_enter():
+    target, services = run("exec echo hi")
+    assert target.paused is True
+    assert services.writes == [(b"echo hi", True)]
+    assert services.handler == "main"

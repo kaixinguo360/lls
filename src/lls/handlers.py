@@ -1,13 +1,14 @@
 """应用层输入处理器 —— 框架之外的一层。
 
-引擎只反复调用 ``step()``，因此「怎样响应输入」完全在这里决定。本模块给出
-两个通用处理器：
+引擎只反复调用 ``step()``，因此「怎样响应输入」完全在这里决定。本模块给出：
 
 * :class:`PassthroughHandler` —— 子进程独占终端，输入原样转发（可绑定
   某些字节切到别的处理器）；
-* :class:`CommandHandler` —— 读一行，按注册表分发为命令。
+* :class:`CommandHandler` —— 读一行，按注册表分发为命令；
+* :class:`ControlHandler` —— 控制外部控制器的暂停/恢复/单步，
+  并支持一次性 input/exec。
 
-两者都不包含具体业务：命令逻辑在 :mod:`lls.commands` 里，本层只做分发。
+具体业务不在这里：命令逻辑在 :mod:`lls.commands` 里，本层只做分发与控制。
 """
 
 from __future__ import annotations
@@ -174,8 +175,8 @@ class CommandHandler:
 class ControlHandler:
     """Control plane for a running controller.
 
-    This is deliberately separate from :class:`CommandHandler`: it may only
-    pause/resume/step the target, never run app commands or touch the child.
+    This is deliberately separate from :class:`CommandHandler`: it only
+    controls the target, plus explicit one-shot child writes via input/exec.
     """
 
     def __init__(self, target: Controllable, *, main: str = "main") -> None:
@@ -200,7 +201,17 @@ class ControlHandler:
             s.stop()
             return
 
-        command, _, _ = text.partition(" ")
+        command, _, arg = text.partition(" ")
+        if command in ("input", "exec"):
+            payload = arg.strip()
+            if not payload:
+                await s.show_message(f"{command} needs text")
+                return
+            self._target.pause()
+            s.write(payload.encode("utf-8"), enter=command == "exec")
+            s.set_handler(self._main)
+            return
+
         if command == "pause":
             self._target.pause()
         elif command == "step":

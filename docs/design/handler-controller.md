@@ -69,11 +69,14 @@ main handler
 
 ControlHandler
   pause | resume | step | quit
+  input <text> | exec <command>
   q / Esc → back to main
 ```
 
-`ControlHandler` only pauses/resumes/steps the target; it cannot write to the
-child, run app commands, or use tools.
+`ControlHandler` only pauses/resumes/steps the target, plus explicit one-shot
+writes via `input`/`exec`; it does not run app commands or use tools. `input`
+writes text without Enter; `exec` writes the command and Enter. Both pause the
+target first and leave it paused.
 
 The target handler must provide:
 
