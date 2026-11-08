@@ -46,6 +46,10 @@ class Playback:
         self.screen = self._new_screen()
         self._position = 0.0
 
+    def set_position(self, at: float) -> None:
+        """把逻辑位置移到 ``at``；调用方保证画面已经喂到那里。"""
+        self._position = max(0.0, at)
+
     def apply(self, frame: Frame) -> bool:
         """应用一帧；返回画面是否可能变化（``i`` 等通道返回 ``False``）。"""
         self._position = max(self._position, frame.at)
