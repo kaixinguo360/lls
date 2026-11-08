@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from lls.ai import AIConfig, Catalog, ConfigError, ProviderConfig, parse_model_spec
+from lls.ai import (
+    AIConfig,
+    Catalog,
+    ConfigError,
+    ProviderConfig,
+    ScreenConfig,
+    parse_model_spec,
+)
 
 
 def _config(default: str | None = None) -> AIConfig:
@@ -105,3 +112,13 @@ def test_unknown_provider_lists_configured_ids() -> None:
 
 def test_provider_ids_are_sorted() -> None:
     assert Catalog(_config()).provider_ids() == ["local", "openai"]
+
+
+def test_screen_visible_only_comes_from_ai_screen() -> None:
+    config = AIConfig(
+        providers={},
+        screen=ScreenConfig(visible_only=True),
+        path=Path("/tmp/config.yaml"),
+    )
+
+    assert Catalog(config).screen_visible_only() is True

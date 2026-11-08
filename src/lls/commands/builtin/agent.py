@@ -43,6 +43,8 @@ from lls.ai import (
     ConfigError,
     default_catalog,
 )
+from lls.ai.prompt import HELP as TEACHER_HELP
+from lls.ai.prompt import build as build_prompt
 from lls.ai.sessions import (
     SessionBusy,
     SessionError,
@@ -51,15 +53,18 @@ from lls.ai.sessions import (
 )
 from lls.ai.tool_options import ToolOptions
 from lls.ai.tools import (
+    ReadTerminalSettings,
     RepeatReminder,
     ScreenView,
     Toolbox,
     builtin_tools,
     teacher_tools,
 )
-from lls.ai.tools.policy import ToolPolicy, global_policy, reset_global_policy
-from lls.ai.prompt import HELP as TEACHER_HELP
-from lls.ai.prompt import build as build_prompt
+from lls.ai.tools.policy import (
+    ToolPolicy,
+    global_policy,
+    sync_global_policy,
+)
 from lls.ai.turn import CompactFailed, Turn, TurnResult, TurnState
 from lls.commands.catalog import CommandMeta, completer_for
 from lls.commands.result import CommandResult
@@ -623,7 +628,6 @@ class _Session:
         self._keeper = keeper    # 会话类命令借用命令层手里的仓库
         self._session = session
         self._budget = max(0, int(budget))
-        self._view = ScreenView(services, self._poll)
         self._guard = RepeatReminder()
         # 两层策略：会话层只含 meta.json 里显式写过的部分，
         # 与全局（进程级）逐字段合并后才是这条会话实际生效的设置。
@@ -631,7 +635,27 @@ class _Session:
             session.meta.tools if session is not None else {}
         )
         self._policy = global_policy().merged(self._session_policy)
-        self._all_tools = builtin_tools(services, self._poll, view=self._view)
+        # ai.screen.visible_only 是全局默认；工具自己的 settings 覆盖它。
+        self._screen_visible = bool(
+            getattr(catalog, "screen_visible_only", lambda: False)()
+        )
+        self._read_settings = {
+            name: ReadTerminalSettings.from_options(
+                self._policy.options(name), default=self._screen_visible
+            )
+            for name in ("read_terminal", "wait_for", "wait_for_change")
+        }
+        self._view = ScreenView(
+            services,
+            self._poll,
+            visible_only=self._screen_visible,
+        )
+        self._all_tools = builtin_tools(
+            services,
+            self._poll,
+            view=self._view,
+            read_settings=self._read_settings,
+        )
         self._teacher: Any = None
         # 一轮任务之间共享的状态（请求信封指纹、教师转录、最近窗口），
         # 归 Turn 读写，命令层只在显示时读。
@@ -1731,8 +1755,8 @@ async def cmd_agent(s: Services, args: str | None) -> CommandResult:
         await s.show_message("错误：{}".format(e))
         return CommandResult()
 
-    # 全局工具策略从配置重算（--set 改过的也算数）；会话层在 _Session 里叠加。
-    reset_global_policy(catalog.tools())
+    # 配置里的全局工具设置只补空缺：运行期在 tools 界面改过的值优先。
+    sync_global_policy(catalog.tools())
 
     task = opts.task
     exited = False

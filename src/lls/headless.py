@@ -19,8 +19,18 @@ from .ai import ConfigError, default_catalog
 from .ai.prompt import HELP as TEACHER_HELP
 from .ai.prompt import build as build_prompt
 from .ai.sessions import SessionError, default_budget, store
-from .ai.tools import ScreenView, Toolbox, builtin_tools, teacher_tools
-from .ai.tools.policy import ToolPolicy, global_policy, reset_global_policy
+from .ai.tools import (
+    ReadTerminalSettings,
+    ScreenView,
+    Toolbox,
+    builtin_tools,
+    teacher_tools,
+)
+from .ai.tools.policy import (
+    ToolPolicy,
+    global_policy,
+    sync_global_policy,
+)
 from .ai.turn import Turn, TurnState
 from .config import load as load_config
 from .session.engine import Engine
@@ -124,14 +134,32 @@ class _Serve:
             services.stop()
 
     async def _drive(self, services: Any) -> None:
-        view = ScreenView(services, services.wait)
-        all_tools = builtin_tools(services, services.wait, view=view)
-        state = TurnState()
-        teacher = self._teacher_tools(state)
-        all_tools.extend(teacher)
         policy = global_policy().merged(
             ToolPolicy.from_json(self._session.meta.tools)
         )
+        screen_visible = bool(
+            getattr(self._catalog, "screen_visible_only", lambda: False)()
+        )
+        read_settings = {
+            name: ReadTerminalSettings.from_options(
+                policy.options(name), default=screen_visible
+            )
+            for name in ("read_terminal", "wait_for", "wait_for_change")
+        }
+        view = ScreenView(
+            services,
+            services.wait,
+            visible_only=screen_visible,
+        )
+        all_tools = builtin_tools(
+            services,
+            services.wait,
+            view=view,
+            read_settings=read_settings,
+        )
+        state = TurnState()
+        teacher = self._teacher_tools(state)
+        all_tools.extend(teacher)
         tools = Toolbox(policy.filter(list(all_tools)))
         has_teacher = any(entry.tool.name == "ask_teacher" for entry in tools)
         system = build_prompt(
@@ -291,7 +319,7 @@ async def _run(options: _Options) -> int:
     except ConfigError as e:
         print(f"lls serve: {e}", file=sys.stderr)
         return 1
-    reset_global_policy(catalog.tools())
+    sync_global_policy(catalog.tools())
 
     session = None
     try:

@@ -18,13 +18,13 @@ from types import SimpleNamespace
 
 from lls.ai import AgentTool
 from lls.ai.tools import (
+    ReadTerminalSettings,
     RepeatReminder,
     ScreenView,
     Shell,
     Toolbox,
     builtin_tools,
 )
-
 from lls.ai.types import Tool
 
 
@@ -33,7 +33,7 @@ class FakePort:
 
     def __init__(self, text: str = "line") -> None:
         self.screen = SimpleNamespace(
-            text=lambda limit=0: text,
+            text=make_screen_text(text),
             rows=24,
             columns=80,
             cursor=SimpleNamespace(x=0, y=0, hidden=False),
@@ -56,6 +56,18 @@ class FakePort:
     def resize(self, rows: int, columns: int) -> tuple[int, int]:
         self.resized.append((rows, columns))
         return rows, columns
+
+
+def make_screen_text(text: str):
+    """记录读取范围；visible_only 会传 ``include_scrollback=False``。"""
+    calls: list[dict] = []
+
+    def read(limit=0, include_scrollback=True):
+        calls.append({"limit": limit, "include_scrollback": include_scrollback})
+        return text
+
+    read.calls = calls
+    return read
 
 
 def _tool(name: str) -> Tool:
@@ -168,6 +180,72 @@ def test_the_shared_view_is_the_place_that_remembers_what_was_read() -> None:
     entry = {item.tool.name: item for item in box}["read_terminal"]
 
     assert "与上次读取相同" in _run(entry, {"lines": 10, "wait_seconds": 0})
+
+
+def test_tool_setting_overrides_the_global_default() -> None:
+    class _Options:
+        settings = {"visible_only": False}
+
+    class _Unset:
+        settings = None
+
+    assert ReadTerminalSettings.from_options(
+        _Options(), default=True
+    ).visible_only is False
+    assert ReadTerminalSettings.from_options(
+        _Unset(), default=True
+    ).visible_only is True
+
+
+def _visible_settings() -> dict[str, ReadTerminalSettings]:
+    return {
+        name: ReadTerminalSettings(visible_only=True)
+        for name in ("read_terminal", "wait_for", "wait_for_change")
+    }
+
+
+def test_visible_only_hides_lines_and_reads_the_visible_screen() -> None:
+    port = FakePort("visible")
+    box = builtin_tools(port, port.wait, read_settings=_visible_settings())
+    tools = {item.tool.name: item for item in box}
+
+    for name in ("read_terminal", "wait_for", "wait_for_change"):
+        parameters = tools[name].tool.parameters
+        assert "lines" not in parameters["properties"]
+        assert "lines" not in parameters["required"]
+
+    asyncio.run(tools["read_terminal"].run({"wait_seconds": 0}))
+
+    assert port.screen.text.calls == [{"limit": 24, "include_scrollback": False}]
+
+
+def test_visible_only_is_configured_per_tool() -> None:
+    """只开 read_terminal 时，等画面的两个工具仍然是原来的读法。"""
+    port = FakePort("visible")
+    box = builtin_tools(
+        port,
+        port.wait,
+        read_settings={"read_terminal": ReadTerminalSettings(visible_only=True)},
+    )
+    tools = {item.tool.name: item for item in box}
+
+    assert "lines" not in tools["read_terminal"].tool.parameters["properties"]
+    assert "lines" in tools["wait_for"].tool.parameters["properties"]
+    assert "lines" in tools["wait_for_change"].tool.parameters["properties"]
+
+
+def test_visible_only_prompt_matches_the_schema() -> None:
+    from lls.ai import prompt
+
+    port = FakePort("visible")
+    box = builtin_tools(port, port.wait, read_settings=_visible_settings())
+
+    text = prompt.build(box, display="interactive")
+
+    assert "read_terminal(wait_seconds)" in text
+    assert "wait_for(pattern, timeout)" in text
+    assert "wait_for_change(timeout)" in text
+    assert "read_terminal(lines" not in text
 
 
 def test_the_shell_keeps_its_own_cwd(tmp_path) -> None:

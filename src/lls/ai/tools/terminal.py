@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import re
 import time
-from typing import Any, Awaitable, Callable, Protocol
+from dataclasses import dataclass, replace
+from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from ...tty import encode_keys
 from ..agent import AgentTool
@@ -29,6 +31,7 @@ __all__ = [
     "DEFAULT_READ_LINES",
     "MAX_LINES",
     "READ_TOOL",
+    "ReadTerminalSettings",
     "RESIZE_TOOL",
     "SEND_KEYS_TOOL",
     "SEND_RAW_TOOL",
@@ -53,6 +56,33 @@ MAX_RESIZE_COLUMNS = 1000 # resize_terminal 的列数上限
 PASTE_MODE = 2004
 PASTE_OPEN = b"\x1b[200~"
 PASTE_CLOSE = b"\x1b[201~"
+
+
+@dataclass(frozen=True)
+class ReadTerminalSettings:
+    """单个读屏工具的特有设置；配置在该工具自己的 ``settings`` 下。
+
+    ``visible_only`` 打开时，这个工具不再暴露 ``lines`` 参数，只返回宿主终端
+    **当前可见**的那一屏（不含回滚区）。三个读屏工具各配各的，互不影响。
+
+    任务开头的画面快照与 ``generate`` 的上下文没有自己的开关，跟随
+    ``read_terminal`` 的设置。
+    """
+
+    visible_only: bool = False
+
+    @classmethod
+    def from_options(
+        cls, options: Any, *, default: bool = False
+    ) -> "ReadTerminalSettings":
+        """从 :class:`~lls.ai.tool_options.ToolOptions` 里取设置。
+
+        工具自己没写 ``visible_only`` 时用 ``default``（``ai.screen`` 的全局值）。
+        """
+        raw = getattr(options, "settings", None)
+        if not isinstance(raw, Mapping) or "visible_only" not in raw:
+            return cls(visible_only=default)
+        return cls(visible_only=raw.get("visible_only") is True)
 
 
 class TerminalPort(Protocol):
@@ -109,13 +139,33 @@ class ScreenView:
     的快照上（:meth:`mark`），所以同一份 ``ScreenView`` 要给整条链路共用。
     """
 
-    def __init__(self, port: TerminalPort, poll: Poll) -> None:
+    def __init__(
+        self,
+        port: TerminalPort,
+        poll: Poll,
+        *,
+        visible_only: bool = False,
+    ) -> None:
         self._port = port
         self._poll = poll
         self._last = ""
+        # 没有单独参数时的默认值：任务开头的快照用它。
+        self._visible_only = visible_only
 
-    def snapshot(self, lines: int) -> str:
+    @property
+    def visible_only(self) -> bool:
+        return self._visible_only
+
+    def snapshot(self, lines: int, *, visible_only: bool | None = None) -> str:
+        if visible_only is None:
+            visible_only = self._visible_only
         self._port.flush_model()
+        if visible_only:
+            # 当前可见的一屏；模型看不到回滚区。
+            return self._port.screen.text(
+                limit=max(1, int(self._port.screen.rows)),
+                include_scrollback=False,
+            )
         limit = max(1, min(int(lines), MAX_LINES))
         return self._port.screen.text(limit=limit)
 
@@ -123,9 +173,11 @@ class ScreenView:
         """记下「模型已经看过」的画面，用于省略重复内容。"""
         self._last = text
 
-    async def read(self, lines: int, wait_seconds: float) -> tuple[str, str]:
+    async def read(
+        self, lines: int, wait_seconds: float, *, visible_only: bool = False
+    ) -> tuple[str, str]:
         """读屏幕；``wait_seconds`` 内静默就提前返回，否则到点返回。"""
-        text = self.snapshot(lines)
+        text = self.snapshot(lines, visible_only=visible_only)
         if wait_seconds <= 0:
             return text, "quiet"
 
@@ -135,7 +187,7 @@ class ScreenView:
         while True:
             now = time.monotonic()
             await self._poll(min(READ_POLL, max(0.0, deadline - now)))
-            fresh = self.snapshot(lines)
+            fresh = self.snapshot(lines, visible_only=visible_only)
             now = time.monotonic()
             if fresh != text:
                 text = fresh
@@ -149,7 +201,12 @@ class ScreenView:
                 return text, "still-producing"
 
     async def wait_for(
-        self, lines: int, pattern: str, timeout: float
+        self,
+        lines: int,
+        pattern: str,
+        timeout: float,
+        *,
+        visible_only: bool = False,
     ) -> tuple[str, str]:
         """等到新行匹配 ``pattern``（空串：等画面安静）；返回 (画面, 状态)。
 
@@ -157,8 +214,7 @@ class ScreenView:
         「命令跑完、提示符回来」时，上一个提示符本来就在屏幕里。
         """
         limit = max(1, min(int(lines), MAX_LINES))
-        self._port.flush_model()
-        text = self._port.screen.text(limit=limit)
+        text = self.snapshot(limit, visible_only=visible_only)
         before = text.split("\n")
         regex = re.compile(pattern) if pattern else None
         deadline = time.monotonic() + min(max(timeout, 0.0), MAX_WAIT_FOR)
@@ -170,7 +226,7 @@ class ScreenView:
             if now >= deadline:
                 return text, "timeout"
             await self._poll(min(READ_POLL, max(0.0, deadline - now)))
-            fresh = self.snapshot(limit)
+            fresh = self.snapshot(limit, visible_only=visible_only)
             now = time.monotonic()
             if fresh != text:
                 text = fresh
@@ -180,21 +236,23 @@ class ScreenView:
             ):
                 return text, "matched"
 
-    async def wait_for_change(self, lines: int, timeout: float) -> tuple[str, str]:
+    async def wait_for_change(
+        self, lines: int, timeout: float, *, visible_only: bool = False
+    ) -> tuple[str, str]:
         """等到画面**变了**：返回 (新画面, "changed")，超时返回 (旧画面, "timeout")。
 
         等的是变化，不是安静：画面本来就安静时 :meth:`read` 会立刻返回，
         拿它守着一个终端就是空转。也不要求某个模式匹配 —— 多一行、少一行、
         某一行改了字都算，这是「没有任务、只对发生的事反应」需要的那一种。
         """
-        text = self.snapshot(lines)
+        text = self.snapshot(lines, visible_only=visible_only)
         deadline = time.monotonic() + min(max(timeout, 0.0), MAX_WAIT_FOR)
         while True:
             now = time.monotonic()
             if now >= deadline:
                 return text, "timeout"
             await self._poll(min(READ_POLL, max(0.0, deadline - now)))
-            fresh = self.snapshot(lines)
+            fresh = self.snapshot(lines, visible_only=visible_only)
             if fresh != text:
                 return fresh, "changed"
 
@@ -427,6 +485,94 @@ WAIT_FOR_CHANGE_TOOL = Tool(
     strict=True,
 )
 
+_READ_PROMPT_VISIBLE = (
+    "- read_terminal(wait_seconds)：读取终端当前画面（整个可见区域，不含回滚）。\n"
+    "  wait_seconds 内画面静默就立即返回；超时返回 still-producing。动作工具不会自动\n"
+    "  返回画面，需要观察时自己调用它。观察抬头带 rows/cols/cursor/buffer：窗口尺寸、\n"
+    "  1-based 光标行列、当前是主屏还是全屏程序的备用屏（buffer=alternate 时先想清楚\n"
+    "  怎么退出）。"
+)
+
+_WAIT_FOR_PROMPT_VISIBLE = (
+    "- wait_for(pattern, timeout)：等画面出现 pattern（Python 正则，只在\n"
+    "  新出现的行里找；空串表示等画面安静下来）。返回当前可见画面+状态（matched/\n"
+    "  quiet/timeout）。慢命令用它等结果，不要反复 read_terminal 轮询。"
+)
+
+_WAIT_FOR_CHANGE_PROMPT_VISIBLE = (
+    "- wait_for_change(timeout)：等到画面**变了**就返回，不看它是否安静。\n"
+    "  没有事情可做、只是在盯着终端时用它挂着；不要用 read_terminal 反复轮询。"
+)
+
+_VISIBLE_READ_DESCRIPTION = (
+    "Read the terminal's visible screen (no scrollback). Waits up to "
+    "wait_seconds for the screen to stop changing, then returns the screen plus "
+    "a status. The opening tag carries the geometry: rows/cols are the window "
+    "size, cursor is the 1-based 'row,col' caret position, and buffer is 'main' "
+    "or 'alternate' (alternate means a full-screen program such as vim or less "
+    "owns the screen)."
+)
+
+_VISIBLE_WAIT_FOR_DESCRIPTION = (
+    "Wait, then look at the visible screen (no scrollback): returns as soon as a "
+    "new line matches the regex pattern, or (with an empty pattern) once the "
+    "screen has gone quiet. Returns the visible screen plus a status: matched / "
+    "quiet / timeout."
+)
+
+_VISIBLE_WAIT_FOR_CHANGE_DESCRIPTION = (
+    "Wait until anything on the visible screen changes (no scrollback), then "
+    "look: returns as soon as the screen differs from what it was when the call "
+    "started, or after the timeout. Returns the visible screen plus a status: "
+    "changed / timeout."
+)
+
+
+def _without_lines(parameters: dict[str, Any]) -> dict[str, Any]:
+    """复制一份 Schema，去掉模型可见的 ``lines`` 参数。"""
+    copied = copy.deepcopy(parameters)
+    properties = copied.get("properties")
+    if isinstance(properties, dict):
+        properties.pop("lines", None)
+    required = copied.get("required")
+    if isinstance(required, list):
+        copied["required"] = [name for name in required if name != "lines"]
+    return copied
+
+
+def _read_tool(settings: ReadTerminalSettings) -> Tool:
+    if not settings.visible_only:
+        return READ_TOOL
+    return replace(
+        READ_TOOL,
+        description=_VISIBLE_READ_DESCRIPTION,
+        parameters=_without_lines(READ_TOOL.parameters),
+        prompt=_READ_PROMPT_VISIBLE,
+    )
+
+
+def _wait_for_tool(settings: ReadTerminalSettings) -> Tool:
+    if not settings.visible_only:
+        return WAIT_FOR_TOOL
+    return replace(
+        WAIT_FOR_TOOL,
+        description=_VISIBLE_WAIT_FOR_DESCRIPTION,
+        parameters=_without_lines(WAIT_FOR_TOOL.parameters),
+        prompt=_WAIT_FOR_PROMPT_VISIBLE,
+    )
+
+
+def _wait_for_change_tool(settings: ReadTerminalSettings) -> Tool:
+    if not settings.visible_only:
+        return WAIT_FOR_CHANGE_TOOL
+    return replace(
+        WAIT_FOR_CHANGE_TOOL,
+        description=_VISIBLE_WAIT_FOR_CHANGE_DESCRIPTION,
+        parameters=_without_lines(WAIT_FOR_CHANGE_TOOL.parameters),
+        prompt=_WAIT_FOR_CHANGE_PROMPT_VISIBLE,
+    )
+
+
 RESIZE_TOOL = Tool(
     name="resize_terminal",
     description=(
@@ -460,13 +606,39 @@ RESIZE_TOOL = Tool(
 
 # ---- 工具实现 ----
 
-def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
-    """读屏/等待 + 三种写法。``view`` 与宿主共用，好让「上次读到什么」一致。"""
+def terminal_tools(
+    port: TerminalPort,
+    view: ScreenView,
+    *,
+    settings: Mapping[str, ReadTerminalSettings] | None = None,
+) -> list[AgentTool]:
+    """读屏/等待 + 三种写法。``view`` 与宿主共用，好让「上次读到什么」一致。
+
+    ``settings`` 按工具名分开：每个读屏工具只看自己那一项，互不影响。
+    """
+    options = settings or {}
+    read_settings = options.get("read_terminal", ReadTerminalSettings())
+    wait_for_settings = options.get("wait_for", ReadTerminalSettings())
+    wait_for_change_settings = options.get(
+        "wait_for_change", ReadTerminalSettings()
+    )
+    read_tool = _read_tool(read_settings)
+    wait_for_tool = _wait_for_tool(wait_for_settings)
+    wait_for_change_tool = _wait_for_change_tool(wait_for_change_settings)
+
+    def lines_for(
+        args: dict[str, Any], settings: ReadTerminalSettings
+    ) -> int:
+        if settings.visible_only:
+            return max(1, int(getattr(port.screen, "rows", DEFAULT_READ_LINES)))
+        return as_int(args.get("lines"), DEFAULT_READ_LINES)
 
     async def read_terminal(args: dict[str, Any]) -> str:
-        lines = as_int(args.get("lines"), DEFAULT_READ_LINES)
+        lines = lines_for(args, read_settings)
         wait = as_float(args.get("wait_seconds"), 0.0)
-        text, status = await view.read(lines, wait)
+        text, status = await view.read(
+            lines, wait, visible_only=read_settings.visible_only
+        )
         return view.observe(text, status)
 
     async def send_text(args: dict[str, Any]) -> str:
@@ -542,14 +714,21 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
             except re.error as e:
                 raise ValueError(f"invalid 'pattern': {e}") from e
         timeout = as_float(args.get("timeout"), MAX_WAIT_FOR)
-        lines = as_int(args.get("lines"), DEFAULT_READ_LINES)
-        text, status = await view.wait_for(lines, pattern, timeout)
+        text, status = await view.wait_for(
+            lines_for(args, wait_for_settings),
+            pattern,
+            timeout,
+            visible_only=wait_for_settings.visible_only,
+        )
         return view.observe(text, status)
 
     async def wait_for_change(args: dict[str, Any]) -> str:
         timeout = as_float(args.get("timeout"), MAX_WAIT_FOR)
-        lines = as_int(args.get("lines"), DEFAULT_READ_LINES)
-        text, status = await view.wait_for_change(lines, timeout)
+        text, status = await view.wait_for_change(
+            lines_for(args, wait_for_change_settings),
+            timeout,
+            visible_only=wait_for_change_settings.visible_only,
+        )
         return view.observe(text, status)
 
     async def resize_terminal(args: dict[str, Any]) -> str:
@@ -571,9 +750,9 @@ def terminal_tools(port: TerminalPort, view: ScreenView) -> list[AgentTool]:
         )
 
     return [
-        AgentTool(READ_TOOL, read_terminal),
-        AgentTool(WAIT_FOR_TOOL, wait_for),
-        AgentTool(WAIT_FOR_CHANGE_TOOL, wait_for_change),
+        AgentTool(read_tool, read_terminal),
+        AgentTool(wait_for_tool, wait_for),
+        AgentTool(wait_for_change_tool, wait_for_change),
         AgentTool(SEND_TEXT_TOOL, send_text),
         AgentTool(SEND_KEYS_TOOL, send_keys),
         AgentTool(SEND_RAW_TOOL, send_raw),

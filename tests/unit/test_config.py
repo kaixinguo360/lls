@@ -127,6 +127,44 @@ def test_cli_overrides_use_the_same_parser(tmp_path: Path) -> None:
     assert cfg.ai.default_model == "p/m"
 
 
+def test_tool_settings_can_be_set_from_the_cli(tmp_path: Path) -> None:
+    path = _write(tmp_path, "ai:\n  providers: {}\n")
+    configure(
+        path=str(path),
+        overrides=["ai.tools.read_terminal.settings.visible_only=true"],
+    )
+    try:
+        cfg = load(emit_warnings=False)
+    finally:
+        configure(path=None, overrides=())
+
+    assert cfg.ai.tools["read_terminal"].settings == {"visible_only": True}
+
+
+def test_screen_visible_only_is_a_global_default(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "ai:\n  providers: {}\n  screen:\n    visible_only: true\n",
+    )
+
+    cfg = load(path, emit_warnings=False)
+
+    assert cfg.ai.screen.visible_only is True
+
+
+def test_bad_screen_visible_only_warns(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "ai:\n  providers: {}\n  screen:\n    visible_only: nope\n",
+    )
+
+    with pytest.warns(RuntimeWarning) as caught:
+        cfg = load(path)
+
+    assert cfg.ai.screen.visible_only is False
+    assert any("ai.screen.visible_only" in str(item.message) for item in caught)
+
+
 def test_bad_override_is_rejected_at_entry() -> None:
     with pytest.raises(ConfigError, match="KEY=VALUE"):
         configure(overrides=["input_history.max_entries"])

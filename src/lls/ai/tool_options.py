@@ -14,6 +14,9 @@
           enabled: false
         bash:
           confirm: true
+        read_terminal:
+          settings:
+            visible_only: true
 """
 
 from __future__ import annotations
@@ -24,41 +27,75 @@ from typing import Any, Dict, Mapping, Optional
 __all__ = ["FIELDS", "ToolOptions", "parse_tool_options", "tool_options_from_json"]
 
 #: 一个工具当前认识的所有字段；加字段时只改这里 + :class:`ToolOptions`。
-FIELDS = ("enabled", "confirm", "timeout", "result_budget", "audit")
+FIELDS = ("enabled", "confirm", "timeout", "result_budget", "audit", "settings")
 
 _BOOL_FIELDS = ("enabled", "confirm", "audit")
 _NUMBER_FIELDS = ("timeout",)
 _INT_FIELDS = ("result_budget",)
+_MAPPING_FIELDS = ("settings",)
+
+
+def _merge_settings(
+    base: Optional[Mapping[str, Any]], over: Optional[Mapping[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """逐键合并两层的工具特有设置；``None`` 表示这一层没说。"""
+    if base is None:
+        return dict(over) if over else None
+    if over is None:
+        return dict(base) or None
+    merged: Dict[str, Any] = dict(base)
+    for key, value in over.items():
+        current = merged.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            merged[key] = _merge_settings(current, value)
+        else:
+            merged[key] = value
+    return merged or None
 
 
 @dataclass(frozen=True)
 class ToolOptions:
-    """一个工具的配置；``None`` = 这一层没设置。"""
+    """一个工具的配置；``None`` = 这一层没设置。
+
+    ``settings`` 是工具特有的设置（形状由各工具自己解释，例如
+    ``read_terminal`` 的 ``visible_only``）。通用项与会话层叠相同，
+    但设置本身逐键合并，避免近层只写一个键就丢掉远层其余键。
+    """
 
     enabled: Optional[bool] = None
     confirm: Optional[bool] = None
     timeout: Optional[float] = None
     result_budget: Optional[int] = None
     audit: Optional[bool] = None
+    settings: Optional[Mapping[str, Any]] = None
 
     def merged_with(self, over: "ToolOptions") -> "ToolOptions":
         """``over`` 是更近的一层：它的非 ``None`` 字段覆盖本层。"""
         picks: Dict[str, Any] = {}
         for name in FIELDS:
             value = getattr(over, name)
-            picks[name] = value if value is not None else getattr(self, name)
+            if name == "settings":
+                picks[name] = _merge_settings(getattr(self, name), value)
+            else:
+                picks[name] = value if value is not None else getattr(self, name)
         return ToolOptions(**picks)
 
     def to_json(self) -> dict:
-        """只写显式设置过的字段：``None`` 不进磁盘。"""
-        return {
-            name: getattr(self, name)
-            for name in FIELDS
-            if getattr(self, name) is not None
-        }
+        """只写显式设置过的字段：``None`` 与空设置不进磁盘。"""
+        payload: Dict[str, Any] = {}
+        for name in FIELDS:
+            value = getattr(self, name)
+            if value is None or (name == "settings" and not value):
+                continue
+            payload[name] = dict(value) if name == "settings" else value
+        return payload
 
     def is_empty(self) -> bool:
-        return all(getattr(self, name) is None for name in FIELDS)
+        return all(
+            getattr(self, name) is None
+            or (name == "settings" and not getattr(self, name))
+            for name in FIELDS
+        )
 
 
 def _as_bool(value: Any, where: str, notes: Optional[list[str]]) -> Optional[bool]:
@@ -129,6 +166,16 @@ def parse_tool_options(
     for name in _INT_FIELDS:
         if name in value:
             picked[name] = _as_int(value.get(name), "{}.{}".format(where, name), notes)
+    for name in _MAPPING_FIELDS:
+        if name in value:
+            item = value.get(name)
+            if item is None:
+                continue
+            if not isinstance(item, Mapping):
+                if notes is not None:
+                    notes.append("{}.{} must be a mapping; ignored".format(where, name))
+                continue
+            picked[name] = dict(item) or None
     return ToolOptions(**picked)
 
 

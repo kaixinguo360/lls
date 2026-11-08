@@ -332,6 +332,8 @@ terminal:
   clipboard: false              # 允许子进程用 OSC 52 改写系统剪贴板（默认关）
 
 ai:
+  screen:
+    visible_only: false         # 读屏全局默认；工具自己的 settings 可覆盖
   default_model: openai/gpt-4o-mini
   providers:
     openai:
@@ -346,6 +348,9 @@ ai:
       api_key: ollama
       models: [qwen3-coder]
 ```
+
+工具开关在 `ai.tools` 下；顶层的 `tools:` 不会被读取。配置文件改完需要重开
+`lls`，进程启动时把这份配置补进全局工具策略。
 
 `default_model` 用 `provider_id/model_id` 寻址；模型名本身可含斜杠，只按第一个
 斜杠切分。
@@ -370,6 +375,41 @@ ai:
       params:
         temperature: 0.2
 ```
+
+### 读屏范围
+
+`ai.screen.visible_only` 是读屏的**全局默认**：打开后三个读屏工具、每轮任务
+开头的画面快照，以及 `generate` 的终端上下文都只取当前可见的一屏（不含回滚
+区），读屏工具也不再暴露 `lines` 参数：
+
+```yaml
+ai:
+  screen:
+    visible_only: true
+```
+
+单个工具可以在自己的 `ai.tools.<name>.settings` 里覆盖它：
+
+```yaml
+ai:
+  tools:
+    read_terminal:
+      settings:
+        visible_only: false   # 只有这个工具恢复读取回滚区，并保留 lines
+```
+
+优先级是：工具自己的 `settings.visible_only` > `ai.screen.visible_only` >
+默认的 `false`。任务快照和 `generate` 没有工具级设置，只看全局值。
+
+可临时用 `--set`：
+
+```bash
+lls --set ai.screen.visible_only=true
+lls --set ai.screen.visible_only=true --set ai.tools.wait_for.settings.visible_only=false
+```
+
+会话的 `meta.json` 里如果显式写了 `settings`，它优先于配置；在 agent 里按
+`/tools` 的 `r` 会清掉会话层，回到跟随全局。
 
 ## 结构
 

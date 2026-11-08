@@ -21,8 +21,10 @@ class FakeScreen:
 
     def __init__(self, text: str = "user@host:~$ ls -l") -> None:
         self._text = text
+        self.kwargs = None
 
     def text(self, **kwargs) -> str:
+        self.kwargs = kwargs
         return self._text
 
 
@@ -471,6 +473,23 @@ def test_run_generate_writes_payload(monkeypatch) -> None:
     _run(gen.run_generate(services, "请求"))
 
     assert services.written == [(b"echo hi", True)]
+
+
+def test_visible_only_reaches_the_generate_context(monkeypatch) -> None:
+    class _Catalog:
+        def screen_visible_only(self):
+            return True
+
+    monkeypatch.setattr(gen, "default_catalog", lambda: _Catalog())
+
+    async def produce(s, request, screen, history=()):
+        return gen._Outcome("echo hi", True, None, _tool_call("echo hi"))
+
+    monkeypatch.setattr(gen, "_produce", produce)
+    services = FakeServices(["y"])
+
+    assert _run(gen.run_generate(services, "请求")) is True
+    assert services.screen.kwargs == {"include_scrollback": False}
 
 
 def test_run_generate_records_history(monkeypatch) -> None:

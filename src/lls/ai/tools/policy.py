@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Mapping, Optional
 
 from ..tool_options import ToolOptions, parse_tool_options, tool_options_from_json
 
@@ -26,6 +26,7 @@ __all__ = [
     "global_policy",
     "reset_global_policy",
     "set_global_policy",
+    "sync_global_policy",
 ]
 
 
@@ -172,3 +173,15 @@ def reset_global_policy(settings: Optional[Mapping[str, ToolOptions]] = None) ->
     """重建全局策略；测试与配置重载用。"""
     global _GLOBAL
     _GLOBAL = ToolPolicy(settings)
+
+
+def sync_global_policy(settings: Optional[Mapping[str, ToolOptions]] = None) -> None:
+    """把配置里尚未落到全局层的项补进去。
+
+    已有项保留：那是本次进程里 ``tools`` 界面改过的值，运行期选择优先于
+    配置。这样启动时能看到配置里的开关，又不会在每次进 ``agent`` 时把用户
+    刚拨过的全局开关重置回去。
+    """
+    for name, options in (settings or {}).items():
+        if name not in _GLOBAL:
+            _GLOBAL.set_options(name, options)

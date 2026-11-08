@@ -13,10 +13,12 @@
 
 from __future__ import annotations
 
+from lls.ai.catalog import default_catalog
 from lls.ai.tools import builtin_tools
 from lls.ai.tools.policy import global_policy
 from lls.commands.result import CommandResult
 from lls.commands.spec import command
+from lls.config import load as load_config
 from lls.session.services import Services
 
 from .tool_picker import ToolSwitch, toggle_tools
@@ -24,7 +26,17 @@ from .tool_picker import ToolSwitch, toggle_tools
 
 def tool_names(services: Services) -> list[str]:
     """默认工具集的名字，顺序与请求里的 ``tools`` 数组一致。"""
-    return [entry.tool.name for entry in builtin_tools(services, services.wait)]
+    names = [entry.tool.name for entry in builtin_tools(services, services.wait)]
+    try:
+        config = load_config()
+        teacher = getattr(config.ai, "teacher_model", None) if config.ai else None
+        if teacher:
+            default_catalog().resolve(teacher)
+            if "ask_teacher" not in names:
+                names.append("ask_teacher")
+    except Exception:  # noqa: BLE001 - 配置坏了不该挡住工具开关
+        pass
+    return names
 
 
 def tool_switches(names: list[str]) -> list[ToolSwitch]:

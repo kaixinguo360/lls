@@ -10,7 +10,12 @@ import asyncio
 from lls.ai.sessions.store import SessionMeta
 from lls.ai.tool_options import ToolOptions, parse_tool_options, tool_options_from_json
 from lls.ai.tools import builtin_tools
-from lls.ai.tools.policy import ToolPolicy, global_policy, reset_global_policy
+from lls.ai.tools.policy import (
+    ToolPolicy,
+    global_policy,
+    reset_global_policy,
+    sync_global_policy,
+)
 
 
 class FakePort:
@@ -49,6 +54,22 @@ def test_a_tool_nobody_mentioned_stays_enabled() -> None:
     policy = global_policy().merged(ToolPolicy())
 
     assert policy.enabled("bash") is True
+
+
+def test_syncing_config_only_fills_missing_global_values() -> None:
+    reset_global_policy()
+    sync_global_policy(
+        {
+            "bash": ToolOptions(enabled=False),
+            "write_file": ToolOptions(enabled=False),
+        }
+    )
+    assert global_policy().disabled() == ["bash", "write_file"]
+
+    # 进程内 tools 界面改过的值优先，配置不能把它盖回去。
+    sync_global_policy({"bash": ToolOptions(enabled=True)})
+    assert global_policy().enabled("bash") is False
+    reset_global_policy()
 
 
 # ---- 过滤 ----
@@ -106,6 +127,34 @@ def test_unknown_field_warns() -> None:
     assert any("bogus" in note for note in notes)
 
 
+def test_tool_specific_settings_are_parsed_and_deep_merged() -> None:
+    notes: list[str] = []
+    base = parse_tool_options(
+        {"settings": {"visible_only": True, "nested": {"a": 1}}},
+        "ai.tools.read_terminal",
+        notes,
+    )
+    near = parse_tool_options(
+        {"settings": {"nested": {"b": 2}}},
+        "ai.tools.read_terminal",
+        notes,
+    )
+
+    merged = base.merged_with(near)
+
+    assert notes == []
+    assert merged.settings == {"visible_only": True, "nested": {"a": 1, "b": 2}}
+    assert merged.to_json()["settings"] == merged.settings
+
+
+def test_settings_must_be_a_mapping() -> None:
+    notes: list[str] = []
+    options = parse_tool_options({"settings": [1]}, "ai.tools.read_terminal", notes)
+
+    assert options.settings is None
+    assert any("settings" in note for note in notes)
+
+
 def test_meta_json_is_tolerant() -> None:
     policy = ToolPolicy.from_json({"bash": {"enabled": False}, "junk": "nope", 42: None})
 
@@ -116,11 +165,21 @@ def test_meta_json_is_tolerant() -> None:
 
 
 def test_meta_roundtrip_keeps_tool_settings() -> None:
-    meta = SessionMeta(id="x", tools={"write_file": {"enabled": False}})
+    meta = SessionMeta(
+        id="x",
+        tools={
+            "write_file": {"enabled": False},
+            "read_terminal": {"settings": {"visible_only": True}},
+        },
+    )
     raw = meta.to_json()
 
-    assert raw["tools"] == {"write_file": {"enabled": False}}
+    assert raw["tools"]["write_file"] == {"enabled": False}
+    assert raw["tools"]["read_terminal"] == {"settings": {"visible_only": True}}
     assert tool_options_from_json(raw["tools"]["write_file"]).enabled is False
+    assert tool_options_from_json(raw["tools"]["read_terminal"]).settings == {
+        "visible_only": True
+    }
 
 
 def test_meta_without_tools_reads_as_empty() -> None:

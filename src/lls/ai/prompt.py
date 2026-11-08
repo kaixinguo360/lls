@@ -168,6 +168,19 @@ def _tool_name(entry: object) -> str:
     return getattr(tool, "name", "")
 
 
+def _tool_help(entry: object) -> str:
+    """工具自带的提示段优先；没有时用按名字写死的默认说明。
+
+    工具接口会随配置变化（``read_terminal`` 的 ``lines`` 可能被隐藏），
+    说明必须由构建工具的那一层一起给出，不能只改 Schema。
+    """
+    tool = getattr(entry, "tool", entry)
+    custom = getattr(tool, "prompt", "")
+    if custom:
+        return custom
+    return _TOOL_HELP.get(_tool_name(entry), "")
+
+
 def build(
     tools: Iterable,
     *,
@@ -186,8 +199,7 @@ def build(
     if scene not in _OPENING:
         raise ValueError(f"unknown prompt scene: {scene}")
 
-    names = [_tool_name(entry) for entry in tools]
-    lines = [_TOOL_HELP[name] for name in names if name in _TOOL_HELP]
+    lines = [text for text in (_tool_help(entry) for entry in tools) if text]
     if not lines:
         # 工具全被关掉是合法状态（用户可以在 /tools 里全关，或会话里存着
         # 这样的策略）：这时模型只能直接答复，提示词照写，不要每轮都因为

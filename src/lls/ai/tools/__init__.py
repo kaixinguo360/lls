@@ -22,20 +22,34 @@
 
 from __future__ import annotations
 
+from typing import Mapping
+
 from .box import Middleware, Next, Run, Toolbox
 from .files import file_tools
 from .middleware import RepeatReminder
 from .observation import Observation
-from .policy import ToolPolicy, global_policy, reset_global_policy
-from .shell import Shell, shell_tools, shared
+from .policy import (
+    ToolPolicy,
+    global_policy,
+    reset_global_policy,
+    sync_global_policy,
+)
+from .shell import Shell, shared, shell_tools
 from .teacher import teacher_tools
-from .terminal import Poll, ScreenView, TerminalPort, terminal_tools
+from .terminal import (
+    Poll,
+    ReadTerminalSettings,
+    ScreenView,
+    TerminalPort,
+    terminal_tools,
+)
 
 __all__ = [
     "Middleware",
     "Next",
     "Observation",
     "Poll",
+    "ReadTerminalSettings",
     "RepeatReminder",
     "Run",
     "ScreenView",
@@ -46,6 +60,7 @@ __all__ = [
     "builtin_tools",
     "global_policy",
     "reset_global_policy",
+    "sync_global_policy",
     "file_tools",
     "shell_tools",
     "teacher_tools",
@@ -59,6 +74,7 @@ def builtin_tools(
     *,
     view: ScreenView | None = None,
     shell: Shell | None = None,
+    read_settings: Mapping[str, ReadTerminalSettings] | None = None,
 ) -> Toolbox:
     """装好默认这组工具。
 
@@ -66,12 +82,17 @@ def builtin_tools(
     快照也算看过，模型第一次读屏不会白读一遍重复内容。``shell`` 不给就用
     进程共用的那个（``cd`` 的位置跨会话保留）。
 
+    ``read_settings`` 按工具名分开（``read_terminal`` / ``wait_for`` /
+    ``wait_for_change``），每个读屏工具只认自己那一项。``view`` 的
+    ``visible_only`` 决定任务开头的快照，由调用方按 ``ai.screen`` 建好。
+
     返回的是**没套中间件**的工具箱，中间件由调用方按需加 —— 谁用谁知道要不要
     「连续相同调用」的提醒。
     """
+    options = dict(read_settings or {})
     view = view if view is not None else ScreenView(port, poll)
     box = Toolbox()
-    box.extend(terminal_tools(port, view))
+    box.extend(terminal_tools(port, view, settings=options))
     box.extend(file_tools())
     box.extend(shell_tools(shell if shell is not None else shared()))
     return box

@@ -57,6 +57,12 @@ class Tool:
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
     strict: bool = False
+    prompt: str = ""
+    """系统提示词里的那一段；不发给 provider。
+
+    工具接口随设置变化时（例如隐藏了某个参数），说明也要跟着变。留空时由
+    :mod:`lls.ai.prompt` 使用按工具名写死的默认说明。
+    """
 
     def to_payload(self) -> dict[str, Any]:
         """转成请求体里的 tool 定义。"""

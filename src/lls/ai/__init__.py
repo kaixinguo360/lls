@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from ..config import ConfigError, load_ai, resolve_config_path
+
 # 导入实现目录以触发内置 type 注册
 from . import providers  # noqa: F401
 from .agent import (
@@ -18,8 +20,7 @@ from .agent import (
     stream_reply,
 )
 from .catalog import Catalog, default_catalog, parse_model_spec
-from ..config import ConfigError, load_ai, resolve_config_path
-from .config import AIConfig
+from .config import AIConfig, ScreenConfig
 from .conversation import Conversation
 from .provider import Provider
 from .registry import available_types, create_provider, register_type
@@ -50,6 +51,7 @@ __all__ = [
     "Message",
     "Provider",
     "ProviderConfig",
+    "ScreenConfig",
     "Tool",
     "ToolCall",
     "ToolCallDelta",

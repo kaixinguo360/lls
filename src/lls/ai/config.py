@@ -14,7 +14,15 @@ from ..config import ConfigError
 from .tool_options import ToolOptions, parse_tool_options
 from .types import ProviderConfig
 
-__all__ = ["AIConfig", "parse_ai"]
+__all__ = ["AIConfig", "ScreenConfig", "parse_ai"]
+
+
+@dataclass(frozen=True)
+class ScreenConfig:
+    """``ai.screen`` 段：读屏的全局默认值。"""
+
+    visible_only: bool = False
+    """只读当前可见屏；工具自己的 ``settings.visible_only`` 会覆盖它。"""
 
 
 @dataclass(frozen=True)
@@ -26,8 +34,13 @@ class AIConfig:
     teacher_model: str | None = None
     context_limit: int = 0
     """单次请求的 token 上限；0 表示只按模型的 context window 算。"""
+    screen: ScreenConfig = field(default_factory=ScreenConfig)
     tools: dict[str, ToolOptions] = field(default_factory=dict)
-    """每个工具的设置（``ai.tools`` 段）；没写到的工具默认启用。"""
+    """每个工具的设置（``ai.tools`` 段）；没写到的工具默认启用。
+
+    通用项与 ``settings``（工具特有设置）放在同一个 ``ToolOptions`` 里；
+    ``settings`` 的形状由各工具自己解释。
+    """
     path: Path | None = None
     """配置来源文件。"""
 
@@ -118,6 +131,21 @@ def _parse_provider(
     )
 
 
+def _parse_screen(raw: Any, notes: Optional[list[str]]) -> ScreenConfig:
+    """``ai.screen`` 段：读屏全局默认值；未知字段只告警。"""
+    if raw is None:
+        return ScreenConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError("ai.screen 必须是映射")
+    _unknown(raw, {"visible_only"}, "ai.screen.", notes)
+    visible = raw.get("visible_only", False)
+    if isinstance(visible, bool):
+        return ScreenConfig(visible_only=visible)
+    if notes is not None:
+        notes.append("ai.screen.visible_only 必须是布尔值；使用 false")
+    return ScreenConfig()
+
+
 def _parse_tools(raw: Any, notes: Optional[list[str]]) -> dict[str, ToolOptions]:
     """``ai.tools`` 段：工具名 → 设置；未知字段只告警。"""
     if raw is None:
@@ -149,7 +177,14 @@ def parse_ai(
         raise ConfigError("ai 必须是映射")
     _unknown(
         section,
-        {"default_model", "teacher_model", "providers", "context_limit", "tools"},
+        {
+            "default_model",
+            "teacher_model",
+            "providers",
+            "context_limit",
+            "screen",
+            "tools",
+        },
         "ai.",
         notes,
     )
@@ -174,6 +209,7 @@ def parse_ai(
         default_model=default_model,
         teacher_model=teacher_model,
         context_limit=limit_raw,
+        screen=_parse_screen(section.get("screen"), notes),
         tools=_parse_tools(section.get("tools"), notes),
         path=path,
     )

@@ -10,6 +10,7 @@ import asyncio
 import os
 import sys
 
+from .ai.tools.policy import sync_global_policy
 from .commands.catalog import registry_completer
 from .config import load as load_config
 from .edit import history_from_config
@@ -75,6 +76,8 @@ def run_interactive(command: list[str]) -> int:
     screen = PyteScreenModel(rows=size.lines, columns=size.columns)
 
     config = load_config()
+    # 全局工具开关以配置为初值；之后 tools/agent 里改的值不再被覆盖。
+    sync_global_policy(getattr(config.ai, "tools", {}) if config.ai else {})
     recorder = None
     if config.recording.enabled:
         from .recording import TerminalRecorder

@@ -10,9 +10,9 @@ from functools import lru_cache
 from ..config import ConfigError, load_ai, resolve_config_path
 from .config import AIConfig
 from .provider import Provider
+from .registry import create_provider
 from .tool_options import ToolOptions
 from .types import ProviderConfig
-from .registry import create_provider
 
 __all__ = ["Catalog", "default_catalog", "parse_model_spec"]
 
@@ -87,6 +87,10 @@ class Catalog:
     def tools(self) -> dict[str, ToolOptions]:
         """``ai.tools`` 段：全局工具设置的初值。"""
         return dict(self._config.tools)
+
+    def screen_visible_only(self) -> bool:
+        """``ai.screen.visible_only``：读屏的全局默认值。"""
+        return self._config.screen.visible_only
 
     def resolve(self, spec: str | None = None) -> tuple[Provider, str]:
         """解析 ``provider/model``；省略时用配置里的 ``default_model``。
