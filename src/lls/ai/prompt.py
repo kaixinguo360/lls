@@ -28,9 +28,10 @@ _TOOL_HELP = {
         "  行列、当前是主屏还是全屏程序的备用屏（buffer=alternate 时先想清楚怎么退出）。"
     ),
     "wait_for": (
-        "- wait_for(pattern, timeout, lines)：等画面出现 pattern（Python 正则，只在\n"
-        "  新出现的行里找；空串表示等画面安静下来）。返回画面+状态（matched/quiet/\n"
-        "  timeout）。慢命令用它等结果，不要反复 read_terminal 轮询。"
+        "- wait_for(pattern, timeout, lines, include_existing)：等画面出现 pattern\n"
+        "  （Python 正则；include_existing=false 只在新出现的行里找，true 时当前\n"
+        "  画面已有的匹配也立即返回；空串表示等画面安静下来）。返回画面+状态\n"
+        "  （matched/quiet/timeout）。慢命令用它等结果，不要反复 read_terminal 轮询。"
     ),
     "wait_for_change": (
         "- wait_for_change(timeout, lines)：等到画面**变了**就返回，不看它是否安静。\n"

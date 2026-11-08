@@ -1059,6 +1059,26 @@ def test_wait_for_ignores_a_match_that_was_already_on_screen(monkeypatch) -> Non
     assert "<status>timeout</status>" in result
 
 
+def test_wait_for_can_accept_a_match_already_on_screen(monkeypatch) -> None:
+    """include_existing=true 是给「错误已经在了」这种常见场景用的。"""
+    monkeypatch.setattr(terminal_mod, "READ_POLL", 0.001)
+    screen = FakeScreen(texts=["error: boom\n$ "])
+    tools, _ = _tools(FakeServices([], screen=screen))
+
+    result = asyncio.run(
+        tools["wait_for"].run(
+            {
+                "pattern": "error",
+                "timeout": 0.05,
+                "lines": 10,
+                "include_existing": True,
+            }
+        )
+    )
+
+    assert "<status>matched</status>" in result
+
+
 def test_wait_for_quiet_pattern_waits_for_the_screen_to_settle(monkeypatch) -> None:
     monkeypatch.setattr(terminal_mod, "READ_POLL", 0.001)
     monkeypatch.setattr(terminal_mod, "READ_QUIET", 0.005)
@@ -1078,6 +1098,22 @@ def test_wait_for_rejects_a_bad_pattern() -> None:
     with pytest.raises(ValueError):
         asyncio.run(
             tools["wait_for"].run({"pattern": "(", "timeout": 1, "lines": 10})
+        )
+
+
+def test_wait_for_rejects_a_non_boolean_include_existing() -> None:
+    tools, _ = _tools(FakeServices([]))
+
+    with pytest.raises(ValueError):
+        asyncio.run(
+            tools["wait_for"].run(
+                {
+                    "pattern": "x",
+                    "timeout": 1,
+                    "lines": 10,
+                    "include_existing": "yes",
+                }
+            )
         )
 
 

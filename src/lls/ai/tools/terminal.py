@@ -207,16 +207,20 @@ class ScreenView:
         timeout: float,
         *,
         visible_only: bool = False,
+        include_existing: bool = False,
     ) -> tuple[str, str]:
-        """等到新行匹配 ``pattern``（空串：等画面安静）；返回 (画面, 状态)。
+        """等到匹配 ``pattern`` 的行（空串：等画面安静）；返回 (画面, 状态)。
 
-        ``pattern`` 只在新出现的行里找。调用时画面上就有的那段不算 —— 等
-        「命令跑完、提示符回来」时，上一个提示符本来就在屏幕里。
+        默认只在新出现的行里找：调用时画面上已有的匹配不算 —— 等「命令跑完、
+        提示符回来」时，上一个提示符本来就在屏幕里。``include_existing=true``
+        时当前画面已有的匹配也会立即返回。
         """
         limit = max(1, min(int(lines), MAX_LINES))
         text = self.snapshot(limit, visible_only=visible_only)
         before = text.split("\n")
         regex = re.compile(pattern) if pattern else None
+        if regex is not None and include_existing and regex.search(text):
+            return text, "matched"
         deadline = time.monotonic() + min(max(timeout, 0.0), MAX_WAIT_FOR)
         last_change = time.monotonic()
         while True:
@@ -416,11 +420,12 @@ SEND_RAW_TOOL = Tool(
 WAIT_FOR_TOOL = Tool(
     name="wait_for",
     description=(
-        "Wait, then look: returns as soon as a new line matches the regex "
-        "pattern, or (with an empty pattern) once the screen has gone quiet. "
-        "Use it instead of calling read_terminal in a loop while a slow command "
-        "runs. Returns the tail of the screen plus a status: matched / quiet / "
-        "timeout."
+        "Wait, then look: returns as soon as a line matches the regex pattern, "
+        "or (with an empty pattern) once the screen has gone quiet. By default "
+        "only lines that appear after the call count; set include_existing=true "
+        "to also accept a match already on screen. Use it instead of calling "
+        "read_terminal in a loop while a slow command runs. Returns the tail of "
+        "the screen plus a status: matched / quiet / timeout."
     ),
     parameters={
         "type": "object",
@@ -428,9 +433,9 @@ WAIT_FOR_TOOL = Tool(
             "pattern": {
                 "type": "string",
                 "description": (
-                    "Python regular expression searched in the lines that appear "
-                    "after the call starts (whole screens, not incremental: a "
-                    "match already on screen when you call does not count). "
+                    "Python regular expression. By default it is searched only "
+                    "in lines that appear after the call starts; set "
+                    "include_existing=true to also search the current screen. "
                     "Empty string waits for the screen to stop changing."
                 ),
             },
@@ -446,8 +451,15 @@ WAIT_FOR_TOOL = Tool(
                 "maximum": MAX_LINES,
                 "description": "Trailing lines to return; 120 is a good default.",
             },
+            "include_existing": {
+                "type": "boolean",
+                "description": (
+                    "Also match text already on screen and return immediately; "
+                    "false (default) only matches lines that appear after the call."
+                ),
+            },
         },
-        "required": ["pattern", "timeout", "lines"],
+        "required": ["pattern", "timeout", "lines", "include_existing"],
         "additionalProperties": False,
     },
     strict=True,
@@ -494,9 +506,10 @@ _READ_PROMPT_VISIBLE = (
 )
 
 _WAIT_FOR_PROMPT_VISIBLE = (
-    "- wait_for(pattern, timeout)：等画面出现 pattern（Python 正则，只在\n"
-    "  新出现的行里找；空串表示等画面安静下来）。返回当前可见画面+状态（matched/\n"
-    "  quiet/timeout）。慢命令用它等结果，不要反复 read_terminal 轮询。"
+    "- wait_for(pattern, timeout, include_existing)：等画面出现 pattern\n"
+    "  （Python 正则；include_existing=false 只在新出现的行里找，true 时当前画面\n"
+    "  已有的匹配也立即返回；空串表示等画面安静下来）。返回当前可见画面+状态\n"
+    "  （matched/quiet/timeout）。慢命令用它等结果，不要反复 read_terminal 轮询。"
 )
 
 _WAIT_FOR_CHANGE_PROMPT_VISIBLE = (
@@ -515,9 +528,10 @@ _VISIBLE_READ_DESCRIPTION = (
 
 _VISIBLE_WAIT_FOR_DESCRIPTION = (
     "Wait, then look at the visible screen (no scrollback): returns as soon as a "
-    "new line matches the regex pattern, or (with an empty pattern) once the "
-    "screen has gone quiet. Returns the visible screen plus a status: matched / "
-    "quiet / timeout."
+    "line matches the regex pattern, or (with an empty pattern) once the screen "
+    "has gone quiet. By default only lines that appear after the call count; "
+    "include_existing=true also accepts a match already on screen. Returns the "
+    "visible screen plus a status: matched / quiet / timeout."
 )
 
 _VISIBLE_WAIT_FOR_CHANGE_DESCRIPTION = (
@@ -714,11 +728,15 @@ def terminal_tools(
             except re.error as e:
                 raise ValueError(f"invalid 'pattern': {e}") from e
         timeout = as_float(args.get("timeout"), MAX_WAIT_FOR)
+        include_existing = args.get("include_existing", False)
+        if not isinstance(include_existing, bool):
+            raise ValueError("'include_existing' must be a boolean")
         text, status = await view.wait_for(
             lines_for(args, wait_for_settings),
             pattern,
             timeout,
             visible_only=wait_for_settings.visible_only,
+            include_existing=include_existing,
         )
         return view.observe(text, status)
 

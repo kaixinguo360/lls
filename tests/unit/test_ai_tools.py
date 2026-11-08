@@ -243,7 +243,7 @@ def test_visible_only_prompt_matches_the_schema() -> None:
     text = prompt.build(box, display="interactive")
 
     assert "read_terminal(wait_seconds)" in text
-    assert "wait_for(pattern, timeout)" in text
+    assert "wait_for(pattern, timeout, include_existing)" in text
     assert "wait_for_change(timeout)" in text
     assert "read_terminal(lines" not in text
 
