@@ -123,6 +123,13 @@ _SLASH_COMMANDS = (
     _SlashCommand("help", ("h", "?"), "_slash_help", "列出这些命令", "/help"),
     _SlashCommand("status", ("s",), "_slash_status", "整屏翻看全部对话", "/status"),
     _SlashCommand(
+        "watch",
+        (),
+        "_slash_watch",
+        "隐去覆盖层只看子进程画面，任意键回来",
+        "/watch",
+    ),
+    _SlashCommand(
         "title", (), "_slash_title", "查看或修改标题：/title [文字]", "/title [文字]"
     ),
     _SlashCommand(
@@ -200,6 +207,7 @@ _SLASH_COMPLETER = completer_for(_SLASH_METAS, marker="/", path_escape=True)
 _SLASH_POLICY = {
     "_slash_help": "now",
     "_slash_status": "now",
+    "_slash_watch": "now",
     "_slash_title": "now",
     "_slash_model": "now",
     "_slash_tools": "now",
@@ -807,6 +815,24 @@ class _Session:
         rows = await offload(self._transcript)
         footer = await offload(self._status_footer)
         await page(self._s, rows, footer)
+        return _CANCEL
+
+    async def _slash_watch(self, args: str) -> Any:
+        """隐去覆盖层，只看子进程画面：按任意键回来。
+
+        执行中用它看 agent 在终端里到底做了什么：覆盖层收走的那几行还原子进程
+        自己的内容，子进程照常往屏幕上写（这一轮还在跑）。按键只用来退出这个
+        模式，不转给子进程 —— 它在等的是「看一眼」，不是一次输入。
+        """
+        if args.strip():
+            await self._s.show_message("用法：/watch（不接受参数）")
+            return _CANCEL
+        self._s.set_overlay_hidden(True)
+        try:
+            # 任意输入都算数；子进程没了（None）也照退，别把屏幕留在藏起来的状态。
+            await self._s.read_key()
+        finally:
+            self._s.set_overlay_hidden(False)
         return _CANCEL
 
     def _transcript(self) -> List[str]:

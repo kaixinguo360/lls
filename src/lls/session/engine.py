@@ -248,6 +248,9 @@ class Engine:
         self._overlay_source: Callable[[int, int], str] | None = None
         # 因为覆盖层收起、变矮或移走而需要按模型重铺的行。
         self._stale_rows: set[int] = set()
+        # 覆盖层被临时藏起来（/watch）：内容、锚点都留着，只是不画 —— 屏幕
+        # 上只剩子进程画面。见 set_overlay_hidden。
+        self._overlay_hidden = False
 
         # 等待喂给模型的字节（显示优先时，模型在后面追赶）。
         self._backlog = bytearray()
@@ -261,6 +264,11 @@ class Engine:
         """覆盖层（接上宿主终端之后才存在）。"""
         assert self._overlay is not None
         return self._overlay
+
+    @property
+    def overlay_hidden(self) -> bool:
+        """覆盖层是否被临时藏起来（见 :meth:`set_overlay_hidden`）。"""
+        return self._overlay_hidden
 
     @property
     def exited(self) -> bool:
@@ -706,6 +714,8 @@ class Engine:
         self.flush_backlog()
         ov = self.overlay
         rows = self.screen.rows
+        # 藏起来的覆盖层不参与合成：那几行还原子进程自己的画面。
+        visible = ov.visible and not self._overlay_hidden
         if ov.visible:
             # 子进程把光标挪走了，覆盖层跟着挪：它占的就是「现在这一行」。
             # 挪动之前占的旧行按底部模型重铺。
@@ -717,7 +727,7 @@ class Engine:
         top = 0 if ov.anchor is None else ov.anchor
         dirty = set(self.screen.dirty) | self._stale_rows
         self._stale_rows.clear()
-        if ov.visible:
+        if visible:
             dirty.update(range(top, min(top + ov.lines, rows)))
         self.screen.clear_dirty()
 
@@ -731,7 +741,7 @@ class Engine:
                     if not 0 <= row < rows:
                         continue
                     out.append("\x1b[{};1H".format(row + 1))
-                    if ov.visible and top <= row < top + ov.lines:
+                    if visible and top <= row < top + ov.lines:
                         out.append(_row_paint(ov.row_cells(row - top)))
                     else:
                         out.append(_row_paint(self.screen.row_cells(row)))
@@ -768,6 +778,9 @@ class Engine:
         挪了（换行、CUP、切换备用屏）它就跟着挪；挪走之前占的行按底部模型重铺，
         否则子进程的旧内容会被留在那儿。
         """
+        if self._overlay_hidden:
+            # 藏起来了：子进程的字节就是全部画面，不再补画。
+            return
         ov = self.overlay
         if not ov.visible or ov.anchor is None:
             return
@@ -1087,6 +1100,10 @@ class Engine:
                 range(ov.anchor, min(ov.anchor + ov.lines, self.screen.rows))
             )
         ov.set(text, cursor, self.screen.cursor.y)
+        if self._overlay_hidden:
+            # 只更新自己的内容、不碰画面：屏幕此刻归子进程，放回来时按这份
+            # 内容原样回位（见 set_overlay_hidden）。
+            return (0 if ov.anchor is None else ov.anchor), ov.lines
         self.render_from_model()
         return (0 if ov.anchor is None else ov.anchor), ov.lines
 
@@ -1098,6 +1115,28 @@ class Engine:
         重排，于是由它给出回调；收起时传 None。
         """
         self._overlay_source = source
+
+    def set_overlay_hidden(self, hidden: bool) -> None:
+        """临时藏起覆盖层，或把它放回来：藏起来就只看子进程画面。
+
+        藏起来只改「画不画」：内容、锚点与「跟着子进程光标走」都照旧，所以
+        放回来就是原样回位，调用方不必自己重画一帧（输入行、状态行这类现画
+        的内容也就不会丢）。藏起来时它占的那几行要按模型重铺，否则子进程
+        画面会在它盖过的地方留下一个洞。
+        """
+        if hidden == self._overlay_hidden:
+            return
+        self._overlay_hidden = hidden
+        if self._overlay is None:
+            # 还没接上宿主终端：没有覆盖层可藏，画面本来就只有子进程的。
+            return
+        if hidden:
+            ov = self.overlay
+            if ov.visible and ov.anchor is not None:
+                self._stale_rows.update(
+                    range(ov.anchor, min(ov.anchor + ov.lines, self.screen.rows))
+                )
+        self.render_from_model()
 
     def _place_physical_cursor(self) -> None:
         """把物理光标放到该显示的位置。
@@ -1114,7 +1153,7 @@ class Engine:
         """
         if self._console is None:
             return
-        spot = self.overlay.cursor_position()
+        spot = None if self._overlay_hidden else self.overlay.cursor_position()
         if spot is None:
             if self.screen.cursor.hidden:
                 if self._cursor_shown:

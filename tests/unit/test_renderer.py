@@ -788,3 +788,91 @@ def test_edit_reports_the_buffer_after_every_key() -> None:
 
     assert line == "ac"
     assert seen == [("a", 1), ("ab", 2), ("a", 1), ("ac", 2)]
+
+
+# ---- 藏起覆盖层（/watch）：只看子进程画面，放回来原样回位 ----
+
+def test_hiding_the_overlay_shows_the_child_screen_under_it() -> None:
+    """藏起来的那几行按模型重铺：屏幕上只剩子进程自己的内容。"""
+    engine, screen, console = _overlay_engine(rows=6, columns=20)
+    screen.feed(b"one")
+    engine.draw_overlay(":abc")
+    console.snapshot()
+
+    engine.set_overlay_hidden(True)
+
+    rows = _emulate(bytes(console.data), rows=6, columns=20)
+    assert [r.rstrip() for r in rows[:2]] == ["one", ""]
+
+
+def test_the_overlay_comes_back_as_it_was_after_unhiding() -> None:
+    """藏的只是「画不画」：内容留着，放回来就原样回位。"""
+    engine, screen, console = _overlay_engine(rows=6, columns=20)
+    screen.feed(b"one")
+    engine.draw_overlay(":abc")
+    console.snapshot()
+
+    engine.set_overlay_hidden(True)
+    engine.set_overlay_hidden(False)
+
+    rows = _emulate(bytes(console.data), rows=6, columns=20)
+    assert [r.rstrip() for r in rows[:2]] == [":abc", ""]
+    assert engine.overlay_hidden is False
+
+
+def test_child_output_written_while_hidden_lands_on_screen() -> None:
+    """藏起来的时候子进程照常写：它写什么，屏幕就画什么。"""
+    engine, screen, console = _overlay_engine(rows=6, columns=20)
+    screen.feed(b"one")
+    engine.draw_overlay(":abc")
+    engine.set_overlay_hidden(True)
+    console.snapshot()
+
+    screen.feed(b"\r\ntwo")
+    engine.render_from_model()
+
+    data = console.snapshot()
+    rows = _emulate(data, rows=6, columns=20)
+    assert rows[1].rstrip() == "two"
+    assert b":abc" not in data
+
+
+def test_a_hidden_overlay_is_not_painted_over_the_child_bytes() -> None:
+    """透传时每帧都要补画覆盖层；藏起来就不补，子进程的字节原样留在屏上。"""
+    engine, screen, console = _overlay_engine(rows=6, columns=20)
+    screen.feed(b"one")
+    engine.draw_overlay(":abc")
+    engine.set_overlay_hidden(True)
+    console.snapshot()
+
+    engine._repaint_overlay()
+
+    assert console.data == b""
+
+
+def test_drawing_while_hidden_updates_the_content_without_painting() -> None:
+    """藏起来期间状态行照旧更新（它不知道屏幕归谁），放回来是新的那一行。"""
+    engine, screen, console = _overlay_engine(rows=6, columns=20)
+    screen.feed(b"one")
+    engine.draw_overlay("(agent) 第 1 步")
+    engine.set_overlay_hidden(True)
+    console.snapshot()
+
+    engine.draw_overlay("(agent) 第 2 步")
+    assert console.data == b""
+
+    engine.set_overlay_hidden(False)
+    rows = _emulate(console.snapshot(), rows=6, columns=20)
+    assert rows[0].rstrip() == "(agent) 第 2 步"
+
+
+def test_the_physical_cursor_goes_back_to_the_child_while_hidden() -> None:
+    """覆盖层在时光标归它的插入点；藏起来就得回到子进程的光标。"""
+    engine, screen, console = _overlay_engine(rows=6, columns=20)
+    screen.feed(b"one")
+    engine.draw_overlay(":abc", cursor=4)
+    console.snapshot()
+
+    engine.set_overlay_hidden(True)
+
+    assert b"\x1b[1;4H" in bytes(console.data)

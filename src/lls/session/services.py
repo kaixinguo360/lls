@@ -93,6 +93,14 @@ class Services:
         """
         self._engine.set_overlay_source(source)
 
+    def set_overlay_hidden(self, hidden: bool = True) -> None:
+        """临时藏起覆盖层（或放回来）：藏起来就只看子进程画面。
+
+        只改「画不画」：覆盖层的内容与位置都留着，放回来就是原样回位，调用
+        方不必自己重画 —— 输入行、状态行这类现画的内容因此不会丢。
+        """
+        self._engine.set_overlay_hidden(hidden)
+
     # ---- 子进程 ----
 
     def write(self, data: bytes, *, enter: bool = False) -> None:

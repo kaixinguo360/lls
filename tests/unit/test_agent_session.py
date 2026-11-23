@@ -67,6 +67,8 @@ class FakeServices:
         self.values = []  # 每次读输入时输入区里预填着什么（/undo 回填原文）
         self._chars = []
         self.held = []
+        self.hidden = False
+        self.hidden_calls = []
 
     def queue_chars(self, *values) -> None:
         self._chars.extend(values)
@@ -150,6 +152,10 @@ class FakeServices:
 
     def restore_context(self) -> None:
         pass
+
+    def set_overlay_hidden(self, hidden: bool = True) -> None:
+        self.hidden = hidden
+        self.hidden_calls.append(hidden)
 
     def requeue_pending_keys(self) -> None:
         pass
@@ -2117,3 +2123,24 @@ def test_stay_still_drains_the_queue_between_rounds(monkeypatch) -> None:
     asyncio.run(session.run("首个任务"))
 
     assert calls == ["首个任务", "排队任务"]
+
+
+def test_slash_watch_hides_the_overlay_until_a_key_comes() -> None:
+    """藏起来 → 任意键（这里 read_key 当场返回）→ 还原，顺序不能反。"""
+    services = FakeServices()
+    session = agent_cmd._Session(services, None, "model")
+
+    asyncio.run(session._slash_watch(""))
+
+    assert services.hidden_calls == [True, False]
+
+
+def test_slash_watch_takes_no_arguments() -> None:
+    services = FakeServices()
+    session = agent_cmd._Session(services, None, "model")
+
+    asyncio.run(session._slash_watch("10"))
+
+    assert services.hidden_calls == []
+    assert services.messages
+    assert "不接受参数" in services.messages[0]

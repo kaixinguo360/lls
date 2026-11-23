@@ -132,7 +132,8 @@ lls bash        # 指定命令
 忙碌只是一个状态位，不是另一套界面：斜杠命令在这一轮运行期间仍可使用。行首输入 `/` 后，提示符就换成 `(agent-cmd)`（执行中也一样，命令就是命令），回车是
 执行命令而不是下一轮任务。`/` 命令同样支持补全：补出来的是规范名
 （`/ls` 会补成 `/sessions`），默认的行尾虚影同时给还没打的那一截与用法。命令按「是否会影响本轮正在使用的状态」分四档：
-`/help` `/s` `/tools` `/title` `/model` `/stay` 立即执行，完成后回到执行中界面；
+`/help` `/s` `/watch` `/tools` `/title` `/model` `/stay` 立即执行，完成后回到执行中界面
+（`/watch` 先等你按一个键）；
 `/compact` 排到本轮结束后；`/undo` `/retry` `/sessions` `/new` `/fork`
 `/rm` `/archive` 执行中拒绝，并提示先 `Ctrl-C`；`/exit` 先让本轮收尾再退出。
 
@@ -187,7 +188,9 @@ sessions/
 会话内以 `/` 开头的是本地命令，不发给模型（`/help` 列全部）：`/status`（别名 `/s`）
 整屏翻看全部对话（打开即停在最后一行，往上翻看历史；版式与提示里 `(agent)`/`(agent-reply)`/`(agent-note)` 一致），
 `↑`/`↓`（或 `j`/`k`）、空格/`b` 翻页、`PgUp`/`PgDn`、`g`/`G` 与 `Home`/`End` 跳到首尾，
-`q`、Esc 或 Ctrl-C 收起，末行是标题·模型·用量；`/title <文字>`
+`q`、Esc 或 Ctrl-C 收起，末行是标题·模型·用量；`/watch` 隐去覆盖层、只看子进程画面
+（执行中用它看 agent 在终端里到底做了什么），按任意键回来 —— 覆盖层的内容与位置都留着，
+回来时原样回位，按键不转给子进程；`/title <文字>`
 改标题，`/model [spec]` 换模型，`/compact` 一次压到底，`/tools` 列工具，
 `/sessions`、`/resume <id>`、`/new [标题]`、`/fork [--at <seq>]` 管会话，
 `/rm` 删掉本会话、`/archive` 把它收进 `sessions/_archive/`（列表里不再出现，
