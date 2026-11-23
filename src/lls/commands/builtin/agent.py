@@ -643,7 +643,12 @@ class _Session:
             name: ReadTerminalSettings.from_options(
                 self._policy.options(name), default=self._screen_visible
             )
-            for name in ("read_terminal", "wait_for", "wait_for_change")
+            for name in (
+                "read_terminal",
+                "wait_for",
+                "wait_for_change",
+                "wait",
+            )
         }
         self._view = ScreenView(
             services,

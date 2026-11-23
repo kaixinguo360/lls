@@ -97,6 +97,8 @@ def test_builtin_tools_are_strict_and_named() -> None:
         "send_keys",
         "send_raw",
         "send_text",
+        "sleep",
+        "wait",
         "wait_for",
         "wait_for_change",
         "write_file",
@@ -200,7 +202,12 @@ def test_tool_setting_overrides_the_global_default() -> None:
 def _visible_settings() -> dict[str, ReadTerminalSettings]:
     return {
         name: ReadTerminalSettings(visible_only=True)
-        for name in ("read_terminal", "wait_for", "wait_for_change")
+        for name in (
+            "read_terminal",
+            "wait_for",
+            "wait_for_change",
+            "wait",
+        )
     }
 
 
@@ -209,7 +216,7 @@ def test_visible_only_hides_lines_and_reads_the_visible_screen() -> None:
     box = builtin_tools(port, port.wait, read_settings=_visible_settings())
     tools = {item.tool.name: item for item in box}
 
-    for name in ("read_terminal", "wait_for", "wait_for_change"):
+    for name in ("read_terminal", "wait_for", "wait_for_change", "wait"):
         parameters = tools[name].tool.parameters
         assert "lines" not in parameters["properties"]
         assert "lines" not in parameters["required"]
@@ -232,6 +239,8 @@ def test_visible_only_is_configured_per_tool() -> None:
     assert "lines" not in tools["read_terminal"].tool.parameters["properties"]
     assert "lines" in tools["wait_for"].tool.parameters["properties"]
     assert "lines" in tools["wait_for_change"].tool.parameters["properties"]
+    assert "lines" in tools["wait"].tool.parameters["properties"]
+    assert "lines" not in tools["sleep"].tool.parameters["properties"]
 
 
 def test_visible_only_prompt_matches_the_schema() -> None:
@@ -245,6 +254,8 @@ def test_visible_only_prompt_matches_the_schema() -> None:
     assert "read_terminal(wait_seconds)" in text
     assert "wait_for(pattern, timeout, include_existing)" in text
     assert "wait_for_change(timeout)" in text
+    assert "wait(seconds)" in text
+    assert "sleep(seconds)" in text
     assert "read_terminal(lines" not in text
 
 

@@ -83,7 +83,7 @@ def builtin_tools(
     进程共用的那个（``cd`` 的位置跨会话保留）。
 
     ``read_settings`` 按工具名分开（``read_terminal`` / ``wait_for`` /
-    ``wait_for_change``），每个读屏工具只认自己那一项。``view`` 的
+    ``wait_for_change`` / ``wait``），每个读屏工具只认自己那一项。``view`` 的
     ``visible_only`` 决定任务开头的快照，由调用方按 ``ai.screen`` 建好。
 
     返回的是**没套中间件**的工具箱，中间件由调用方按需加 —— 谁用谁知道要不要

@@ -144,7 +144,12 @@ class _Serve:
             name: ReadTerminalSettings.from_options(
                 policy.options(name), default=screen_visible
             )
-            for name in ("read_terminal", "wait_for", "wait_for_change")
+            for name in (
+                "read_terminal",
+                "wait_for",
+                "wait_for_change",
+                "wait",
+            )
         }
         view = ScreenView(
             services,

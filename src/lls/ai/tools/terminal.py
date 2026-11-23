@@ -7,8 +7,13 @@
 脚本），照着这三个方法实现一遍就行。
 
 读写分开是有意的：动作工具（``send_*``）只写，读屏只有 ``read_terminal``、
-``wait_for`` 与 ``wait_for_change`` 三个入口 —— 什么时候观察由模型决定，而
-不是每输入一个按键就回一屏。
+``wait_for``、``wait_for_change`` 与 ``wait`` 四个入口 —— 什么时候观察由模型
+决定，而不是每输入一个按键就回一屏。
+
+``wait`` 与 ``sleep`` 是一对，都是「睡满调用方点名的那一段」，区别只在要不要
+看：``wait`` 到点顺手回一屏，回答「等完了是什么样」；``sleep`` 只睡不看，回
+一句确认，要画面时再 ``read_terminal``。拆开是因为两者的代价与副作用不同 ——
+只想让时间过去时不必付一次读屏，也就不会因为顺手拿到画面而误以为该改计划。
 """
 
 from __future__ import annotations
@@ -36,10 +41,12 @@ __all__ = [
     "SEND_KEYS_TOOL",
     "SEND_RAW_TOOL",
     "SEND_TEXT_TOOL",
+    "SLEEP_TOOL",
     "ScreenView",
     "TerminalPort",
     "WAIT_FOR_TOOL",
     "WAIT_FOR_CHANGE_TOOL",
+    "WAIT_TOOL",
     "terminal_tools",
 ]
 
@@ -49,6 +56,7 @@ READ_POLL = 0.1           # 读终端时轮询键盘的间隔
 READ_QUIET = 0.25         # 画面多久不变算静默
 MAX_WAIT = 60.0           # read_terminal 的 wait_seconds 上限
 MAX_WAIT_FOR = 600.0      # wait_for 的 timeout 上限：长编译也该等得到
+MAX_SLEEP = 600.0         # wait/sleep 一次的上限：更久的情况该用 wait_for_change
 MAX_RESIZE_ROWS = 500     # resize_terminal 的行数上限
 MAX_RESIZE_COLUMNS = 1000 # resize_terminal 的列数上限
 
@@ -63,7 +71,7 @@ class ReadTerminalSettings:
     """单个读屏工具的特有设置；配置在该工具自己的 ``settings`` 下。
 
     ``visible_only`` 打开时，这个工具不再暴露 ``lines`` 参数，只返回宿主终端
-    **当前可见**的那一屏（不含回滚区）。三个读屏工具各配各的，互不影响。
+    **当前可见**的那一屏（不含回滚区）。四个读屏工具各配各的，互不影响。
 
     任务开头的画面快照与 ``generate`` 的上下文没有自己的开关，跟随
     ``read_terminal`` 的设置。
@@ -259,6 +267,23 @@ class ScreenView:
             fresh = self.snapshot(lines, visible_only=visible_only)
             if fresh != text:
                 return fresh, "changed"
+
+    async def sleep(self, seconds: float) -> float:
+        """睡满 ``seconds`` 秒，返回**实际**睡掉的秒数。
+
+        ``port.wait`` 会因为键盘上的事（终端应答、用户按了键）提前返回，
+        所以这里对着截止时刻循环，而不是指望一次调用就睡够：早返回只是
+        说明「顺手处理了一个按键」，没到点就接着睡。Ctrl-C 由
+        ``port.wait`` 变成取消，睡多久都能随时中断。
+        """
+        budget = min(max(float(seconds), 0.0), MAX_SLEEP)
+        started = time.monotonic()
+        deadline = started + budget
+        while True:
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                return time.monotonic() - started
+            await self._poll(remain)
 
     def observe(self, text: str, status: str) -> Observation:
         """把一次读取包成观察块；与上次相同则省略正文。
@@ -497,6 +522,63 @@ WAIT_FOR_CHANGE_TOOL = Tool(
     strict=True,
 )
 
+WAIT_TOOL = Tool(
+    name="wait",
+    description=(
+        "Wait a fixed number of seconds, then look: sleeps the full duration "
+        "(never ending early) and returns the tail of the screen plus status "
+        "'waited'. Use it when you already know how long to wait (service "
+        "startup, rate-limit cooldown, polling interval) and want to see the "
+        "result in the same call. Unlike read_terminal's wait_seconds it does "
+        "not stop at the first quiet moment. Keyboard input is still handled "
+        "and ctrl-c cancels."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": MAX_SLEEP,
+                "description": "How long to wait, in seconds.",
+            },
+            "lines": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_LINES,
+                "description": "Trailing lines to return; 120 is a good default.",
+            },
+        },
+        "required": ["seconds", "lines"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
+SLEEP_TOOL = Tool(
+    name="sleep",
+    description=(
+        "Just wait: sleeps the full number of seconds and returns a one-line "
+        "confirmation instead of the screen. The cheap way to let time pass "
+        "between two steps; call read_terminal or wait afterwards when you do "
+        "need to look. ctrl-c cancels."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": MAX_SLEEP,
+                "description": "How long to wait, in seconds.",
+            },
+        },
+        "required": ["seconds"],
+        "additionalProperties": False,
+    },
+    strict=True,
+)
+
 _READ_PROMPT_VISIBLE = (
     "- read_terminal(wait_seconds)：读取终端当前画面（整个可见区域，不含回滚）。\n"
     "  wait_seconds 内画面静默就立即返回；超时返回 still-producing。动作工具不会自动\n"
@@ -515,6 +597,12 @@ _WAIT_FOR_PROMPT_VISIBLE = (
 _WAIT_FOR_CHANGE_PROMPT_VISIBLE = (
     "- wait_for_change(timeout)：等到画面**变了**就返回，不看它是否安静。\n"
     "  没有事情可做、只是在盯着终端时用它挂着；不要用 read_terminal 反复轮询。"
+)
+
+_WAIT_PROMPT_VISIBLE = (
+    "- wait(seconds)：睡满指定秒数再回一屏（只要当前可见的一屏，不含回滚；\n"
+    "  最多 600 秒）。知道要等多久（服务启动、限流冷却、轮询间隔）时用它；\n"
+    "  不知道要等多久就用 wait_for / wait_for_change。"
 )
 
 _VISIBLE_READ_DESCRIPTION = (
@@ -539,6 +627,13 @@ _VISIBLE_WAIT_FOR_CHANGE_DESCRIPTION = (
     "look: returns as soon as the screen differs from what it was when the call "
     "started, or after the timeout. Returns the visible screen plus a status: "
     "changed / timeout."
+)
+
+
+_VISIBLE_WAIT_DESCRIPTION = (
+    "Wait a fixed number of seconds, then look at the visible screen (no "
+    "scrollback): waits the full duration and returns the visible screen plus "
+    "status 'waited'. Keyboard input is still handled and ctrl-c cancels."
 )
 
 
@@ -584,6 +679,17 @@ def _wait_for_change_tool(settings: ReadTerminalSettings) -> Tool:
         description=_VISIBLE_WAIT_FOR_CHANGE_DESCRIPTION,
         parameters=_without_lines(WAIT_FOR_CHANGE_TOOL.parameters),
         prompt=_WAIT_FOR_CHANGE_PROMPT_VISIBLE,
+    )
+
+
+def _wait_tool(settings: ReadTerminalSettings) -> Tool:
+    if not settings.visible_only:
+        return WAIT_TOOL
+    return replace(
+        WAIT_TOOL,
+        description=_VISIBLE_WAIT_DESCRIPTION,
+        parameters=_without_lines(WAIT_TOOL.parameters),
+        prompt=_WAIT_PROMPT_VISIBLE,
     )
 
 
@@ -636,9 +742,11 @@ def terminal_tools(
     wait_for_change_settings = options.get(
         "wait_for_change", ReadTerminalSettings()
     )
+    wait_settings = options.get("wait", ReadTerminalSettings())
     read_tool = _read_tool(read_settings)
     wait_for_tool = _wait_for_tool(wait_for_settings)
     wait_for_change_tool = _wait_for_change_tool(wait_for_change_settings)
+    wait_tool = _wait_tool(wait_settings)
 
     def lines_for(
         args: dict[str, Any], settings: ReadTerminalSettings
@@ -749,6 +857,27 @@ def terminal_tools(
         )
         return view.observe(text, status)
 
+    async def wait(args: dict[str, Any]) -> str:
+        seconds = as_float(args.get("seconds"), 0.0)
+        if seconds < 0:
+            raise ValueError("'seconds' must be >= 0")
+        await view.sleep(seconds)
+        text = view.snapshot(
+            lines_for(args, wait_settings),
+            visible_only=wait_settings.visible_only,
+        )
+        return view.observe(text, "waited")
+
+    async def sleep(args: dict[str, Any]) -> str:
+        seconds = as_float(args.get("seconds"), 0.0)
+        if seconds < 0:
+            raise ValueError("'seconds' must be >= 0")
+        waited = await view.sleep(seconds)
+        return Observation(
+            "已等待 {:.2f} 秒。要看画面用 read_terminal。".format(waited),
+            {"seconds": round(waited, 3)},
+        )
+
     async def resize_terminal(args: dict[str, Any]) -> str:
         rows = as_int(args.get("rows"), 0)
         columns = as_int(args.get("columns"), 0)
@@ -771,6 +900,8 @@ def terminal_tools(
         AgentTool(read_tool, read_terminal),
         AgentTool(wait_for_tool, wait_for),
         AgentTool(wait_for_change_tool, wait_for_change),
+        AgentTool(wait_tool, wait),
+        AgentTool(SLEEP_TOOL, sleep),
         AgentTool(SEND_TEXT_TOOL, send_text),
         AgentTool(SEND_KEYS_TOOL, send_keys),
         AgentTool(SEND_RAW_TOOL, send_raw),

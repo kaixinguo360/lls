@@ -1616,6 +1616,8 @@ def test_agent_tool_schemas_are_strict_and_required() -> None:
         "read_terminal",
         "wait_for",
         "wait_for_change",
+        "sleep",
+        "wait",
         "resize_terminal",
         "send_text",
         "send_keys",
